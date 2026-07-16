@@ -3,7 +3,6 @@ package com.henry.wordcount
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import com.chaquo.python.android.PythonThread
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -268,8 +267,7 @@ private fun addFiles(
                 // 文档类：批量交给 Python 统计
                 if (docPaths.isNotEmpty()) {
                     var raw: Any? = null
-                    val t = PythonThread { raw = PythonEngine.countFiles(docPaths) }
-                    t.start(); t.join()
+                    raw = PythonEngine.countFiles(docPaths)
                     (raw as? List<*>)?.forEachIndexed { i, item ->
                         val m = item as? Map<*, *>
                         val ok = m?.get("ok") as? Boolean ?: false
@@ -287,8 +285,7 @@ private fun addFiles(
                 imageFiles.forEachIndexed { i, f ->
                     val text = OcrEngine.recognize(context, f)
                     var resMap: Map<*, *>? = null
-                    val t = PythonThread { resMap = PythonEngine.countText(text, f.name) }
-                    t.start(); t.join()
+                    resMap = PythonEngine.countText(text, f.name)
                     val fr = toFileResult(resMap, f.absolutePath)
                     entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                 }
@@ -356,8 +353,7 @@ private fun exportUnreliable(
             val out = File(context.getExternalFilesDir(null), "无法准确统计内容_${System.currentTimeMillis()}.pdf")
             var res: String? = null
             withContext(Dispatchers.IO) {
-                val t = PythonThread { res = PythonEngine.buildExportPdf(filesInfo, out.absolutePath) }
-                t.start(); t.join()
+                res = PythonEngine.buildExportPdf(filesInfo, out.absolutePath)
             }
             if (res != null) {
                 val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", out)
