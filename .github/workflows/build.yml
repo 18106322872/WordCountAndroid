@@ -65,12 +65,21 @@ jobs:
           path: app/build/outputs/apk/debug/wordcount.apk
 
       # 重发前清理旧 release 与 tag，避免 app-debug.apk 残留、保证只留 wordcount.apk
+      # 用 GitHub REST API（curl）可靠删除，不依赖 gh CLI
       - name: Remove stale release/tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete apk --yes || true
-          gh api -X DELETE repos/18106322872/WordCountAndroid/git/refs/tags/apk || true
+          REL=$(curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/18106322872/WordCountAndroid/releases/tags/apk)
+          RID=$(printf '%s' "$REL" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
+          if [ -n "$RID" ]; then
+            echo "deleting release id=$RID"
+            curl -s -X DELETE -H "Authorization: Bearer $GH_TOKEN" \
+              https://api.github.com/repos/18106322872/WordCountAndroid/releases/$RID
+          fi
+          curl -s -X DELETE -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/18106322872/WordCountAndroid/git/refs/tags/apk || true
 
       - name: Create GitHub Release (APK only)
         uses: softprops/action-gh-release@v2
