@@ -17,9 +17,9 @@ import java.util.zip.ZipInputStream
  */
 object ModelDownloader {
 
-    // TODO: 把 Henry/WordCountAndroid 改成你自己的仓库名；ocr_models.zip 由 CI 自动发布
+    // ocr_models.zip 由 CI 每次推送自动发布到固定 tag `models`（见 .github/workflows/build.yml）
     const val MODEL_URL =
-        "https://github.com/Henry/WordCountAndroid/releases/download/models/ocr_models.zip"
+        "https://github.com/18106322872/WordCountAndroid/releases/download/models/ocr_models.zip"
 
     private fun modelReady(dir: File): Boolean {
         val det = File(dir, "det")
