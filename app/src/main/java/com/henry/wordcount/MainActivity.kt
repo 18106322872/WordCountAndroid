@@ -242,7 +242,7 @@ private val IMAGE_EXTS = setOf("png", "jpg", "jpeg", "bmp", "tif", "tiff", "gif"
 
 private fun addFiles(
     context: android.content.Context,
-    scope: kotlinx.coroutines.Coroutine.Scope,
+    scope: kotlinx.coroutines.CoroutineScope,
     entries: androidx.compose.runtime.snapshots.SnapshotStateList<FileEntry>,
     busyRef: () -> Boolean,
     busySet: (Boolean) -> Unit,
