@@ -3,6 +3,7 @@ package com.henry.wordcount
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import com.chaquo.python.android.PythonThread
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -268,7 +269,7 @@ private fun addFiles(
                     var raw: Any? = null
                     val t = PythonThread { raw = PythonEngine.countFiles(docPaths) }
                     t.start(); t.join()
-                    raw?.forEachIndexed { i, item ->
+                    (raw as? List<*>)?.forEachIndexed { i, item ->
                         val m = item as? Map<*, *>
                         val ok = m?.get("ok") as? Boolean ?: false
                         val name = m?.get("name") as? String ?: docNames.getOrNull(i) ?: "文件"
