@@ -56,10 +56,21 @@ jobs:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
         run: gradle assembleDebug
 
+      - name: Rename APK to wordcount.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/wordcount.apk
+
       - uses: actions/upload-artifact@v4
         with:
-          name: app-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: wordcount-apk
+          path: app/build/outputs/apk/debug/wordcount.apk
+
+      # 重发前清理旧 release 与 tag，避免 app-debug.apk 残留、保证只留 wordcount.apk
+      - name: Remove stale release/tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete apk --yes || true
+          gh api -X DELETE repos/18106322872/WordCountAndroid/git/refs/tags/apk || true
 
       - name: Create GitHub Release (APK only)
         uses: softprops/action-gh-release@v2
@@ -68,6 +79,6 @@ jobs:
           tag_name: apk
           name: WordCount APK (latest)
           make_latest: true
-          files: app/build/outputs/apk/debug/app-debug.apk
+          files: app/build/outputs/apk/debug/wordcount.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
