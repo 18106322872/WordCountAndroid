@@ -109,7 +109,6 @@ fun WordCountApp(initialUris: List<Uri>) {
 
     val entries = remember { mutableStateListOf<FileEntry>() }
     var busy by remember { mutableStateOf(false) }
-    var modelProgress by remember { mutableStateOf<Int?>(null) }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         if (uris.isNotEmpty()) addFiles(context, scope, entries, busyRef = { busy }, busySet = { busy = it }, uris)
@@ -118,8 +117,7 @@ fun WordCountApp(initialUris: List<Uri>) {
     // 处理启动时从千牛/微信分享进来的文件
     androidx.compose.runtime.LaunchedEffect(Unit) {
         if (initialUris.isNotEmpty()) {
-            addFiles(context, scope, entries, busyRef = { busy }, busySet = { busy = it }, initialUris,
-                onModel = { modelProgress = it }, onDone = { modelProgress = null })
+            addFiles(context, scope, entries, busyRef = { busy }, busySet = { busy = it }, initialUris)
         }
     }
 
@@ -170,9 +168,6 @@ fun WordCountApp(initialUris: List<Uri>) {
                 Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                if (busy && modelProgress != null) {
-                    item { LinearProgressIndicator({ modelProgress!! / 100f }, Modifier.fillMaxWidth()) }
-                }
                 items(entries, key = { it.id }) { entry ->
                     FileCard(entry,
                         onToggle = { e -> val i = entries.indexOf(e); if (i >= 0) entries[i] = e.copy(selected = !e.selected) })
@@ -242,45 +237,58 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): File {
     return out
 }
 
+private val IMAGE_EXTS = setOf("png", "jpg", "jpeg", "bmp", "tif", "tiff", "gif", "webp")
+
 private fun addFiles(
     context: android.content.Context,
-    scope: kotlinx.coroutines.CoroutineScope,
+    scope: kotlinx.coroutines.Coroutine.Scope,
     entries: androidx.compose.runtime.snapshots.SnapshotStateList<FileEntry>,
     busyRef: () -> Boolean,
     busySet: (Boolean) -> Unit,
-    uris: List<Uri>,
-    onModel: (Int) -> Unit = {},
-    onDone: () -> Unit = {}
+    uris: List<Uri>
 ) {
     if (busyRef()) return
     scope.launch(Dispatchers.Main) {
         busySet(true)
         try {
-            val ocrDir = try {
-                ModelDownloader.ensureModel(context, onProgress = onModel)
-            } catch (e: Exception) {
-                null // 模型下载失败：文本类文件仍可统计
-            }
-            onDone()
-            PythonEngine.start(context, ocrDir)
+            // 图片 OCR 在 Kotlin 层 Tesseract 完成，无需下载模型；直接启动 Python 即可
+            PythonEngine.start(context)
             val files = uris.map { copyUriToCache(context, it) }
-            val paths = files.map { it.absolutePath }
-            // Chaquopy 必须在 PythonThread 上调用 Python，避免阻塞/破坏 UI 线程
-            var raw: Any? = null
-            withContext(Dispatchers.IO) {
-                val t = PythonThread { raw = PythonEngine.countFiles(paths) }
-                t.start(); t.join()
+            val docPaths = mutableListOf<String>()
+            val docNames = mutableListOf<String>()
+            val imageFiles = mutableListOf<File>()
+            for (f in files) {
+                if (f.extension.lowercase() in IMAGE_EXTS) imageFiles.add(f)
+                else { docPaths.add(f.absolutePath); docNames.add(f.name) }
             }
-            raw?.forEachIndexed { i, item ->
-                val m = item as? Map<*, *>
-                val ok = m?.get("ok") as? Boolean ?: false
-                val name = m?.get("name") as? String ?: files.getOrNull(i)?.name ?: "文件"
-                if (ok) {
-                    val resMap = m?.get("result") as? Map<*, *>
-                    val fr = toFileResult(resMap, files[i].absolutePath)
-                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_$i", displayName = name, cachePath = files[i].absolutePath, result = fr, rawResult = resMap))
-                } else {
-                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_$i", displayName = name, cachePath = files[i].absolutePath, error = m?.get("error") as? String))
+
+            withContext(Dispatchers.IO) {
+                // 文档类：批量交给 Python 统计
+                if (docPaths.isNotEmpty()) {
+                    var raw: Any? = null
+                    val t = PythonThread { raw = PythonEngine.countFiles(docPaths) }
+                    t.start(); t.join()
+                    raw?.forEachIndexed { i, item ->
+                        val m = item as? Map<*, *>
+                        val ok = m?.get("ok") as? Boolean ?: false
+                        val name = m?.get("name") as? String ?: docNames.getOrNull(i) ?: "文件"
+                        if (ok) {
+                            val resMap = m?.get("result") as? Map<*, *>
+                            val fr = toFileResult(resMap, docPaths[i])
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_d", displayName = name, cachePath = docPaths[i], result = fr, rawResult = resMap))
+                        } else {
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_d", displayName = name, cachePath = docPaths[i], error = m?.get("error") as? String))
+                        }
+                    }
+                }
+                // 图片类：Kotlin Tesseract OCR -> 识别文字交给 Python 计数
+                imageFiles.forEachIndexed { i, f ->
+                    val text = OcrEngine.recognize(context, f)
+                    var resMap: Map<*, *>? = null
+                    val t = PythonThread { resMap = PythonEngine.countText(text, f.name) }
+                    t.start(); t.join()
+                    val fr = toFileResult(resMap, f.absolutePath)
+                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                 }
             }
         } catch (e: Exception) {
