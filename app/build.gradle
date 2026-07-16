@@ -86,6 +86,9 @@ dependencies {
     implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.8.0'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
     implementation 'androidx.documentfile:documentfile:1.0.1'
+    // Manifest 层主题(Theme.Material3.DayNight.NoActionBar / colorSurface attr) 由 MDC 提供；
+    // Compose 内仍用 androidx.compose.material3 的 MaterialTheme。两者共存、互不冲突。
+    implementation 'com.google.android.material:material:1.12.0'
     // 图片 OCR：Tesseract 安卓移植（离线、无需 GMS/账号），模型由 CI 放入 assets
     implementation 'com.rmtheis:tess-two:9.1.0'
 }
