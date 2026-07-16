@@ -23,7 +23,7 @@ android {
         // Chaquopy 17：内嵌 Python + 解析库；OCR 模型在构建时被剥离，运行时从 GitHub Release 下载
         chaquopy {
             defaultConfig {
-                version '3.11'
+                version '3.10'
                 pip {
                     install 'pdfminer.six'
                     install 'python-docx'
@@ -33,7 +33,7 @@ android {
                     install 'ezdxf'
                     install 'olefile'
                     install 'rapidocr_onnxruntime'
-                    install 'opencv-python'
+                    install 'opencv-python-headless'
                     install 'onnxruntime'
                     install 'py7zr'
                     // 注：pymupdf(fitz) 在 Chaquopy 无 Android wheel，故不引入；
