@@ -2,6 +2,7 @@ package com.henry.wordcount
 
 import android.content.Context
 import com.chaquo.python.Python
+import com.chaquo.python.Py
 import com.chaquo.python.android.AndroidPlatform
 
 /**
@@ -41,6 +42,6 @@ object PythonEngine {
         val py = Python.getInstance()
         val mod = py.getModule("wordcount")
         val result = mod.callAttr("build_export_pdf", filesInfo, outPath)
-        return if (result.isNone) null else result.toString()
+        return if (result == Py.None) null else result.toString()
     }
 }
