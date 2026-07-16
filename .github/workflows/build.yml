@@ -6,55 +6,10 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# 单任务：编译 APK。图片 OCR 用 Kotlin 层 Tesseract(tess-two)，
+# 中文模型 chi_sim.traineddata 在 CI 内下载进 assets，随 APK 内置，完全离线。
 jobs:
-  # ---- 打包 OCR 模型（折中方案：模型不放进 APK，运行时下载）----
-  model:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install rapidocr and package models
-        run: |
-          pip install rapidocr_onnxruntime
-          python - <<'PY'
-          import os, glob, zipfile, shutil, site
-          base = site.getsitepackages()[0]
-          out = "ocr_models"
-          if os.path.exists(out):
-              shutil.rmtree(out)
-          os.makedirs(out)
-          mapping = {"det": "det", "rec": "rec", "cls": "cls"}
-          count = 0
-          for p in glob.glob(os.path.join(base, "rapidocr_onnxruntime", "**", "*.onnx"), recursive=True):
-              name = os.path.basename(p).lower()
-              folder = None
-              for k in mapping:
-                  if k in name:
-                      folder = mapping[k]
-                      break
-              if folder is None:
-                  continue
-              dest = os.path.join(out, folder, os.path.basename(p))
-              os.makedirs(os.path.dirname(dest), exist_ok=True)
-              shutil.copy(p, dest)
-              count += 1
-          print("packaged", count, "model files")
-          assert count >= 3, "未找到 OCR 模型文件"
-          with zipfile.ZipFile("ocr_models.zip", "w", zipfile.ZIP_DEFLATED) as z:
-              for f in glob.glob(out + "/**/*", recursive=True):
-                  if os.path.isfile(f):
-                      z.write(f, os.path.relpath(f, out))
-          print("ocr_models.zip created")
-          PY
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ocr_models
-          path: ocr_models.zip
-
-  # ---- 编译 APK（无需本地 Android Studio）----
   apk:
-    needs: model
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -84,30 +39,30 @@ jobs:
         with:
           gradle-version: 8.9
 
+      - name: Download Tesseract chi_sim traineddata into assets
+        run: |
+          mkdir -p app/src/main/assets/tessdata
+          curl -L -o app/src/main/assets/tessdata/chi_sim.traineddata \
+            https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/chi_sim.traineddata
+          ls -lh app/src/main/assets/tessdata/
+
       - name: Build debug APK
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
         run: gradle assembleDebug
-
-      - name: Download OCR model zip
-        uses: actions/download-artifact@v4
-        with:
-          name: ocr_models
-          path: .
 
       - uses: actions/upload-artifact@v4
         with:
           name: app-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Create GitHub Release (APK + model)
+      - name: Create GitHub Release (APK only)
         uses: softprops/action-gh-release@v2
+        if: success()
         with:
-          tag_name: models
-          name: OCR Models & APK (latest)
+          tag_name: apk
+          name: WordCount APK (latest)
           overwrite: true
-          files: |
-            app/build/outputs/apk/debug/app-debug.apk
-            ocr_models.zip
+          files: app/build/outputs/apk/debug/app-debug.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
