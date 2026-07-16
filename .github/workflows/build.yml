@@ -8,6 +8,11 @@ on:
 
 # 单任务：编译 APK。图片 OCR 用 Kotlin 层 Tesseract(tess-two)，
 # 中文模型 chi_sim.traineddata 在 CI 内下载进 assets，随 APK 内置，完全离线。
+
+# 允许默认 GITHUB_TOKEN 创建 Release（否则发布 APK 会 403）
+permissions:
+  contents: write
+
 jobs:
   apk:
     runs-on: ubuntu-latest
@@ -62,7 +67,7 @@ jobs:
         with:
           tag_name: apk
           name: WordCount APK (latest)
-          overwrite: true
+          make_latest: true
           files: app/build/outputs/apk/debug/app-debug.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
