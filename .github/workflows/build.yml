@@ -74,10 +74,10 @@ jobs:
       - name: Accept SDK licenses
         run: yes | sdkmanager --licenses || true
 
-      - name: Set up Python 3.11 (Chaquopy buildPython)
+      - name: Set up Python 3.10 (Chaquopy buildPython)
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.10'
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
