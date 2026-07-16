@@ -1687,7 +1687,13 @@ _OCR_ENGINE = None
 def _get_ocr():
     global _OCR_ENGINE
     if _OCR_ENGINE is None:
-        from rapidocr_onnxruntime import RapidOCR
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+        except Exception as e:
+            raise RuntimeError(
+                "OCR 组件未安装（缺失 opencv-python / onnxruntime / rapidocr_onnxruntime）。"
+                "请确认构建时已在 chaquopy 的 pip 中声明这些依赖。"
+            )
         d = os.environ.get("WORDCOUNT_OCR_DIR")
         if d and os.path.isdir(d):
             # 移动端：OCR 模型由 App 从 GitHub Release 下载后放在此目录
