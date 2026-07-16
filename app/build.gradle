@@ -20,7 +20,7 @@ android {
             abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64'
         }
 
-        // Chaquopy 17：内嵌 Python + 解析库；OCR 模型在构建时被剥离，运行时从 GitHub Release 下载
+        // Chaquopy 17：内嵌 Python + 解析库；图片 OCR 交由 Kotlin 层 Tesseract 完成（模型随 APK 内置，离线可用）
         chaquopy {
             defaultConfig {
                 version '3.10'
@@ -32,12 +32,9 @@ android {
                     install 'python-pptx'
                     install 'ezdxf'
                     install 'olefile'
-                    install 'rapidocr_onnxruntime'
-                    install 'opencv-python-headless'
-                    install 'onnxruntime'
-                    install 'py7zr'
                     // 注：pymupdf(fitz) 在 Chaquopy 无 Android wheel，故不引入；
                     // 引擎已对 fitz 缺失做降级（PDF 文字层/图片OCR/.ai/导出PDF 相应降级）。
+                    // 注：图片 OCR 改在 Kotlin 层用 Tesseract(tess-two) 完成，无需 Python 端 onnxruntime。
                 }
             }
         }
@@ -89,19 +86,8 @@ dependencies {
     implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.8.0'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
     implementation 'androidx.documentfile:documentfile:1.0.1'
+    // 图片 OCR：Tesseract 安卓移植（离线、无需 GMS/账号），模型由 CI 放入 assets
+    implementation 'com.rmtheis:tess-two:9.1.0'
 }
 
-// ---- 折中方案核心：构建时剥离 rapidocr 内置 OCR 模型，运行时由 App 下载 ----
-android.applicationVariants.all { variant ->
-    def cap = variant.name.substring(0, 1).toUpperCase() + variant.name.substring(1)
-    tasks.named("merge${cap}Assets").configure {
-        doLast {
-            def tree = fileTree(buildDir) { include '**/rapidocr_onnxruntime/**/*.onnx' }
-            def removed = 0
-            tree.files.each { f ->
-                if (f.isFile) { f.delete(); removed++ }
-            }
-            println "WordCount: stripped ${removed} OCR model file(s) from APK (downloaded at runtime)"
-        }
-    }
-}
+// 图片 OCR 模型(chi_sim.traineddata)由 CI 下载进 app/src/main/assets/tessdata/，随 APK 内置。
