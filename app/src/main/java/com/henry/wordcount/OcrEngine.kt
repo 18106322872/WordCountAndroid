@@ -22,7 +22,7 @@ object OcrEngine {
         ensureTrainedData(context)
         val api = TessBaseAPI()
         if (!api.init(baseDir!!.absolutePath, LANG)) {
-            api.recycle()
+            api.end()
             return ""
         }
         try {
@@ -32,7 +32,7 @@ object OcrEngine {
             bmp.recycle()
             return text
         } finally {
-            api.recycle()
+            api.end()
         }
     }
 
