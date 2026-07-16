@@ -2457,6 +2457,22 @@ def count_files(paths, sheet_filter="all", with_notes=False):
     return out
 
 
+def count_text(text, name="图片"):
+    """移动端图片 OCR 在 Kotlin 层用 Tesseract 完成，识别出的文字传回此函数计数。
+
+    返回结构同 count_file，便于 Kotlin 层统一解析（含 stats/meta）。
+    """
+    items = [ln.strip() for ln in (text or "").split("\n") if ln.strip()]
+    stats = count_items(items)
+    meta = {"ext": ".image", "image_ocr": True}
+    return {
+        "name": name, "ext": ".image", "is_archive": False,
+        "stats": stats, "meta": meta,
+        "sheets": None, "pages": None, "pages_reason": "图片(已OCR识别)",
+        "img_pages": None, "image_only": False,
+    }
+
+
 def build_export_pdf(files_info, out_path, work_dir=None, converter=None):
     """导出『无法准确统计内容』PDF。
 
