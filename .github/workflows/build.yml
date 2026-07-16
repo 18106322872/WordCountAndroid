@@ -36,6 +36,7 @@ jobs:
               if folder is None:
                   continue
               dest = os.path.join(out, folder, os.path.basename(p))
+              os.makedirs(os.path.dirname(dest), exist_ok=True)
               shutil.copy(p, dest)
               count += 1
           print("packaged", count, "model files")
