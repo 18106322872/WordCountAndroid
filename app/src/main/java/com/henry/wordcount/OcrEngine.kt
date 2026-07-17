@@ -1,1 +1,75 @@
-cGFja2FnZSBjb20uaGVucnkud29yZGNvdW50CgppbXBvcnQgYW5kcm9pZC5jb250ZW50LkNvbnRleHQKaW1wb3J0IGFuZHJvaWQuZ3JhcGhpY3MuQml0bWFwCmltcG9ydCBhbmRyb2lkLmdyYXBoaWNzLkJpdG1hcEZhY3RvcnkKaW1wb3J0IGNvbS5nb29nbGVjb2RlLnRlc3NlcmFjdC5hbmRyb2lkLlRlc3NCYXNlQVBJCmltcG9ydCBqYXZhLmlvLkZpbGUKaW1wb3J0IGphdmEuaW8uRmlsZU91dHB1dFN0cmVhbQoKLyoqCiAqIOWGheW1jCBUZXNzZXJhY3QgT0NS77yIdGVzcy10d2/vvInvvJrlrozlhajnprvnur/jgIHml6DpnIDku7vkvZXotKblj7cv5pyN5Yqh5Zmo77yMCiAqIOmAgumFjeaXoCBHTVMg55qE5Y2O5Li65omL5py644CC5Lit5paH5qih5Z6LIGNoaV9zaW0udHJhaW5lZGRhdGEg55SxIENJIOaJk+WMhei/myBBUEsg55qEIGFzc2V0c++8jAogKiDpppbmrKHov5DooYzml7bmi7fotJ3liLDlupTnlKjnp4HmnInnm67lvZXvvJvkuYvlkI7msLjkuYXnprvnur/kvb/nlKjjgIIKICovCm9iamVjdCBPY3JFbmdpbmUgewoKICAgIHByaXZhdGUgY29uc3QgdmFsIExBTkcgPSAiY2hpX3NpbSIKICAgIHByaXZhdGUgY29uc3QgdmFsIFRFU1NfU1VCRElSID0gInRlc3NkYXRhIgogICAgcHJpdmF0ZSBjb25zdCB2YWwgTUFYX0RJTSA9IDE2MDAgLy8g6Kej56CB5pe26ZmQ5Yi25pyA5aSn6L6577yM6YG/5YWN6LaF5aSn5Zu+6Kem5Y+RIFRlc3NlcmFjdCDljp/nlJ/lsYIgT09NL+W0qea6gwoKICAgIHByaXZhdGUgdmFyIGJhc2VEaXI6IEZpbGU/ID0gbnVsbAoKICAgIC8qKiDor4bliKvlm77niYfmlofku7bvvIzov5Tlm57or4bliKvlh7rnmoTmloflrZfvvIjlpLHotKUv5peg5paH5a2X6L+U5Zue56m65Liy77yJ44CCICovCiAgICBmdW4gcmVjb2duaXplKGNvbnRleHQ6IENvbnRleHQsIGltYWdlRmlsZTogRmlsZSk6IFN0cmluZyB7CiAgICAgICAgLy8g5YmN572u77ya56Gu5L+d6K6t57uD5pWw5o2u5bCx5L2N77yb6Iul5ou36LSd5aSx6LSl5YiZIGJhc2VEaXIg5Li6IG51bGzvvIznm7TmjqXkvJjpm4XpmY3nuqcKICAgICAgICBlbnN1cmVUcmFpbmVkRGF0YShjb250ZXh0KQogICAgICAgIHZhbCBiYXNlID0gYmFzZURpciA/OiByZXR1cm4gIiIKCiAgICAgICAgdmFsIGFwaSA9IFRlc3NCYXNlQVBJKCkKICAgICAgICBpZiAoIWFwaS5pbml0KGJhc2UuYWJzb2x1dGVQYXRoLCBMQU5HKSkgewogICAgICAgICAgICBhcGkuZW5kKCkKICAgICAgICAgICAgcmV0dXJuICIiCiAgICAgICAgfQogICAgICAgIHZhciBibXA6IEJpdG1hcD8gPSBudWxsCiAgICAgICAgdHJ5IHsKICAgICAgICAgICAgLy8g5YWI5Y+q6K+76L6555WM77yM5oyJ5bC65a+46YeH5qC357yp5bCP77yM6YG/5YWN6LaF5aSn5L2N5Zu+55u05o6l5ZaC57uZIFRlc3NlcmFjdCDljp/nlJ/lsYLlr7zoh7TltKnmuoMKICAgICAgICAgICAgdmFsIGJvdW5kcyA9IEJpdG1hcEZhY3RvcnkuT3B0aW9ucygpLmFwcGx5IHsgaW5KdXN0RGVjb2RlQm91bmRzID0gdHJ1ZSB9CiAgICAgICAgICAgIEJpdG1hcEZhY3RvcnkuZGVjb2RlRmlsZShpbWFnZUZpbGUuYWJzb2x1dGVQYXRoLCBib3VuZHMpCiAgICAgICAgICAgIHZhbCByYXdXID0gaWYgKGJvdW5kcy5vdXRXaWR0aCA+IDApIGJvdW5kcy5vdXRXaWR0aCBlbHNlIDEKICAgICAgICAgICAgdmFsIHJhd0ggPSBpZiAoYm91bmRzLm91dEhlaWdodCA+IDApIGJvdW5kcy5vdXRIZWlnaHQgZWxzZSAxCiAgICAgICAgICAgIHZhbCBzYW1wbGUgPSBtYXhPZihyYXdXLCByYXdIKSAvIE1BWF9ESU0KICAgICAgICAgICAgdmFsIGluU2FtcGxlID0gaWYgKHNhbXBsZSA+IDEpIHNhbXBsZS5jb2VyY2VBdE1vc3QoOCkgZWxzZSAxCgogICAgICAgICAgICB2YWwgb3B0cyA9IEJpdG1hcEZhY3RvcnkuT3B0aW9ucygpLmFwcGx5IHsgaW5TYW1wbGVTaXplID0gaW5TYW1wbGUgfQogICAgICAgICAgICBibXAgPSBCaXRtYXBGYWN0b3J5LmRlY29kZUZpbGUoaW1hZ2VGaWxlLmFic29sdXRlUGF0aCwgb3B0cykgPzogcmV0dXJuICIiCiAgICAgICAgICAgIGFwaS5zZXRJbWFnZShibXApCiAgICAgICAgICAgIHZhbCB0ZXh0ID0gYXBpLnV0RjhUZXh0ID86ICIiCiAgICAgICAgICAgIHJldHVybiB0ZXh0CiAgICAgICAgfSBmaW5hbGx5IHsKICAgICAgICAgICAgYm1wPy5yZWN5Y2xlKCkKICAgICAgICAgICAgYXBpLmVuZCgpCiAgICAgICAgfQogICAgfQoKICAgIEBTeW5jaHJvbml6ZWQKICAgIHByaXZhdGUgZnVuIGVuc3VyZVRyYWluZWREYXRhKGNvbnRleHQ6IENvbnRleHQpIHsKICAgICAgICB2YWwgZXhpc3RpbmcgPSBiYXNlRGlyPy5sZXQgeyBGaWxlKGl0LCBURVNTX1NVQkRJUikgfQogICAgICAgICAgICA/Lmxpc3RGaWxlcygpPy5hbnkgeyBpdC5uYW1lID09ICJjaGlfc2ltLnRyYWluZWRkYXRhIiB9ID09IHRydWUKICAgICAgICBpZiAoZXhpc3RpbmcpIHJldHVybgogICAgICAgIGJhc2VEaXIgPSBGaWxlKGNvbnRleHQuZmlsZXNEaXIsICJ0ZXNzZXJhY3QiKQogICAgICAgIHZhbCB0ZCA9IEZpbGUoYmFzZURpciwgVEVTU19TVUJESVIpCiAgICAgICAgdGQubWtkaXJzKCkKICAgICAgICB2YWwgZGVzdCA9IEZpbGUodGQsICJjaGlfc2ltLnRyYWluZWRkYXRhIikKICAgICAgICBpZiAoIWRlc3QuZXhpc3RzKCkpIHsKICAgICAgICAgICAgdHJ5IHsKICAgICAgICAgICAgICAgIGNvbnRleHQuYXNzZXRzLm9wZW4oIiRURVNTX1NVQkRJUi9jaGlfc2ltLnRyYWluZWRkYXRhIikudXNlIHsgaW5wdXQgLT4KICAgICAgICAgICAgICAgICAgICBGaWxlT3V0cHV0U3RyZWFtKGRlc3QpLnVzZSB7IG91dCAtPiBpbnB1dC5jb3B5VG8ob3V0KSB9CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgIH0gY2F0Y2ggKGU6IFRocm93YWJsZSkgewogICAgICAgICAgICAgICAgLy8g6K6t57uD5pWw5o2u57y65aSx5YiZ5pS+5byDIE9DUu+8jOS6pOeUseiwg+eUqOaWuemZjee6p++8jOS4jeW0qea6gwogICAgICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgICAgIH0KICAgICAgICB9CiAgICB9Cn0K
+package com.henry.wordcount
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import com.googlecode.tesseract.android.TessBaseAPI
+import java.io.File
+import java.io.FileOutputStream
+
+/**
+ * 内嵌 Tesseract OCR（tess-two）：完全离线、无需任何账号/服务器，
+ * 适配无 GMS 的华为手机。中文模型 chi_sim.traineddata 由 CI 打包进 APK 的 assets，
+ * 首次运行时拷贝到应用私有目录；之后永久离线使用。
+ */
+object OcrEngine {
+
+    private const val LANG = "chi_sim"
+    private const val TESS_SUBDIR = "tessdata"
+    private const val MAX_DIM = 1600 // 解码时限制最大边，避免超大图触发 Tesseract 原生层 OOM/崩溃
+
+    private var baseDir: File? = null
+
+    /** 识别图片文件，返回识别出的文字（失败/无文字返回空串）。 */
+    fun recognize(context: Context, imageFile: File): String {
+        // 前置：确保训练数据就位；若拷贝失败则 baseDir 为 null，直接优雅降级
+        ensureTrainedData(context)
+        val base = baseDir ?: return ""
+
+        val api = TessBaseAPI()
+        if (!api.init(base.absolutePath, LANG)) {
+            api.end()
+            return ""
+        }
+        var bmp: Bitmap? = null
+        try {
+            // 先只读边界，按尺寸采样缩小，避免超大位图直接喂给 Tesseract 原生层导致崩溃
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(imageFile.absolutePath, bounds)
+            val rawW = if (bounds.outWidth > 0) bounds.outWidth else 1
+            val rawH = if (bounds.outHeight > 0) bounds.outHeight else 1
+            val sample = maxOf(rawW, rawH) / MAX_DIM
+            val inSample = if (sample > 1) sample.coerceAtMost(8) else 1
+
+            val opts = BitmapFactory.Options().apply { inSampleSize = inSample }
+            bmp = BitmapFactory.decodeFile(imageFile.absolutePath, opts) ?: return ""
+            api.setImage(bmp)
+            val text = api.utF8Text ?: ""
+            return text
+        } finally {
+            bmp?.recycle()
+            api.end()
+        }
+    }
+
+    @Synchronized
+    private fun ensureTrainedData(context: Context) {
+        val existing = baseDir?.let { File(it, TESS_SUBDIR) }
+            ?.listFiles()?.any { it.name == "chi_sim.traineddata" } == true
+        if (existing) return
+        baseDir = File(context.filesDir, "tesseract")
+        val td = File(baseDir, TESS_SUBDIR)
+        td.mkdirs()
+        val dest = File(td, "chi_sim.traineddata")
+        if (!dest.exists()) {
+            try {
+                context.assets.open("$TESS_SUBDIR/chi_sim.traineddata").use { input ->
+                    FileOutputStream(dest).use { out -> input.copyTo(out) }
+                }
+            } catch (e: Throwable) {
+                // 训练数据缺失则放弃 OCR，交由调用方降级，不崩溃
+                return
+            }
+        }
+    }
+}
