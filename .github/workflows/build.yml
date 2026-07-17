@@ -51,18 +51,23 @@ jobs:
             https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/chi_sim.traineddata
           ls -lh app/src/main/assets/tessdata/
 
-      - name: Build debug APK
+      - name: Clean & Build debug APK（强制 clean 避免构建缓存导致旧代码被打包）
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
-        run: gradle assembleDebug
+        run: |
+          gradle clean --no-daemon 2>&1 | tail -5
+          gradle assembleDebug --no-build-cache --no-daemon 2>&1 | tail -10
 
-      - name: Rename APK to Wordcount.apk
-        run: cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/Wordcount.apk
+      - name: Rename APK（WordCount-版本号格式）
+        run: |
+          VER=$(grep versionName app/build.gradle | head -1 | grep -oP "[\d.]+" || echo "1.0.9")
+          cp app/build/outputs/apk/debug/app-debug.apk "app/build/outputs/apk/debug/WordCount-${VER}.apk"
+          echo "APK: WordCount-${VER}.apk"
 
       - uses: actions/upload-artifact@v4
         with:
           name: wordcount-apk
-          path: app/build/outputs/apk/debug/Wordcount.apk
+          path: app/build/outputs/apk/debug/WordCount-*.apk
 
       # 重发前清理旧 release 与 tag，避免 app-debug.apk 残留、保证只留 wordcount.apk
       # 用 GitHub REST API（curl）可靠删除，不依赖 gh CLI
@@ -86,8 +91,8 @@ jobs:
         if: success()
         with:
           tag_name: apk
-          name: WordCount APK (latest)
+          name: WordCount v${VER} APK
           make_latest: true
-          files: app/build/outputs/apk/debug/Wordcount.apk
+          files: app/build/outputs/apk/debug/WordCount-*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

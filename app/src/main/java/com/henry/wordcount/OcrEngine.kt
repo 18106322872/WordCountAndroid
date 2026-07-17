@@ -26,6 +26,11 @@ object OcrEngine {
         ensureTrainedData(context)
         val base = baseDir ?: return ""
 
+        // 前置检查：文件必须存在且非空（防止空文件/损坏文件传入原生层）
+        if (!imageFile.exists() || imageFile.length() == 0) return ""
+        // 安全限制：单图不超 20MB（防止超大图导致 OOM）
+        if (imageFile.length() > 20 * 1024 * 1024) return ""
+
         val api = TessBaseAPI()
         if (!api.init(base.absolutePath, LANG)) {
             api.end()
@@ -43,9 +48,20 @@ object OcrEngine {
 
             val opts = BitmapFactory.Options().apply { inSampleSize = inSample }
             bmp = BitmapFactory.decodeFile(imageFile.absolutePath, opts) ?: return ""
+            // 二次安全：解码后仍限制尺寸（防御 inSampleSize 不够的极端宽高比图片）
+            if (bmp.width > MAX_DIM * 2 || bmp.height > MAX_DIM * 2) {
+                val scaled = Bitmap.createScaledBitmap(bmp, MAX_DIM, (MAX_DIM * bmp.height / bmp.width).coerceIn(1, MAX_DIM), true)
+                bmp.recycle()
+                bmp = scaled
+            }
             api.setImage(bmp)
             val text = api.utF8Text ?: ""
             return text
+        } catch (e: OutOfMemoryError) {
+            Runtime.getRuntime().gc()
+            return ""
+        } catch (e: Throwable) {
+            return ""
         } finally {
             bmp?.recycle()
             api.end()

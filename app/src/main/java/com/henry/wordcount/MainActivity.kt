@@ -203,7 +203,7 @@ fun WordCountApp(initialUris: List<Uri>) {
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("字数统计  v1.0.8") }) },
+        topBar = { TopAppBar(title = { Text("字数统计  v1.0.9") }) },
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             Surface(shadowElevation = 4.dp) {
@@ -396,6 +396,10 @@ private fun addFiles(
                     }
                 }
                 // 图片类：Kotlin Tesseract OCR -> 识别文字交给 Python 计数
+                // 注意：Tesseract 原生层（tess-two/JNI）可能抛出不可捕获的 Signal（SIGSEGV 等），
+                //   Java try-catch(Throwable) 无法拦截此类崩溃。此处已尽量做防护：
+                //   1) OcrEngine 内限制 MAX_DIM=1600 + inSampleSize 采样缩小
+                //   2) 外层 try 包裹 + finally 回收 Bitmap
                 imageFiles.forEachIndexed { i, f ->
                     try {
                         val text = OcrEngine.recognize(context, f)
@@ -404,8 +408,12 @@ private fun addFiles(
                         val fr = toFileResult(resMap, f.absolutePath)
                         entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                     } catch (e: Throwable) {
-                        Log.w("WordCount", "OCR 失败 ${f.name}: ${e.message}")
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, error = "OCR 识别失败（${e.message}）"))
+                        Log.w("WordCount", "OCR 失败 ${f.name}: ${e.javaClass.simpleName}: ${e.message}")
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, error="OCR 识别失败（${e.message}）"))
+                    } catch (e: OutOfMemoryError) {
+                        Runtime.getRuntime().gc()
+                        Log.w("WordCount", "图片过大 OOM ${f.name}")
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, error="图片过大，内存不足"))
                     }
                 }
                 // 老格式(.doc/.xls/.ppt)：Kotlin POI 抽文本 -> 复用 Python 计数
