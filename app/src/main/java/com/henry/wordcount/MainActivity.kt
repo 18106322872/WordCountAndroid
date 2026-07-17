@@ -176,24 +176,22 @@ fun WordCountApp(initialUris: List<Uri>) {
     val entries = remember { mutableStateListOf<FileEntry>() }
     var busy by remember { mutableStateOf(false) }
 
+    // SAF 文件选择器（先声明，因为 permLauncher 和 pickWithPermission 都要引用它）
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) addFiles(context, scope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris)
+    }
+
     // ---- 运行时存储权限请求（Android 6+/13+ 分级）----
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { granted ->
         val allOk = granted.values.all { it }
         if (allOk) {
-            // 权限已授予，直接弹选择器
             picker.launch(arrayOf("*/*"))
         } else {
             scope.launch { snackbar.showSnackbar("未授予存储权限，可能无法选取部分文件类型；仍可尝试选择") }
-            // 即使没全授，SAF 选择器仍然可以工作（只是部分 ROM 可能限制显示范围）
             picker.launch(arrayOf("*/*"))
         }
-    }
-
-    // SAF 文件选择器
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (uris.isNotEmpty()) addFiles(context, scope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris)
     }
 
     /** 带权限检查的选文件入口 */
