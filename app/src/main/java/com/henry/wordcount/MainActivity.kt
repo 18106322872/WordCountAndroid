@@ -176,45 +176,14 @@ fun WordCountApp(initialUris: List<Uri>) {
     val entries = remember { mutableStateListOf<FileEntry>() }
     var busy by remember { mutableStateOf(false) }
 
-    // SAF 文件选择器（先声明，因为 permLauncher 和 pickWithPermission 都要引用它）
+    // SAF 文件选择器（不需要任何存储权限——OpenMultipleDocuments 在所有 Android 版本上均无需授权即可使用）
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) addFiles(context, scope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris)
     }
 
-    // ---- 运行时存储权限请求（Android 6+/13+ 分级）----
-    val permLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { granted ->
-        val allOk = granted.values.all { it }
-        if (allOk) {
-            picker.launch(arrayOf("*/*"))
-        } else {
-            scope.launch { snackbar.showSnackbar("未授予存储权限，可能无法选取部分文件类型；仍可尝试选择") }
-            picker.launch(arrayOf("*/*"))
-        }
-    }
-
-    /** 带权限检查的选文件入口 */
+    /** 选文件入口：直接启动 SAF 选择器（无需任何运行时权限申请） */
     fun pickWithPermission() {
-        val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // Android 13+: 分级媒体权限
-            arrayOf(
-                android.Manifest.permission.READ_MEDIA_IMAGES,
-                android.Manifest.permission.READ_MEDIA_VIDEO,
-                android.Manifest.permission.READ_MEDIA_AUDIO,
-            )
-        } else {
-            // Android 6-12: 统一存储权限
-            arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE)
-        }
-        val missing = perms.filter {
-            ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
-        }
-        if (missing.isEmpty()) {
-            picker.launch(arrayOf("*/*"))
-        } else {
-            permLauncher.launch(perms)
-        }
+        picker.launch(arrayOf("*/*"))
     }
 
     // 处理启动时从千牛/微信分享进来的文件
