@@ -8,7 +8,15 @@ import org.json.JSONObject
 
 /**
  * Chaquopy 桥接层：v8 最小改动版。
- * Python 端返回 JSON 字符串，Kotlin 端用 JSONObject/JSONArray 解析。
+ * Python 端返回 JSON 字符串，Kotlin 端用 JSONObject/JSONArray 解析，
+ * 彻底绕开 Chaquopy 的 .toJava() 对嵌套结构（list/dict）转换失败的问题。
+ *
+ * 修复 RUN#68-#71 的 compileDebugKotlin 失败：
+ *   toNative() 返回 Any?，而 countFiles 声明为 : Any（非空）。
+ *   原写法 `return toNative(JSONArray(s))` 触发
+ *   "Type mismatch: inferred type is Any? but Any was expected"。
+ *   改为 `return toNative(JSONArray(s)) ?: emptyList<Any?>()` 保证非空，
+ *   同时保持 : Any 签名，MainActivity 的 `as? List<*>` 调用点无需改动。
  */
 object PythonEngine {
 
@@ -40,7 +48,8 @@ object PythonEngine {
         val py = Python.getInstance()
         val mod = py.getModule("wordcount")
         val s = mod.callAttr("count_files", paths).toString()
-        return toNative(JSONArray(s))
+        val native = toNative(JSONArray(s))
+        return native ?: emptyList<Any?>()
     }
 
     fun countText(text: String, name: String): Map<*, *> {
