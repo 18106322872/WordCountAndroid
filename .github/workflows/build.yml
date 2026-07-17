@@ -51,18 +51,28 @@ jobs:
             https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/chi_sim.traineddata
           ls -lh app/src/main/assets/tessdata/
 
-      - name: Clean & Build debug APK（强制 clean 避免构建缓存导致旧代码被打包）
+      # 版本号抽成独立步骤，后续步骤统一引用，避免作用域为空
+      - name: Read version
+        id: ver
+        run: |
+          VER=$(grep versionName app/build.gradle | head -1 | grep -oP "[\d.]+" || echo "1.0.9")
+          echo "VER=$VER" >> "$GITHUB_OUTPUT"
+          echo "版本号: $VER"
+
+      - name: Clean & Build debug APK（强制 clean + --no-build-cache，确保打包的是最新 Python/Kotlin 源码）
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
         run: |
-          gradle clean --no-daemon 2>&1 | tail -5
-          gradle assembleDebug --no-build-cache --no-daemon 2>&1 | tail -10
+          set -eo pipefail
+          gradle clean --no-daemon
+          gradle assembleDebug --no-build-cache --no-daemon
 
       - name: Rename APK（WordCount-版本号格式）
         run: |
-          VER=$(grep versionName app/build.gradle | head -1 | grep -oP "[\d.]+" || echo "1.0.9")
-          cp app/build/outputs/apk/debug/app-debug.apk "app/build/outputs/apk/debug/WordCount-${VER}.apk"
-          echo "APK: WordCount-${VER}.apk"
+          echo "APK 输出目录："
+          ls -lh app/build/outputs/apk/debug/ || true
+          cp app/build/outputs/apk/debug/app-debug.apk "app/build/outputs/apk/debug/WordCount-${{ steps.ver.outputs.VER }}.apk"
+          echo "APK: WordCount-${{ steps.ver.outputs.VER }}.apk"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -91,7 +101,7 @@ jobs:
         if: success()
         with:
           tag_name: apk
-          name: WordCount v${VER} APK
+          name: WordCount v${{ steps.ver.outputs.VER }} APK
           make_latest: true
           files: app/build/outputs/apk/debug/WordCount-*.apk
         env:
