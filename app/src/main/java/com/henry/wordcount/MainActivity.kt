@@ -1,31 +1,39 @@
 package com.henry.wordcount
 
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -49,6 +57,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.net.toUri
 import kotlinx.coroutines.CoroutineScope
@@ -70,7 +79,6 @@ class MainActivity : ComponentActivity() {
                     ?.forEach { uris.add(it) }
             }
             Intent.ACTION_VIEW -> {
-                // 千牛/微信/文件管理器「用其他应用打开」选了本应用：文件以 content:// uri 传入
                 intent.data?.let { uris.add(it) }
             }
         }
@@ -103,8 +111,50 @@ data class FileEntry(
     var selected: Boolean = true,
     val result: FileResult? = null,
     val error: String? = null,
-    val rawResult: Map<*, *>? = null,   // 供导出使用（含 meta）
+    val rawResult: Map<*, *>? = null,
 )
+
+/** 从 URI 推断文件扩展名（优先 filename，其次 MIME type） */
+private fun guessExt(context: android.content.Context, uri: Uri): String {
+    // 1) 从 URI 的 display name 取扩展名
+    val name = androidx.documentfile.provider.DocumentFile.fromSingleUri(context, uri)?.name
+    if (!name.isNullOrBlank()) {
+        val dotIdx = name.lastIndexOf('.')
+        if (dotIdx > 0) return name.substring(dotIdx).lowercase()
+    }
+    // 2) 从 ContentResolver 的 MIME type 反推
+    try {
+        val mime = context.contentResolver.getType(uri)
+        if (!mime.isNullOrBlank()) {
+            return when {
+                mime.startsWith("image/") -> {
+                    when (mime) {"image/png"->".png","image/jpeg"->".jpg","image/gif"->".gif",
+                        "image/webp"->".webp","image/bmp"->".bmp",else->".png"}
+                }
+                mime == "application/pdf" -> ".pdf"
+                mime == "text/plain" -> ".txt"
+                mime in listOf("application/msword","application/vnd.ms-word") -> ".doc"
+                mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" -> ".docx"
+                mime in listOf("application/vnd.ms-excel","application/vnd.ms-excel") -> ".xls"
+                mime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" -> ".xlsx"
+                mime in listOf("application/vnd.ms-powerpoint","application/vnd.ms-powerpoint") -> ".ppt"
+                mime == "application/vnd.openxmlformats-officedocument.presentationml.presentation" -> ".pptx"
+                mime in listOf("application/dxf","application/x-dxf") -> ".dxf"
+                mime in listOf("application/dwg","image/vnd.dwg") -> ".dwg"
+                else -> ""
+            }
+        }
+    } catch (_: Exception) {}
+    // 3) 从 URI path 取（content URI 通常无效，但 file:// 可以）
+    try {
+        val path = uri.path
+        if (!path.isNullOrBlank()) {
+            val dotIdx = path.lastIndexOf('.')
+            if (dotIdx > 0) return path.substring(dotIdx).lowercase()
+        }
+    } catch (_: Exception) {}
+    return ""
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -116,17 +166,53 @@ fun WordCountApp(initialUris: List<Uri>) {
     val entries = remember { mutableStateListOf<FileEntry>() }
     var busy by remember { mutableStateOf(false) }
 
-    // SAF 文件选择器（替代 GetMultipleContents，兼容 Android 11+ 存储限制，
-    // 无需 MANAGE_EXTERNAL_STORAGE 即可选任意文件）
+    // ---- 运行时存储权限请求（Android 6+/13+ 分级）----
+    val permLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { granted ->
+        val allOk = granted.values.all { it }
+        if (allOk) {
+            // 权限已授予，直接弹选择器
+            picker.launch(arrayOf("*/*"))
+        } else {
+            scope.launch { snackbar.showSnackbar("未授予存储权限，可能无法选取部分文件类型；仍可尝试选择") }
+            // 即使没全授，SAF 选择器仍然可以工作（只是部分 ROM 可能限制显示范围）
+            picker.launch(arrayOf("*/*"))
+        }
+    }
+
+    // SAF 文件选择器
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (uris.isNotEmpty()) addFiles(context, scope, entries, busyRef = { busy }, busySet = { busy = it }, uris)
-        // SAF 授予的 URI 权限是持久的，无需 takePersistableUriPermission（我们只读取一次后拷贝到 cacheDir）
+        if (uris.isNotEmpty()) addFiles(context, scope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris)
+    }
+
+    /** 带权限检查的选文件入口 */
+    fun pickWithPermission() {
+        val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // Android 13+: 分级媒体权限
+            arrayOf(
+                android.Manifest.permission.READ_MEDIA_IMAGES,
+                android.Manifest.permission.READ_MEDIA_VIDEO,
+                android.Manifest.permission.READ_MEDIA_AUDIO,
+            )
+        } else {
+            // Android 6-12: 统一存储权限
+            arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+        val missing = perms.filter {
+            ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) {
+            picker.launch(arrayOf("*/*"))
+        } else {
+            permLauncher.launch(perms.toTypedArray())
+        }
     }
 
     // 处理启动时从千牛/微信分享进来的文件
     androidx.compose.runtime.LaunchedEffect(Unit) {
         if (initialUris.isNotEmpty()) {
-            addFiles(context, scope, entries, busyRef = { busy }, busySet = { busy = it }, initialUris)
+            addFiles(context, scope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, initialUris)
         }
     }
 
@@ -149,13 +235,9 @@ fun WordCountApp(initialUris: List<Uri>) {
                         Text("合计（已选 ${entries.count { it.selected }} 项）", fontWeight = FontWeight.Bold)
                         Text("字数 ${totals["words"]} ｜ 中文 ${totals["fe"]} ｜ 非中文 ${totals["nc"]} ｜ 字符 ${totals["chars"]}")
                     }
-                    androidx.compose.foundation.layout.Spacer(Modifier.padding(4.dp))
+                    Spacer(Modifier.padding(4.dp))
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = {
-                            // SAF（ACTION_OPEN_DOCUMENT）无需任何存储权限即可选任意文件，
-                            // 兼容 Android 11+ 的存储限制，华为等国产 ROM 也能正常弹出选择器。
-                            picker.launch(arrayOf("*/*"))
-                        }, modifier = Modifier.weight(1f)) { Text("选择文件") }
+                        Button(onClick = { pickWithPermission() }, modifier = Modifier.weight(1f)) { Text("选择文件") }
                         OutlinedButton(
                             onClick = { exportUnreliable(context, scope, snackbar, entries) },
                             modifier = Modifier.weight(1f),
@@ -169,12 +251,24 @@ fun WordCountApp(initialUris: List<Uri>) {
         Box(Modifier.padding(padding).fillMaxSize()) {
             if (entries.isEmpty() && !busy) {
                 Column(
-                    Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                    Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 28.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
-                    Text("从千牛/微信 → 长按文件 → 用其他应用打开 → 选「字数统计」", color = Color.Gray)
-                    Text("或点下方「选择文件」从本机选取（首次需授予文件访问权限）", color = Color.Gray)
+                    Icon(
+                        imageVector = Icons.Default.Description,
+                        contentDescription = null,
+                        modifier = Modifier.size(64.dp),
+                        tint = Color(0xFFBDBDBD)
+                    )
+                    Spacer(Modifier.padding(12.dp))
+                    Text("从千牛/微信 → 长按文件 → 用其他应用打开 → 选「字数统计」",
+                        color = Color.Gray, modifier = Modifier.padding(horizontal = 8.dp))
+                    Text("或点下方「选择文件」从本机选取",
+                        color = Color.Gray, modifier = Modifier.padding(horizontal = 8.dp))
                 }
             }
             LazyColumn(
@@ -183,16 +277,28 @@ fun WordCountApp(initialUris: List<Uri>) {
             ) {
                 items(entries, key = { it.id }) { entry ->
                     FileCard(entry,
-                        onToggle = { e -> val i = entries.indexOf(e); if (i >= 0) entries[i] = e.copy(selected = !e.selected) })
+                        onToggle = { e ->
+                            val i = entries.indexOf(e)
+                            if (i >= 0) entries[i] = e.copy(selected = !e.selected)
+                        },
+                        onDelete = { e ->
+                            val i = entries.indexOf(e)
+                            if (i >= 0) entries.removeAt(i)
+                        },
+                    )
                 }
-                if (busy) item { Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
+                if (busy) item {
+                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit) {
+fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEntry) -> Unit) {
     Card(
         Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
@@ -206,7 +312,7 @@ fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit) {
                     if (r != null) {
                         Text(
                             "字数 ${r.words} ｜ 中文 ${r.fe} ｜ 非中文 ${r.nc} ｜ 字符 ${r.chars}" +
-                                (if (r.pages != null) " ｜ 页 ${r.pages}" else if (r.pagesReason != null) " ｜ ${r.pagesReason}" else ""),
+                                    (if (r.pages != null) " ｜ 页 ${r.pages}" else if (r.pagesReason != null) " ｜ ${r.pagesReason}" else ""),
                             style = MaterialTheme.typography.bodySmall, color = Color.Gray
                         )
                         if (r.hasUnreliable) Text("含无法准确统计的内容（可导出）", style = MaterialTheme.typography.bodySmall, color = Color(0xFFB26A00))
@@ -219,15 +325,17 @@ fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit) {
                 Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.small) {
                     Text(" ${entry.result?.ext?.uppercase() ?: "?"} ", Modifier.padding(6.dp, 2.dp), style = MaterialTheme.typography.labelSmall)
                 }
+                // 删除按钮
+                IconButton(onClick = { onDelete(entry) }) {
+                    Icon(imageVector = Icons.Default.Close, contentDescription = "删除", tint = Color.Gray)
+                }
             }
-            // 压缩包内部文件明细
             entry.result?.inner?.forEach { inner ->
                 Row(Modifier.padding(start = 40.dp, top = 2.dp)) {
                     Text("└ ${inner.name}", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text("字 ${inner.words} 中 ${inner.fe} 非 ${inner.nc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
             }
-            // Excel 工作表名
             entry.result?.sheets?.forEach { s ->
                 Text("▪ 工作表：$s", Modifier.padding(start = 40.dp, top = 2.dp), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
             }
@@ -243,7 +351,14 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): File {
     val name = androidx.documentfile.provider.DocumentFile.fromSingleUri(context, uri)?.name
         ?: "file_${System.currentTimeMillis()}"
     val safe = name.replace(Regex("[^\\w.\\-]"), "_")
-    val out = File(context.cacheDir, "wc_${System.currentTimeMillis()}_$safe")
+    // 保留原始扩展名用于路由判断；如果 filename 没有扩展名则从 MIME type 推断后缀
+    var outName = "wc_${System.currentTimeMillis()}_$safe"
+    val extFromName = safe.substringAfterLast('.', "").lowercase()
+    if (extFromName.isBlank() || extFromName.length > 6 || extFromName.contains(" ")) {
+        val guessed = guessExt(context, uri)
+        if (guessed.isNotBlank()) outName += guessed
+    }
+    val out = File(context.cacheDir, outName)
     context.contentResolver.openInputStream(uri)?.use { input ->
         out.outputStream().use { input.copyTo(it) }
     }
@@ -251,15 +366,13 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): File {
 }
 
 private val IMAGE_EXTS = setOf("png", "jpg", "jpeg", "bmp", "tif", "tiff", "gif", "webp")
-
-// 老版 Office：交给 POI（Kotlin 层）抽取文本，再复用现有字数统计
 private val OLD_OFFICE_EXTS = setOf("doc", "xls", "ppt")
-// CAD DWG：二进制扫描提取文字（无免费安卓解析库的轻量方案）
 private val DWG_EXTS = setOf("dwg")
 
 private fun addFiles(
     context: android.content.Context,
     scope: kotlinx.coroutines.CoroutineScope,
+    snackbar: SnackbarHostState,
     entries: androidx.compose.runtime.snapshots.SnapshotStateList<FileEntry>,
     busyRef: () -> Boolean,
     busySet: (Boolean) -> Unit,
@@ -269,7 +382,7 @@ private fun addFiles(
     scope.launch(Dispatchers.Main) {
         busySet(true)
         try {
-            // 图片 OCR 在 Kotlin 层 Tesseract 完成，无需下载模型；直接启动 Python 即可
+            // 启动 Python 引擎
             PythonEngine.start(context)
             val files = uris.map { copyUriToCache(context, it) }
             val docPaths = mutableListOf<String>()
@@ -278,7 +391,7 @@ private fun addFiles(
             val oldOfficeFiles = mutableListOf<File>()
             val dwgFiles = mutableListOf<File>()
             for (f in files) {
-                val ext = f.extension.lowercase()
+                val ext = f.extension.lowercase().removePrefix(".")
                 when {
                     ext in IMAGE_EXTS -> imageFiles.add(f)
                     ext in OLD_OFFICE_EXTS -> oldOfficeFiles.add(f)
@@ -307,25 +420,34 @@ private fun addFiles(
                 }
                 // 图片类：Kotlin Tesseract OCR -> 识别文字交给 Python 计数
                 imageFiles.forEachIndexed { i, f ->
-                    val text = OcrEngine.recognize(context, f)
-                    var resMap: Map<*, *>? = null
-                    resMap = PythonEngine.countText(text, f.name)
-                    val fr = toFileResult(resMap, f.absolutePath)
-                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                    try {
+                        val text = OcrEngine.recognize(context, f)
+                        var resMap: Map<*, *>? = null
+                        resMap = PythonEngine.countText(text, f.name)
+                        val fr = toFileResult(resMap, f.absolutePath)
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                    } catch (e: Throwable) {
+                        Log.w("WordCount", "OCR 失败 ${f.name}: ${e.message}")
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, error = "OCR 识别失败（${e.message}）"))
+                    }
                 }
                 // 老格式(.doc/.xls/.ppt)：Kotlin POI 抽文本 -> 复用 Python 计数
                 oldOfficeFiles.forEachIndexed { i, f ->
                     try {
                         val text = OldOfficeEngine.extractText(f)
-                        val resMap = PythonEngine.countText(text, f.name)
-                        val fr = toFileResult(resMap, f.absolutePath)
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                        if (text.isBlank()) {
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = f.name, cachePath = f.absolutePath, error = "此老格式文件内容为空或无法读取"))
+                        } else {
+                            val resMap = PythonEngine.countText(text, f.name)
+                            val fr = toFileResult(resMap, f.absolutePath)
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                        }
                     } catch (e: Throwable) {
                         Log.w("WordCount", "老格式解析失败 ${f.name}: ${e.message}")
                         entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = f.name, cachePath = f.absolutePath, error = "无法解析此老格式（${e.message}），建议另存为 .docx/.xlsx/.pptx"))
                     }
                 }
-                // DWG(CAD)：二进制扫描提取文字 -> 复用 Python 计数
+                // DWG(CAD)：二进制扫描提取文字 -> 复用 Python 计算
                 dwgFiles.forEachIndexed { i, f ->
                     try {
                         val text = DwgEngine.extractText(f)
@@ -342,8 +464,9 @@ private fun addFiles(
                     }
                 }
             }
-        } catch (e: Exception) {
-            // 已在 UI 通过 snackbar 提示（此处简化）
+        } catch (e: Throwable) {
+            Log.e("WordCount", "文件处理异常: ${e.javaClass.simpleName}: ${e.message}", e)
+            scope.launch { snackbar.showSnackbar("处理出错：${e.message}") }
         } finally {
             busySet(false)
         }
