@@ -27,9 +27,9 @@ object OcrEngine {
         val base = baseDir ?: return ""
 
         // 前置检查：文件必须存在且非空（防止空文件/损坏文件传入原生层）
-        if (!imageFile.exists() || imageFile.length() == 0) return ""
+        if (!imageFile.exists() || imageFile.length() == 0L) return ""
         // 安全限制：单图不超 20MB（防止超大图导致 OOM）
-        if (imageFile.length() > 20 * 1024 * 1024) return ""
+        if (imageFile.length() > 20L * 1024 * 1024) return ""
 
         val api = TessBaseAPI()
         if (!api.init(base.absolutePath, LANG)) {

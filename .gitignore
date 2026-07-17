@@ -1,20 +1,6 @@
-# Android / Gradle
-*.iml
-.gradle/
-/local.properties
-/.idea/
-.DS_Store
-/build/
-/captures/
-.externalNativeBuild/
-.cxx/
-app/build/
-build/
-
-# Chaquopy / Python
-**/__pycache__/
-*.pyc
-
-# Keystore（如有签名文件，别上传）
-*.jks
-*.keystore
+jobs.json
+logs.zip
+runs.json
+ci_log*.txt
+check_ci.py
+poll_build.py
