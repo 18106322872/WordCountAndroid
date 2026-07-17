@@ -9843,7 +9843,7 @@ def count_files(paths, sheet_filter="all", with_notes=False):
 
 
 
-    return out
+    return json.dumps(out, ensure_ascii=False)
 
 
 
@@ -9891,7 +9891,7 @@ def count_text(text, name="图片"):
 
 
 
-    return {
+    _result = {
 
 
 
@@ -9912,6 +9912,8 @@ def count_text(text, name="图片"):
 
 
     }
+
+    return json.dumps(_result, ensure_ascii=False)
 
 
 
