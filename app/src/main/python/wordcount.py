@@ -9389,13 +9389,12 @@ def prepare_unreliable_entries(files_info, work_dir, converter=None):
     仅包含确有不可靠内容的文件。"""
 
 
-
     import os as _os
 
-
+    # Chaquopy 传入的 files_info 可能是 Java ArrayList，转为原生 list
+    files_info = list(files_info) if not isinstance(files_info, list) else files_info
 
     entries = []
-
 
 
     for (name, stats, meta, src, ext) in files_info:
@@ -9789,6 +9788,9 @@ def count_files(paths, sheet_filter="all", with_notes=False):
     """批量统计多个文件，逐个容错，返回 [{ok, result|error, name}, ...]。"""
 
 
+    # Chaquopy 从 Kotlin 传入的 List<String> 是 Java ArrayList，
+    # Python 的 for 循环无法直接遍历，必须先转为原生 list。
+    paths = list(paths) if not isinstance(paths, list) else paths
 
     out = []
 
