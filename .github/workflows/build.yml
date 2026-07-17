@@ -43,6 +43,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.9
+          cache-disabled: true
 
       - name: Download Tesseract chi_sim traineddata into assets
         run: |
@@ -65,7 +66,7 @@ jobs:
         run: |
           set -eo pipefail
           gradle clean --no-daemon
-          gradle assembleDebug --no-build-cache --no-daemon
+          gradle assembleDebug --no-build-cache --rerun-tasks --no-daemon
 
       - name: Rename APK（WordCount-版本号格式）
         run: |
