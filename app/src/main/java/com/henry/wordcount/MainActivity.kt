@@ -126,21 +126,28 @@ private fun guessExt(context: android.content.Context, uri: Uri): String {
     try {
         val mime = context.contentResolver.getType(uri)
         if (!mime.isNullOrBlank()) {
-            return when {
-                mime.startsWith("image/") -> {
-                    when (mime) {"image/png"->".png","image/jpeg"->".jpg","image/gif"->".gif",
-                        "image/webp"->".webp","image/bmp"->".bmp",else->".png"}
+            if (mime.startsWith("image/")) {
+                // 图片 MIME → 扩展名映射
+                return when (mime) {
+                    "image/png" -> ".png"
+                    "image/jpeg" -> ".jpg"
+                    "image/gif" -> ".gif"
+                    "image/webp" -> ".webp"
+                    "image/bmp" -> ".bmp"
+                    else -> ".png"
                 }
-                mime == "application/pdf" -> ".pdf"
-                mime == "text/plain" -> ".txt"
-                mime in listOf("application/msword","application/vnd.ms-word") -> ".doc"
-                mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" -> ".docx"
-                mime in listOf("application/vnd.ms-excel","application/vnd.ms-excel") -> ".xls"
-                mime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" -> ".xlsx"
-                mime in listOf("application/vnd.ms-powerpoint","application/vnd.ms-powerpoint") -> ".ppt"
-                mime == "application/vnd.openxmlformats-officedocument.presentationml.presentation" -> ".pptx"
-                mime in listOf("application/dxf","application/x-dxf") -> ".dxf"
-                mime in listOf("application/dwg","image/vnd.dwg") -> ".dwg"
+            }
+            return when (mime) {
+                "application/pdf" -> ".pdf"
+                "text/plain" -> ".txt"
+                "application/msword", "application/vnd.ms-word" -> ".doc"
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document" -> ".docx"
+                "application/vnd.ms-excel" -> ".xls"
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" -> ".xlsx"
+                "application/vnd.ms-powerpoint" -> ".ppt"
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation" -> ".pptx"
+                "application/dxf", "application/x-dxf" -> ".dxf"
+                "application/dwg", "image/vnd.dwg" -> ".dwg"
                 else -> ""
             }
         }
