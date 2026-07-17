@@ -2,9 +2,7 @@ package com.henry.wordcount
 
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -71,6 +69,10 @@ class MainActivity : ComponentActivity() {
                 intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
                     ?.forEach { uris.add(it) }
             }
+            Intent.ACTION_VIEW -> {
+                // 千牛/微信/文件管理器「用其他应用打开」选了本应用：文件以 content:// uri 传入
+                intent.data?.let { uris.add(it) }
+            }
         }
         setContent { WordCountApp(initialUris = uris) }
     }
@@ -121,11 +123,6 @@ fun WordCountApp(initialUris: List<Uri>) {
         // SAF 授予的 URI 权限是持久的，无需 takePersistableUriPermission（我们只读取一次后拷贝到 cacheDir）
     }
 
-    // 引导用户授予「全部文件」访问权限（华为等 ROM 需要手动去设置页开启）
-    val storageLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { /* 用户从设置页返回，重新尝试选文件即可 */ }
-
     // 处理启动时从千牛/微信分享进来的文件
     androidx.compose.runtime.LaunchedEffect(Unit) {
         if (initialUris.isNotEmpty()) {
@@ -155,16 +152,9 @@ fun WordCountApp(initialUris: List<Uri>) {
                     androidx.compose.foundation.layout.Spacer(Modifier.padding(4.dp))
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(onClick = {
-                            // Android 11+ 检查是否有全部文件权限；没有则引导去设置页
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
-                                !Settings.canManageExternalStorage(context)) {
-                                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
-                                    data = Uri.fromParts("package", context.packageName, null)
-                                }
-                                storageLauncher.launch(intent)
-                            } else {
-                                picker.launch(arrayOf("*/*"))
-                            }
+                            // SAF（ACTION_OPEN_DOCUMENT）无需任何存储权限即可选任意文件，
+                            // 兼容 Android 11+ 的存储限制，华为等国产 ROM 也能正常弹出选择器。
+                            picker.launch(arrayOf("*/*"))
                         }, modifier = Modifier.weight(1f)) { Text("选择文件") }
                         OutlinedButton(
                             onClick = { exportUnreliable(context, scope, snackbar, entries) },

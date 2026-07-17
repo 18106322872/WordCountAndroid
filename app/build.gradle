@@ -10,7 +10,8 @@ android {
 
     defaultConfig {
         applicationId 'com.henry.wordcount'
-        minSdk 24
+        // minSdk 26：Apache POI 5.x / log4j 用到 MethodHandle.invoke，D8 要求 Android O(26) 起
+        minSdk 26
         targetSdk 34
         versionCode 1
         versionName '1.0.0'
@@ -47,7 +48,7 @@ android {
         jniLibs {
             useLegacyPackaging true
         }
-        // POI 等 Java 库在安卓打包时的冲突排除
+        // POI 等 Java 库在安卓打包时的冲突排除（含签名文件，避免 Duplicate files copied in APK META-INF/*）
         resources {
             excludes += [
                 'META-INF/DEPENDENCIES',
@@ -56,7 +57,11 @@ android {
                 'META-INF/NOTICE',
                 'META-INF/NOTICE.txt',
                 'META-INF/*.kotlin_module',
-                'META-INF/versions/**'
+                'META-INF/versions/**',
+                'META-INF/*.RSA',
+                'META-INF/*.SF',
+                'META-INF/*.DSA',
+                'META-INF/*.EC'
             ]
         }
     }
