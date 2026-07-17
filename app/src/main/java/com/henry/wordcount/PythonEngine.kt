@@ -7,11 +7,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Chaquopy 桥接层：v8 JSON 序列化方案。
- *
- * Python 端 count_files / count_text 返回 json.dumps() JSON 字符串，
- * Kotlin 端用 JSONObject/JSONArray 解析为原生 List/Map。
- * 彻底绕过 Chaquopy .toJava() 对复杂嵌套结构的类型转换失败。
+ * Chaquopy 桥接层：v8 最小改动版。
+ * Python 端返回 JSON 字符串，Kotlin 端用 JSONObject/JSONArray 解析。
  */
 object PythonEngine {
 
@@ -24,52 +21,36 @@ object PythonEngine {
         started = true
     }
 
-    /** 递归将 JSONArray/JSONObject 转为 Kotlin 原生 List<Map> / Map。 */
-    @Suppress("UNCHECKED_CAST")
-    private fun convertJsonElement(any: Any?): Any? {
-        return when (any) {
-            is JSONArray -> {
-                val list = mutableListOf<Any?>()
-                for (i in 0 until any.length()) {
-                    list.add(convertJsonElement(any.get(i)))
-                }
-                list
-            }
-            is JSONObject -> {
-                val map = mutableMapOf<String, Any?>()
-                val keys = any.keys()
-                while (keys.hasNext()) {
-                    val key = keys.next()
-                    map[key] = convertJsonElement(any.get(key))
-                }
-                map
-            }
-            else -> any  // String / Int / Long / Double / Boolean / null
+    private fun toNative(obj: Any?): Any? {
+        if (obj is JSONArray) {
+            val list = ArrayList<Any?>(obj.length())
+            for (i in 0 until obj.length()) list.add(toNative(obj.get(i)))
+            return list
         }
+        if (obj is JSONObject) {
+            val map = HashMap<String, Any?>()
+            val it = obj.keys()
+            while (it.hasNext()) { val k = it.next(); map[k] = toNative(obj.get(k)) }
+            return map
+        }
+        return obj
     }
 
-    /**
-     * 批量统计文档类文件。返回 List<Map<String, Any?>>，与 MainActivity 兼容。
-     */
     fun countFiles(paths: List<String>): Any {
         val py = Python.getInstance()
         val mod = py.getModule("wordcount")
-        val jsonStr = mod.callAttr("count_files", paths).toString()
-        return convertJsonElement(JSONArray(jsonStr))
+        val s = mod.callAttr("count_files", paths).toString()
+        return toNative(JSONArray(s))
     }
 
-    /**
-     * 统计一段已识别的文字（OCR）。返回 Map<String, Any?>。
-     */
     fun countText(text: String, name: String): Map<*, *> {
         val py = Python.getInstance()
         val mod = py.getModule("wordcount")
-        val jsonStr = mod.callAttr("count_text", text, name).toString()
-        return (convertJsonElement(JSONObject(jsonStr)) as? Map<*, *>)
-            ?: emptyMap<String, Any?>()
+        val s = mod.callAttr("count_text", text, name).toString()
+        @Suppress("UNCHECKED_CAST")
+        return (toNative(JSONObject(s)) as? Map<*, *>) ?: emptyMap<String, Any?>()
     }
 
-    /** 导出「无法准确统计内容」PDF。 */
     fun buildExportPdf(filesInfo: List<List<Any?>>, outPath: String): String? {
         val py = Python.getInstance()
         val mod = py.getModule("wordcount")

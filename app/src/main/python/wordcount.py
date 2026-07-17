@@ -9912,7 +9912,6 @@ def count_text(text, name="图片"):
 
 
     }
-
     return json.dumps(_result, ensure_ascii=False)
 
 
