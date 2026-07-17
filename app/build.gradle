@@ -1,1 +1,114 @@
-cGx1Z2lucyB7DQogICAgaWQgJ2NvbS5hbmRyb2lkLmFwcGxpY2F0aW9uJw0KICAgIGlkICdvcmcuamV0YnJhaW5zLmtvdGxpbi5hbmRyb2lkJw0KICAgIGlkICdjb20uY2hhcXVvLnB5dGhvbicNCn0NCg0KYW5kcm9pZCB7DQogICAgbmFtZXNwYWNlICdjb20uaGVucnkud29yZGNvdW50Jw0KICAgIGNvbXBpbGVTZGsgMzQNCg0KICAgIGRlZmF1bHRDb25maWcgew0KICAgICAgICBhcHBsaWNhdGlvbklkICdjb20uaGVucnkud29yZGNvdW50Jw0KICAgICAgICBtaW5TZGsgMjQNCiAgICAgICAgdGFyZ2V0U2RrIDM0DQogICAgICAgIHZlcnNpb25Db2RlIDENCiAgICAgICAgdmVyc2lvbk5hbWUgJzEuMC4wJw0KDQogICAgICAgIC8vIOWPque8liBhcm02NC12OGHvvIjljY7kuLrnrYnnjrDku6PmiYvmnLrvvInvvIznvKnlsI/kvZPnp6/jgIHlip/og73pm7blvbHlk40NCiAgICAgICAgbmRrIHsNCiAgICAgICAgICAgIGFiaUZpbHRlcnMgJ2FybTY0LXY4YScNCiAgICAgICAgfQ0KDQogICAgICAgIC8vIENoYXF1b3B5IDE377ya5YaF5bWMIFB5dGhvbiArIOino+aekOW6k++8m+WbvueJhyBPQ1Ig5Lqk55SxIEtvdGxpbiDlsYIgVGVzc2VyYWN0IOWujOaIkO+8iOaooeWei+majyBBUEsg5YaF572u77yM56a757q/5Y+v55So77yJDQogICAgICAgIGNoYXF1b3B5IHsNCiAgICAgICAgICAgIGRlZmF1bHRDb25maWcgew0KICAgICAgICAgICAgICAgIHZlcnNpb24gJzMuMTAnDQogICAgICAgICAgICAgICAgcGlwIHsNCiAgICAgICAgICAgICAgICAgICAgaW5zdGFsbCAncGRmbWluZXIuc2l4Jw0KICAgICAgICAgICAgICAgICAgICBpbnN0YWxsICdweXRob24tZG9jeCcNCiAgICAgICAgICAgICAgICAgICAgaW5zdGFsbCAncGlsbG93Jw0KICAgICAgICAgICAgICAgICAgICBpbnN0YWxsICdvcGVucHl4bCcNCiAgICAgICAgICAgICAgICAgICAgaW5zdGFsbCAncHl0aG9uLXBwdHgnDQogICAgICAgICAgICAgICAgICAgIGluc3RhbGwgJ2V6ZHhmJw0KICAgICAgICAgICAgICAgICAgICBpbnN0YWxsICdvbGVmaWxlJw0KICAgICAgICAgICAgICAgICAgICAvLyDms6jvvJpweW11cGRmKGZpdHopIOWcqCBDaGFxdW9weSDml6AgQW5kcm9pZCB3aGVlbO+8jOaVheS4jeW8leWFpe+8mw0KICAgICAgICAgICAgICAgICAgICAvLyDlvJXmk47lt7Llr7kgZml0eiDnvLrlpLHlgZrpmY3nuqfvvIhQREYg5paH5a2X5bGCL+WbvueJh09DUi8uYWkv5a+85Ye6UERGIOebuOW6lOmZjee6p++8ieOAgg0KICAgICAgICAgICAgICAgICAgICAvLyDms6jvvJrlm77niYcgT0NSIOaUueWcqCBLb3RsaW4g5bGC55SoIFRlc3NlcmFjdCh0ZXNzLXR3bykg5a6M5oiQ77yM5peg6ZyAIFB5dGhvbiDnq68gb25ueHJ1bnRpbWXjgIINCiAgICAgICAgICAgICAgICB9DQogICAgICAgICAgICB9DQogICAgICAgIH0NCg0KICAgICAgICBtYW5pZmVzdFBsYWNlaG9sZGVycyA9IFthcHBOYW1lOiAn5a2X5pWw57uf6K6hJ10NCiAgICB9DQoNCiAgICAvLyBDaGFxdW9weSDljp/nlJ/lupPlhbzlrrkgQUdQIDgg55qE5omT5YyF5pa55byPDQogICAgcGFja2FnaW5nIHsNCiAgICAgICAgam5pTGlicyB7DQogICAgICAgICAgICB1c2VMZWdhY3lQYWNrYWdpbmcgdHJ1ZQ0KICAgICAgICB9DQogICAgICAgIC8vIFBPSSDnrYkgSmF2YSDlupPlnKjlronljZPmiZPljIXml7bnmoTlhrLnqoHmjpLpmaQNCiAgICAgICAgcmVzb3VyY2VzIHsNCiAgICAgICAgICAgIGV4Y2x1ZGVzICs9IFsNCiAgICAgICAgICAgICAgICAnTUVUQS1JTkYvREVQRU5ERU5DSUVTJywNCiAgICAgICAgICAgICAgICAnTUVUQS1JTkYvTElDRU5TRScsDQogICAgICAgICAgICAgICAgJ01FVEEtSU5GL0xJQ0VOU0UudHh0JywNCiAgICAgICAgICAgICAgICAnTUVUQS1JTkYvTk9USUNFJywNCiAgICAgICAgICAgICAgICAnTUVUQS1JTkYvTk9USUNFLnR4dCcsDQogICAgICAgICAgICAgICAgJ01FVEEtSU5GLyoua290bGluX21vZHVsZScsDQogICAgICAgICAgICAgICAgJ01FVEEtSU5GL3ZlcnNpb25zLyoqJw0KICAgICAgICAgICAgXQ0KICAgICAgICB9DQogICAgfQ0KDQogICAgYnVpbGRUeXBlcyB7DQogICAgICAgIHJlbGVhc2Ugew0KICAgICAgICAgICAgbWluaWZ5RW5hYmxlZCBmYWxzZQ0KICAgICAgICAgICAgc2lnbmluZ0NvbmZpZyBzaWduaW5nQ29uZmlncy5kZWJ1Zw0KICAgICAgICB9DQogICAgICAgIGRlYnVnIHsNCiAgICAgICAgICAgIG1pbmlmeUVuYWJsZWQgZmFsc2UNCiAgICAgICAgfQ0KICAgIH0NCg0KICAgIGNvbXBpbGVPcHRpb25zIHsNCiAgICAgICAgc291cmNlQ29tcGF0aWJpbGl0eSBKYXZhVmVyc2lvbi5WRVJTSU9OXzE3DQogICAgICAgIHRhcmdldENvbXBhdGliaWxpdHkgSmF2YVZlcnNpb24uVkVSU0lPTl8xNw0KICAgIH0NCiAgICBrb3RsaW5PcHRpb25zIHsNCiAgICAgICAganZtVGFyZ2V0ID0gJzE3Jw0KICAgIH0NCiAgICBidWlsZEZlYXR1cmVzIHsNCiAgICAgICAgY29tcG9zZSB0cnVlDQogICAgfQ0KICAgIGNvbXBvc2VPcHRpb25zIHsNCiAgICAgICAga290bGluQ29tcGlsZXJFeHRlbnNpb25WZXJzaW9uICcxLjUuMTAnDQogICAgfQ0KfQ0KDQpkZXBlbmRlbmNpZXMgew0KICAgIGRlZiBjb21wb3NlQm9tID0gcGxhdGZvcm0oJ2FuZHJvaWR4LmNvbXBvc2U6Y29tcG9zZS1ib206MjAyNC4wNi4wMCcpDQogICAgaW1wbGVtZW50YXRpb24gY29tcG9zZUJvbQ0KICAgIGltcGxlbWVudGF0aW9uICdhbmRyb2lkeC5jb21wb3NlLnVpOnVpJw0KICAgIGltcGxlbWVudGF0aW9uICdhbmRyb2lkeC5jb21wb3NlLnVpOnVpLWdyYXBoaWNzJw0KICAgIGltcGxlbWVudGF0aW9uICdhbmRyb2lkeC5jb21wb3NlLm1hdGVyaWFsMzptYXRlcmlhbDMnDQogICAgaW1wbGVtZW50YXRpb24gJ2FuZHJvaWR4LmNvbXBvc2UubWF0ZXJpYWw6bWF0ZXJpYWwtaWNvbnMtZXh0ZW5kZWQnDQogICAgaW1wbGVtZW50YXRpb24gJ2FuZHJvaWR4LmFjdGl2aXR5OmFjdGl2aXR5LWNvbXBvc2U6MS45LjAnDQogICAgaW1wbGVtZW50YXRpb24gJ2FuZHJvaWR4LmxpZmVjeWNsZTpsaWZlY3ljbGUtcnVudGltZS1rdHg6Mi44LjAnDQogICAgaW1wbGVtZW50YXRpb24gJ2FuZHJvaWR4LmxpZmVjeWNsZTpsaWZlY3ljbGUtdmlld21vZGVsLWNvbXBvc2U6Mi44LjAnDQogICAgaW1wbGVtZW50YXRpb24gJ29yZy5qZXRicmFpbnMua290bGlueDprb3RsaW54LWNvcm91dGluZXMtYW5kcm9pZDoxLjguMScNCiAgICBpbXBsZW1lbnRhdGlvbiAnYW5kcm9pZHguZG9jdW1lbnRmaWxlOmRvY3VtZW50ZmlsZToxLjAuMScNCiAgICAvLyBNYW5pZmVzdCDlsYLkuLvpopgoVGhlbWUuTWF0ZXJpYWwzLkRheU5pZ2h0Lk5vQWN0aW9uQmFyIC8gY29sb3JTdXJmYWNlIGF0dHIpIOeUsSBNREMg5o+Q5L6b77ybDQogICAgLy8gQ29tcG9zZSDlhoXku43nlKggYW5kcm9pZHguY29tcG9zZS5tYXRlcmlhbDMg55qEIE1hdGVyaWFsVGhlbWXjgILkuKTogIXlhbHlrZjjgIHkupLkuI3lhrLnqoHjgIINCiAgICBpbXBsZW1lbnRhdGlvbiAnY29tLmdvb2dsZS5hbmRyb2lkLm1hdGVyaWFsOm1hdGVyaWFsOjEuMTIuMCcNCiAgICAvLyDlm77niYcgT0NS77yaVGVzc2VyYWN0IOWuieWNk+enu+akje+8iOemu+e6v+OAgeaXoOmcgCBHTVMv6LSm5Y+377yJ77yM5qih5Z6L55SxIENJIOaUvuWFpSBhc3NldHMNCiAgICBpbXBsZW1lbnRhdGlvbiAnY29tLnJtdGhlaXM6dGVzcy10d286OS4xLjAnDQogICAgLy8g6ICB5qC85byPKC5kb2MvLnhscy8ucHB0Keino+aekO+8mkFwYWNoZSBQT0nvvIhKYXZh77yM5a6J5Y2T5Y6f55Sf6L+Q6KGM77yM5LiN5L6d6LWWIFdpbmRvd3PvvIkNCiAgICAvLyDku4XnlKggcG9pICsgcG9pLXNjcmF0Y2hwYWTvvIhIU1NGL0hXUEYvSFNMRu+8ie+8jOS4jeW8leWFpSBwb2ktb294bWzvvIzpgb/lhY3lronljZPnvLogamF2YXgueG1sLnN0cmVhbSDnmoTlnZENCiAgICBpbXBsZW1lbnRhdGlvbiAnb3JnLmFwYWNoZS5wb2k6cG9pOjUuMi41Jw0KICAgIGltcGxlbWVudGF0aW9uICdvcmcuYXBhY2hlLnBvaTpwb2ktc2NyYXRjaHBhZDo1LjIuNScNCiAgICBpbXBsZW1lbnRhdGlvbiAnb3JnLmFwYWNoZS5jb21tb25zOmNvbW1vbnMtY29tcHJlc3M6MS4yNi4xJw0KICAgIGltcGxlbWVudGF0aW9uICdvcmcuYXBhY2hlLmNvbW1vbnM6Y29tbW9ucy1tYXRoMzozLjYuMScNCn0NCg0KLy8g5Zu+54mHIE9DUiDmqKHlnosoY2hpX3NpbS50cmFpbmVkZGF0YSnnlLEgQ0kg5LiL6L296L+bIGFwcC9zcmMvbWFpbi9hc3NldHMvdGVzc2RhdGEv77yM6ZqPIEFQSyDlhoXnva7jgIINCg==
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+    id 'com.chaquo.python'
+}
+
+android {
+    namespace 'com.henry.wordcount'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.henry.wordcount'
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName '1.0.0'
+
+        // 只编 arm64-v8a（华为等现代手机），缩小体积、功能零影响
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+
+        // Chaquopy 17：内嵌 Python + 解析库；图片 OCR 交由 Kotlin 层 Tesseract 完成（模型随 APK 内置，离线可用）
+        chaquopy {
+            defaultConfig {
+                version '3.10'
+                pip {
+                    install 'pdfminer.six'
+                    install 'python-docx'
+                    install 'pillow'
+                    install 'openpyxl'
+                    install 'python-pptx'
+                    install 'ezdxf'
+                    install 'olefile'
+                    // 注：pymupdf(fitz) 在 Chaquopy 无 Android wheel，故不引入；
+                    // 引擎已对 fitz 缺失做降级（PDF 文字层/图片OCR/.ai/导出PDF 相应降级）。
+                    // 注：图片 OCR 改在 Kotlin 层用 Tesseract(tess-two) 完成，无需 Python 端 onnxruntime。
+                }
+            }
+        }
+
+        manifestPlaceholders = [appName: '字数统计']
+    }
+
+    // Chaquopy 原生库兼容 AGP 8 的打包方式
+    packaging {
+        jniLibs {
+            useLegacyPackaging true
+        }
+        // POI 等 Java 库在安卓打包时的冲突排除
+        resources {
+            excludes += [
+                'META-INF/DEPENDENCIES',
+                'META-INF/LICENSE',
+                'META-INF/LICENSE.txt',
+                'META-INF/NOTICE',
+                'META-INF/NOTICE.txt',
+                'META-INF/*.kotlin_module',
+                'META-INF/versions/**'
+            ]
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+        debug {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+    buildFeatures {
+        compose true
+    }
+    composeOptions {
+        kotlinCompilerExtensionVersion '1.5.10'
+    }
+}
+
+dependencies {
+    def composeBom = platform('androidx.compose:compose-bom:2024.06.00')
+    implementation composeBom
+    implementation 'androidx.compose.ui:ui'
+    implementation 'androidx.compose.ui:ui-graphics'
+    implementation 'androidx.compose.material3:material3'
+    implementation 'androidx.compose.material:material-icons-extended'
+    implementation 'androidx.activity:activity-compose:1.9.0'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.0'
+    implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.8.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
+    implementation 'androidx.documentfile:documentfile:1.0.1'
+    // Manifest 层主题(Theme.Material3.DayNight.NoActionBar / colorSurface attr) 由 MDC 提供；
+    // Compose 内仍用 androidx.compose.material3 的 MaterialTheme。两者共存、互不冲突。
+    implementation 'com.google.android.material:material:1.12.0'
+    // 图片 OCR：Tesseract 安卓移植（离线、无需 GMS/账号），模型由 CI 放入 assets
+    implementation 'com.rmtheis:tess-two:9.1.0'
+    // 老格式(.doc/.xls/.ppt)解析：Apache POI（Java，安卓原生运行，不依赖 Windows）
+    // 仅用 poi + poi-scratchpad（HSSF/HWPF/HSLF），不引入 poi-ooxml，避免安卓缺 javax.xml.stream 的坑
+    implementation 'org.apache.poi:poi:5.2.5'
+    implementation 'org.apache.poi:poi-scratchpad:5.2.5'
+    implementation 'org.apache.commons:commons-compress:1.26.1'
+    implementation 'org.apache.commons:commons-math3:3.6.1'
+}
+
+// 图片 OCR 模型(chi_sim.traineddata)由 CI 下载进 app/src/main/assets/tessdata/，随 APK 内置。

@@ -1,1 +1,111 @@
-cGFja2FnZSBjb20uaGVucnkud29yZGNvdW50CgppbXBvcnQgamF2YS5pby5GaWxlCmltcG9ydCBqYXZhLm5pby5jaGFyc2V0LkNoYXJzZXQKaW1wb3J0IGphdmEubmlvLmNoYXJzZXQuU3RhbmRhcmRDaGFyc2V0cwoKLyoqCiAqIERXRyDmlofku7bmloflrZfmj5Dlj5bvvIjovbvph4/mlrnmoYjvvIzml6DlpJbpg6jkvp3otZbvvInjgIIKICoKICogRFdHIOaYryBBdXRvQ0FEIOS4k+acieS6jOi/m+WItuagvOW8j++8jOWuieWNk+S4iuaXoOWFjei0ueWPr+mdoOeahOino+aekOW6k++8mgogKiAgIC0gQXNwb3NlLkNBRO+8muWVhuS4muaOiOadg++8iH4kMjAwMCvvvIkKICogICAtIE9EQSBUZWlnaGHvvJrpnIDljp/nlJ8gLmRsbC8uc2/vvIzlronljZPml6Dms5Xkvb/nlKgKICogICAtIGV6ZHhmIC8gcHl0aG9uLWR4Zu+8muWPquaUr+aMgSBEWEbvvIzkuI3mlK/mjIEgRFdHCiAqCiAqIOacrOWunueOsOmAmui/h+aJq+aPj+S6jOi/m+WItuaWh+S7tuS4reeahOWPr+ivu+Wtl+espuS4suadpeaPkOWPluaWh+Wtl++8jAogKiDog73mjZXojrflpKfpg6jliIYgVEVYVC9NVEVYVC9BVFRERUYg5a6e5L2T5paH5pys77yIRFdHIFIyMDAwKyDmloflrZfku6UgVVRGLTE2TEUg57yW56CB5a2Y5YKo77yJ44CCCiAqIOeyvuW6puS4jeWmguecn+ato+eahCBDQUQg6Kej5p6Q5bqT77yM5L2G5a+544CM5a2X5pWw57uf6K6h44CN5Zy65pmv5Z+65pys5aSf55So44CCCiAqLwpvYmplY3QgRHdnRW5naW5lIHsKCiAgICBmdW4gZXh0cmFjdFRleHQoZmlsZTogRmlsZSk6IFN0cmluZyB7CiAgICAgICAgdmFsIGJ5dGVzID0gZmlsZS5yZWFkQnl0ZXMoKQogICAgICAgIHZhbCByZXN1bHRzID0gTGlua2VkSGFzaFNldDxTdHJpbmc+KCkgLy8g5Y676YeN5L+d5bqPCgogICAgICAgIC8vIDEuIOaJq+aPjyBVVEYtMTZMRSDlrZfnrKbkuLLvvIhEV0cgUjIwMDArIOaWh+Wtl+WunuS9k+S4u+imgee8luegge+8iQogICAgICAgIGV4dHJhY3RTdHJpbmdzKGJ5dGVzLCBTdGFuZGFyZENoYXJzZXRzLlVURl8xNkxFLCByZXN1bHRzKQoKICAgICAgICAvLyAyLiDmiavmj48gVVRGLTgg5a2X56ym5Liy77yI6YOo5YiG5YWD5pWw5o2uL+aXp+eJiOaWh+Wtl+WPr+iDveeUqCBVVEYtOO+8iQogICAgICAgIGV4dHJhY3RTdHJpbmdzKGJ5dGVzLCBTdGFuZGFyZENoYXJzZXRzLlVURl84LCByZXN1bHRzKQoKICAgICAgICAvLyAzLiDov4fmu6TvvJrljrvmjonlpKrnn63jgIHnuq/mlbDlrZfjgIHmmI7mmL7pnZ7mloflrZfnmoTlhoXlrrkKICAgICAgICB2YWwgZmlsdGVyZWQgPSByZXN1bHRzLmZpbHRlciB7IHMgLT4KICAgICAgICAgICAgcy5sZW5ndGggPj0gMiAmJgogICAgICAgICAgICAhcy5tYXRjaGVzKFJlZ2V4KCJeXFxkKyQiKSkgJiYKICAgICAgICAgICAgIXMubWF0Y2hlcyhSZWdleCgiXltcXHgwMC1cXHgxZlxceDdmXSskIikpICYmCiAgICAgICAgICAgIHMudHJpbSgpLmxlbmd0aCA+PSAyCiAgICAgICAgfQoKICAgICAgICByZXR1cm4gZmlsdGVyZWQuam9pblRvU3RyaW5nKCJcbiIpCiAgICB9CgogICAgcHJpdmF0ZSBmdW4gZXh0cmFjdFN0cmluZ3MoYnl0ZXM6IEJ5dGVBcnJheSwgY3M6IENoYXJzZXQsIG91dHB1dDogTXV0YWJsZVNldDxTdHJpbmc+KSB7CiAgICAgICAgdmFyIGkgPSAwCiAgICAgICAgd2hpbGUgKGkgPCBieXRlcy5zaXplIC0gMykgewogICAgICAgICAgICAvLyDlsJ3or5Xku47lvZPliY3kvY3nva7op6PnoIHlrZfnrKbkuLIKICAgICAgICAgICAgdmFyIGxlbiA9IDAKICAgICAgICAgICAgd2hpbGUgKGkgKyBsZW4gKiBjcy5uZXdFbmNvZGVyKCkubWF4Qnl0ZXNQZXJDaGFyKCkgPD0gYnl0ZXMuc2l6ZSAmJiBsZW4gPCA1MDApIHsKICAgICAgICAgICAgICAgIC8vIOajgOafpeaYr+WQpuaYr+acieaViOeahOWtl+espuW6j+WIlwogICAgICAgICAgICAgICAgdmFsIGVuZCA9IG1pbk9mKGkgKyAobGVuICsgMSkgKiAyLCBieXRlcy5zaXplKQogICAgICAgICAgICAgICAgaWYgKGVuZCA8PSBpICsgMSkgYnJlYWsKICAgICAgICAgICAgICAgIGxlbisrCiAgICAgICAgICAgICAgICAvLyDlsJ3or5Xop6PnoIHlvZPliY3plb/luqbnmoTniYfmrrUKICAgICAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICAgICAgdmFsIGNhbmRpZGF0ZSA9IFN0cmluZyhieXRlcywgaSwgKGxlbikgKiAoaWYgKGNzID09IFN0YW5kYXJkQ2hhcnNldHMuVVRGXzE2TEUpIDIgZWxzZSAxKSwgY3MpCiAgICAgICAgICAgICAgICAgICAgLy8g5qOA5p+l5piv5ZCm5pyJ6Laz5aSf55qE5Y+v5omT5Y2w5a2X56ymCiAgICAgICAgICAgICAgICAgICAgdmFsIHByaW50YWJsZUNvdW50ID0gY2FuZGlkYXRlLmNvdW50IHsgaXQuaXNMZXR0ZXJPckRpZ2l0KCkgfHwgaXQuaXNXaGl0ZXNwYWNlKCkgfHwKICAgICAgICAgICAgICAgICAgICAgICAgIu+8jOOAgu+8ge+8n+OAge+8m++8miIiJyfvvIjvvInjgJDjgJHjgIrjgIvigJTigKbCt+KAkywuIT87OlwiJygpLSIuY29udGFpbnMoaXQpIH0KICAgICAgICAgICAgICAgICAgICBpZiAoY2FuZGlkYXRlLmxlbmd0aCA+PSAyICYmIHByaW50YWJsZUNvdW50ID49IGNhbmRpZGF0ZS5sZW5ndGggKiAwLjYgJiYKICAgICAgICAgICAgICAgICAgICAgICAgY2FuZGlkYXRlLmFueSB7IGl0LmlzTGV0dGVyT3JEaWdpdCgpIHx8ICLvvIzjgILvvIHvvJ/jgIHvvJvvvJoiIicn77yI77yJ44CQ44CR44CK44CL4oCU4oCmwrfigJMiLmNvbnRhaW5zKGl0KSB9KSB7CiAgICAgICAgICAgICAgICAgICAgICAgIGlmIChsZW4gPj0gMikgb3V0cHV0LmFkZChjYW5kaWRhdGUudHJpbSgpKQogICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgIH0gY2F0Y2ggKF86IEV4Y2VwdGlvbikge30KICAgICAgICAgICAgfQogICAgICAgICAgICBpKysKICAgICAgICB9CgogICAgICAgIC8vIOabtOmrmOaViOeahOaJq+aPj+aWueW8j++8muebtOaOpeafpeaJvui/nue7reeahCBDSksv5a2X5q+N54mH5q61CiAgICAgICAgc2NhbkZvclRleHRSdW5zKGJ5dGVzLCBjcywgb3V0cHV0KQogICAgfQoKICAgIHByaXZhdGUgZnVuIHNjYW5Gb3JUZXh0UnVucyhieXRlczogQnl0ZUFycmF5LCBjczogQ2hhcnNldCwgb3V0cHV0OiBNdXRhYmxlU2V0PFN0cmluZz4pIHsKICAgICAgICB2YWwgdW5pdFNpemUgPSBpZiAoY3MgPT0gU3RhbmRhcmRDaGFyc2V0cy5VVEZfMTZMRSkgMiBlbHNlIDEKICAgICAgICB2YXIgc3RhcnQgPSAtMQogICAgICAgIHZhbCBzYiA9IFN0cmluZ0J1aWxkZXIoKQoKICAgICAgICBmb3IgKHBvcyBpbiBieXRlcy5pbmRpY2VzIHN0ZXAgdW5pdFNpemUpIHsKICAgICAgICAgICAgaWYgKHBvcyArIHVuaXRTaXplID4gYnl0ZXMuc2l6ZSkgYnJlYWsKICAgICAgICAgICAgdmFsIGNoID0gdHJ5IHsKICAgICAgICAgICAgICAgIFN0cmluZyhieXRlcywgcG9zLCB1bml0U2l6ZSwgY3MpWzBdCiAgICAgICAgICAgIH0gY2F0Y2ggKF86IEV4Y2VwdGlvbikgewogICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgfQoKICAgICAgICAgICAgdmFsIGlzVGV4dENoYXIgPSB3aGVuIHsKICAgICAgICAgICAgICAgIGNoLmlzTGV0dGVyT3JEaWdpdCgpIC0+IHRydWUKICAgICAgICAgICAgICAgIGNoLmlzV2hpdGVzcGFjZSgpIC0+IHRydWUKICAgICAgICAgICAgICAgICLvvIzjgILvvIHvvJ/jgIHvvJvvvJoiIicn77yI77yJ44CQ44CR44CK44CL4oCU4oCmwrfigJMsLiE/OzpcIictX0AjJS8rPTw+e31bXXxcXGB+XCTigqzCo8KlwrDihIMlw5fDt8Kx4oia4oiR4oiPz4DOqc6xzrLOs860zrjOu868z4bPiM+J4oiI4oie4omI4omg4omk4omlwrHCssKzwrnigbDigbrigbvigb3igb7igb/igLDCp8K24oCg4oCh4oCi4pem4pGg4pGh4pGi4pGj4pGk4pGl4pGm4pGn4pGo4pGp4oWg4oWh4oWi4oWj4oWk4oWl4oWm4oWn4oWo4oWp4oWq4oWr4pK24pK34pK44pK54pK64pK74pK84pK94pK+4pK/4pOA4pOB4pOC4pOD4pOE4pOF4pOG4pOH4pOI4pOJ4pOK4pOL4pOM4pON4pOO4pOPIi5jb250YWlucyhjaCkgLT4gdHJ1ZQogICAgICAgICAgICAgICAgZWxzZSAtPiBmYWxzZQogICAgICAgICAgICB9CgogICAgICAgICAgICBpZiAoaXNUZXh0Q2hhcikgewogICAgICAgICAgICAgICAgaWYgKHN0YXJ0ID09IC0xKSBzdGFydCA9IHBvcwogICAgICAgICAgICAgICAgc2IuYXBwZW5kKGNoKQogICAgICAgICAgICB9IGVsc2UgewogICAgICAgICAgICAgICAgaWYgKHNiLmxlbmd0aCA+PSAyKSB7CiAgICAgICAgICAgICAgICAgICAgdmFsIHN0ciA9IHNiLnRvU3RyaW5nKCkudHJpbSgpCiAgICAgICAgICAgICAgICAgICAgaWYgKHN0ci5sZW5ndGggPj0gMiAmJiBzdHIuYW55IHsgaXQuaXNMZXR0ZXJPckRpZ2l0KCkgfHwgIu+8jOOAgu+8ge+8n+OAge+8m++8miIiJyfvvIjvvInjgJDjgJHjgIrjgIvigJTigKbCt+KAkyIuY29udGFpbnMoaXQpIH0pIHsKICAgICAgICAgICAgICAgICAgICAgICAgb3V0cHV0LmFkZChzdHIpCiAgICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgc2IuY2xlYXIoKQogICAgICAgICAgICAgICAgc3RhcnQgPSAtMQogICAgICAgICAgICB9CiAgICAgICAgfQogICAgICAgIC8vIOWkhOeQhuacq+Wwvuaui+eVmQogICAgICAgIGlmIChzYi5sZW5ndGggPj0gMikgewogICAgICAgICAgICB2YWwgc3RyID0gc2IudG9TdHJpbmcoKS50cmltKCkKICAgICAgICAgICAgaWYgKHN0ci5sZW5ndGggPj0gMikgb3V0cHV0LmFkZChzdHIpCiAgICAgICAgfQogICAgfQp9Cg==
+package com.henry.wordcount
+
+import java.io.File
+import java.nio.charset.Charset
+import java.nio.charset.StandardCharsets
+
+/**
+ * DWG 文件文字提取（轻量方案，无外部依赖）。
+ *
+ * DWG 是 AutoCAD 专有二进制格式，安卓上无免费可靠的解析库：
+ *   - Aspose.CAD：商业授权（~$2000+）
+ *   - ODA Teigha：需原生 .dll/.so，安卓无法使用
+ *   - ezdxf / python-dxf：只支持 DXF，不支持 DWG
+ *
+ * 本实现通过扫描二进制文件中的可读字符串来提取文字，
+ * 能捕获大部分 TEXT/MTEXT/ATTDEF 实体文本（DWG R2000+ 文字以 UTF-16LE 编码存储）。
+ * 精度不如真正的 CAD 解析库，但对「字数统计」场景基本够用。
+ */
+object DwgEngine {
+
+    fun extractText(file: File): String {
+        val bytes = file.readBytes()
+        val results = LinkedHashSet<String>() // 去重保序
+
+        // 1. 扫描 UTF-16LE 字符串（DWG R2000+ 文字实体主要编码）
+        extractStrings(bytes, StandardCharsets.UTF_16LE, results)
+
+        // 2. 扫描 UTF-8 字符串（部分元数据/旧版文字可能用 UTF-8）
+        extractStrings(bytes, StandardCharsets.UTF_8, results)
+
+        // 3. 过滤：去掉太短、纯数字、明显非文字的内容
+        val filtered = results.filter { s ->
+            s.length >= 2 &&
+            !s.matches(Regex("^\\d+$")) &&
+            !s.matches(Regex("^[\\x00-\\x1f\\x7f]+$")) &&
+            s.trim().length >= 2
+        }
+
+        return filtered.joinToString("\n")
+    }
+
+    private fun extractStrings(bytes: ByteArray, cs: Charset, output: MutableSet<String>) {
+        var i = 0
+        while (i < bytes.size - 3) {
+            // 尝试从当前位置解码字符串
+            var len = 0
+            while (i + len * cs.newEncoder().maxBytesPerChar() <= bytes.size && len < 500) {
+                // 检查是否是有效的字符序列
+                val end = minOf(i + (len + 1) * 2, bytes.size)
+                if (end <= i + 1) break
+                len++
+                // 尝试解码当前长度的片段
+                try {
+                    val candidate = String(bytes, i, (len) * (if (cs == StandardCharsets.UTF_16LE) 2 else 1), cs)
+                    // 检查是否有足够的可打印字符
+                    val printableCount = candidate.count { it.isLetterOrDigit() || it.isWhitespace() ||
+                        "，。！？、；：""''（）【】《》—…·–,.!?;:\"'()-".contains(it) }
+                    if (candidate.length >= 2 && printableCount >= candidate.length * 0.6 &&
+                        candidate.any { it.isLetterOrDigit() || "，。！？、；：""''（）【】《》—…·–".contains(it) }) {
+                        if (len >= 2) output.add(candidate.trim())
+                    }
+                } catch (_: Exception) {}
+            }
+            i++
+        }
+
+        // 更高效的扫描方式：直接查找连续的 CJK/字母片段
+        scanForTextRuns(bytes, cs, output)
+    }
+
+    private fun scanForTextRuns(bytes: ByteArray, cs: Charset, output: MutableSet<String>) {
+        val unitSize = if (cs == StandardCharsets.UTF_16LE) 2 else 1
+        var start = -1
+        val sb = StringBuilder()
+
+        for (pos in bytes.indices step unitSize) {
+            if (pos + unitSize > bytes.size) break
+            val ch = try {
+                String(bytes, pos, unitSize, cs)[0]
+            } catch (_: Exception) {
+                continue
+            }
+
+            val isTextChar = when {
+                ch.isLetterOrDigit() -> true
+                ch.isWhitespace() -> true
+                "，。！？、；：""''（）【】《》—…·–,.!?;:\"'-_@#%/+=<>{}[]|\\`~\$€£¥°℃%×÷±√∑∏πΩαβγδθλμφψω∈∞≈≠≤≥±²³¹⁰⁺⁻⁽⁾ⁿ‰§¶†‡•◦①②③④⑤⑥⑦⑧⑨⑩ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫⒶⒷⒸⒹⒺⒻⒼⒽⒾⒿⓀⓁⓂⓃⓄⓅⓆⓇⓈⓉⓊⓋⓌⓍⓎⓏ".contains(ch) -> true
+                else -> false
+            }
+
+            if (isTextChar) {
+                if (start == -1) start = pos
+                sb.append(ch)
+            } else {
+                if (sb.length >= 2) {
+                    val str = sb.toString().trim()
+                    if (str.length >= 2 && str.any { it.isLetterOrDigit() || "，。！？、；：""''（）【】《》—…·–".contains(it) }) {
+                        output.add(str)
+                    }
+                }
+                sb.clear()
+                start = -1
+            }
+        }
+        // 处理末尾残留
+        if (sb.length >= 2) {
+            val str = sb.toString().trim()
+            if (str.length >= 2) output.add(str)
+        }
+    }
+}

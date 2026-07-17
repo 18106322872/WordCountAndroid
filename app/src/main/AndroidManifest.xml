@@ -1,1 +1,93 @@
-PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0idXRmLTgiPz4KPG1hbmlmZXN0IHhtbG5zOmFuZHJvaWQ9Imh0dHA6Ly9zY2hlbWFzLmFuZHJvaWQuY29tL2Fway9yZXMvYW5kcm9pZCI+CgogICAgPHVzZXMtcGVybWlzc2lvbiBhbmRyb2lkOm5hbWU9ImFuZHJvaWQucGVybWlzc2lvbi5JTlRFUk5FVCIgLz4KICAgIDx1c2VzLXBlcm1pc3Npb24gYW5kcm9pZDpuYW1lPSJhbmRyb2lkLnBlcm1pc3Npb24uQUNDRVNTX05FVFdPUktfU1RBVEUiIC8+CiAgICA8IS0tIEFuZHJvaWQgMTMrIOivu+WbvueJh+adg+mZkCAtLT4KICAgIDx1c2VzLXBlcm1pc3Npb24gYW5kcm9pZDpuYW1lPSJhbmRyb2lkLnBlcm1pc3Npb24uUkVBRF9NRURJQV9JTUFHRVMiIC8+CiAgICA8dXNlcy1wZXJtaXNzaW9uIGFuZHJvaWQ6bmFtZT0iYW5kcm9pZC5wZXJtaXNzaW9uLlJFQURfRVhURVJOQUxfU1RPUkFHRSIKICAgICAgICBhbmRyb2lkOm1heFNka1ZlcnNpb249IjMyIiAvPgogICAgPCEtLSBBbmRyb2lkIDExKyDlhajmlofku7borr/pl67mnYPpmZDvvJrorqnljY7kuLrnrYnlm73kuqcgUk9NIOaYvuekuuOAjOWFqOmDqOaWh+S7tuOAjemAiemhueiAjOmdnuS7heOAjOS7heWqkuS9k+OAjSAtLT4KICAgIDx1c2VzLXBlcm1pc3Npb24gYW5kcm9pZDpuYW1lPSJhbmRyb2lkLnBlcm1pc3Npb24uTUFOQUdFX0VYVEVSTkFMX1NUT1JBR0UiIC8+CgogICAgPGFwcGxpY2F0aW9uCiAgICAgICAgYW5kcm9pZDphbGxvd0JhY2t1cD0idHJ1ZSIKICAgICAgICBhbmRyb2lkOmljb249IkBtaXBtYXAvaWNfbGF1bmNoZXIiCiAgICAgICAgYW5kcm9pZDpsYWJlbD0iJHthcHBOYW1lfSIKICAgICAgICBhbmRyb2lkOnN1cHBvcnRzUnRsPSJ0cnVlIgogICAgICAgIGFuZHJvaWQ6dGhlbWU9IkBzdHlsZS9UaGVtZS5Xb3JkQ291bnQiPgoKICAgICAgICA8YWN0aXZpdHkKICAgICAgICAgICAgYW5kcm9pZDpuYW1lPSIuTWFpbkFjdGl2aXR5IgogICAgICAgICAgICBhbmRyb2lkOmV4cG9ydGVkPSJ0cnVlIgogICAgICAgICAgICBhbmRyb2lkOmxhYmVsPSIke2FwcE5hbWV9IgogICAgICAgICAgICBhbmRyb2lkOndpbmRvd1NvZnRJbnB1dE1vZGU9ImFkanVzdFJlc2l6ZSI+CiAgICAgICAgICAgIDxpbnRlbnQtZmlsdGVyPgogICAgICAgICAgICAgICAgPGFjdGlvbiBhbmRyb2lkOm5hbWU9ImFuZHJvaWQuaW50ZW50LmFjdGlvbi5NQUlOIiAvPgogICAgICAgICAgICAgICAgPGNhdGVnb3J5IGFuZHJvaWQ6bmFtZT0iYW5kcm9pZC5pbnRlbnQuY2F0ZWdvcnkuTEFVTkNIRVIiIC8+CiAgICAgICAgICAgIDwvaW50ZW50LWZpbHRlcj4KCiAgICAgICAgICAgIDwhLS0g5o6l5pS25Y2D54mbL+W+ruS/oeetieOAjOWIhuS6q+OAjeeahOaWh+S7tu+8iFNFTkQgLyBTRU5EX01VTFRJUExF77yJIC0tPgogICAgICAgICAgICA8aW50ZW50LWZpbHRlcj4KICAgICAgICAgICAgICAgIDxhY3Rpb24gYW5kcm9pZDpuYW1lPSJhbmRyb2lkLmludGVudC5hY3Rpb24uU0VORCIgLz4KICAgICAgICAgICAgICAgIDxjYXRlZ29yeSBhbmRyb2lkOm5hbWU9ImFuZHJvaWQuaW50ZW50LmNhdGVnb3J5LkRFRkFVTFQiIC8+CiAgICAgICAgICAgICAgICA8ZGF0YSBhbmRyb2lkOm1pbWVUeXBlPSJhcHBsaWNhdGlvbi9tc3dvcmQiIC8+CiAgICAgICAgICAgICAgICA8ZGF0YSBhbmRyb2lkOm1pbWVUeXBlPSJhcHBsaWNhdGlvbi92bmQubXMtd29yZCIgLz4KICAgICAgICAgICAgICAgIDxkYXRhIGFuZHJvaWQ6bWltZVR5cGU9ImFwcGxpY2F0aW9uL3ZuZC5vcGVueG1sZm9ybWF0cy1vZmZpY2Vkb2N1bWVudC53b3JkcHJvY2Vzc2luZ21sLmRvY3VtZW50IiAvPgogICAgICAgICAgICAgICAgPGRhdGEgYW5kcm9pZDptaW1lVHlwZT0iYXBwbGljYXRpb24vdm5kLm1zLWV4Y2VsIiAvPgogICAgICAgICAgICAgICAgPGRhdGEgYW5kcm9pZDptaW1lVHlwZT0iYXBwbGljYXRpb24vdm5kLm9wZW54bWxmb3JtYXRzLW9mZmljZWRvY3VtZW50LnNwcmVhZHNoZWV0bWwuc2hlZXQiIC8+CiAgICAgICAgICAgICAgICA8ZGF0YSBhbmRyb2lkOm1pbWVUeXBlPSJhcHBsaWNhdGlvbi92bmQubXMtcG93ZXJwb2ludCIgLz4KICAgICAgICAgICAgICAgIDxkYXRhIGFuZHJvaWQ6bWltZVR5cGU9ImFwcGxpY2F0aW9uL3ZuZC5vcGVueG1sZm9ybWF0cy1vZmZpY2Vkb2N1bWVudC5wcmVzZW50YXRpb25tbC5wcmVzZW50YXRpb24iIC8+CiAgICAgICAgICAgICAgICA8ZGF0YSBhbmRyb2lkOm1pbWVUeXBlPSJhcHBsaWNhdGlvbi9wZGYiIC8+CiAgICAgICAgICAgICAgICA8ZGF0YSBhbmRyb2lkOm1pbWVUeXBlPSJ0ZXh0L3BsYWluIiAvPgogICAgICAgICAgICAgICAgPGRhdGEgYW5kcm9pZDptaW1lVHlwZT0idGV4dC8qIiAvPgogICAgICAgICAgICAgICAgPGRhdGEgYW5kcm9pZDptaW1lVHlwZT0iaW1hZ2UvcG5nIiAvPgogICAgICAgICAgICAgICAgPGRhdGEgYW5kcm9pZDptaW1lVHlwZT0iaW1hZ2UvanBlZyIgLz4KICAgICAgICAgICAgICAgIDxkYXRhIGFuZHJvaWQ6bWltZVR5cGU9ImltYWdlLyoiIC8+CiAgICAgICAgICAgICAgICA8ZGF0YSBhbmRyb2lkOm1pbWVUeXBlPSJhcHBsaWNhdGlvbi9keGYiIC8+CiAgICAgICAgICAgICAgICA8ZGF0YSBhbmRyb2lkOm1pbWVUeXBlPSJhcHBsaWNhdGlvbi94LWR4ZiIgLz4KICAgICAgICAgICAgICAgIDxkYXRhIGFuZHJvaWQ6bWltZVR5cGU9ImltYWdlL3ZuZC5kd2ciIC8+CiAgICAgICAgICAgICAgICA8ZGF0YSBhbmRyb2lkOm1pbWVUeXBlPSJhcHBsaWNhdGlvbi9kd2ciIC8+CiAgICAgICAgICAgICAgICA8ZGF0YSBhbmRyb2lkOm1pbWVUeXBlPSJhcHBsaWNhdGlvbi9vY3RldC1zdHJlYW0iIC8+CiAgICAgICAgICAgICAgICA8ZGF0YSBhbmRyb2lkOm1pbWVUeXBlPSIqLyoiIC8+CiAgICAgICAgICAgIDwvaW50ZW50LWZpbHRlcj4KICAgICAgICAgICAgPGludGVudC1maWx0ZXI+CiAgICAgICAgICAgICAgICA8YWN0aW9uIGFuZHJvaWQ6bmFtZT0iYW5kcm9pZC5pbnRlbnQuYWN0aW9uLlNFTkRfTVVMVElQTEUiIC8+CiAgICAgICAgICAgICAgICA8Y2F0ZWdvcnkgYW5kcm9pZDpuYW1lPSJhbmRyb2lkLmludGVudC5jYXRlZ29yeS5ERUZBVUxUIiAvPgogICAgICAgICAgICAgICAgPGRhdGEgYW5kcm9pZDptaW1lVHlwZT0iKi8qIiAvPgogICAgICAgICAgICA8L2ludGVudC1maWx0ZXI+CgogICAgICAgICAgICA8IS0tIOOAjOeUqOWFtuS7luW6lOeUqOaJk+W8gOOAjeKAlOKAlOiuqeaWh+S7tueuoeeQhuWZqC/lvq7kv6Ev5Y2D54mb55qE44CM5omT5byA5pa55byP44CN5YiX6KGo6YeM5Ye6546wIFdvcmRDb3VudCAtLT4KICAgICAgICAgICAgPGludGVudC1maWx0ZXI+CiAgICAgICAgICAgICAgICA8YWN0aW9uIGFuZHJvaWQ6bmFtZT0iYW5kcm9pZC5pbnRlbnQuYWN0aW9uLlZJRVciIC8+CiAgICAgICAgICAgICAgICA8Y2F0ZWdvcnkgYW5kcm9pZDpuYW1lPSJhbmRyb2lkLmludGVudC5jYXRlZ29yeS5ERUZBVUxUIiAvPgogICAgICAgICAgICAgICAgPGNhdGVnb3J5IGFuZHJvaWQ6bmFtZT0iYW5kcm9pZC5pbnRlbnQuY2F0ZWdvcnkuQlJPV1NBQkxFIiAvPgogICAgICAgICAgICAgICAgPGRhdGEgYW5kcm9pZDptaW1lVHlwZT0iYXBwbGljYXRpb24vbXN3b3JkIiAvPgogICAgICAgICAgICAgICAgPGRhdGEgYW5kcm9pZDptaW1lVHlwZT0iYXBwbGljYXRpb24vdm5kLm1zLXdvcmQiIC8+CiAgICAgICAgICAgICAgICA8ZGF0YSBhbmRyb2lkOm1pbWVUeXBlPSJhcHBsaWNhdGlvbi92bmQub3BlbnhtbGZvcm1hdHMtb2ZmaWNlZG9jdW1lbnQud29yZHByb2Nlc3NpbmdtbC5kb2N1bWVudCIgLz4KICAgICAgICAgICAgICAgIDxkYXRhIGFuZHJvaWQ6bWltZVR5cGU9ImFwcGxpY2F0aW9uL3ZuZC5tcy1leGNlbCIgLz4KICAgICAgICAgICAgICAgIDxkYXRhIGFuZHJvaWQ6bWltZVR5cGU9ImFwcGxpY2F0aW9uL3ZuZC5vcGVueG1sZm9ybWF0cy1vZmZpY2Vkb2N1bWVudC5zcHJlYWRzaGVldG1sLnNoZWV0IiAvPgogICAgICAgICAgICAgICAgPGRhdGEgYW5kcm9pZDptaW1lVHlwZT0iYXBwbGljYXRpb24vdm5kLm1zLXBvd2VycG9pbnQiIC8+CiAgICAgICAgICAgICAgICA8ZGF0YSBhbmRyb2lkOm1pbWVUeXBlPSJhcHBsaWNhdGlvbi92bmQub3BlbnhtbGZvcm1hdHMtb2ZmaWNlZG9jdW1lbnQucHJlc2VudGF0aW9ubWwucHJlc2VudGF0aW9uIiAvPgogICAgICAgICAgICAgICAgPGRhdGEgYW5kcm9pZDptaW1lVHlwZT0iYXBwbGljYXRpb24vcGRmIiAvPgogICAgICAgICAgICAgICAgPGRhdGEgYW5kcm9pZDptaW1lVHlwZT0idGV4dC9wbGFpbiIgLz4KICAgICAgICAgICAgICAgIDxkYXRhIGFuZHJvaWQ6bWltZVR5cGU9ImFwcGxpY2F0aW9uL2R4ZiIgLz4KICAgICAgICAgICAgICAgIDxkYXRhIGFuZHJvaWQ6bWltZVR5cGU9ImFwcGxpY2F0aW9uL3gtZHhmIiAvPgogICAgICAgICAgICAgICAgPGRhdGEgYW5kcm9pZDptaW1lVHlwZT0iaW1hZ2Uvdm5kLmR3ZyIgLz4KICAgICAgICAgICAgICAgIDxkYXRhIGFuZHJvaWQ6bWltZVR5cGU9IiovKiIgLz4KICAgICAgICAgICAgPC9pbnRlbnQtZmlsdGVyPgogICAgICAgIDwvYWN0aXZpdHk+CgogICAgICAgIDwhLS0g5a+85Ye6IFBERiDlkI7pgJrov4fns7vnu5/mn6XnnIvlmajmiZPlvIAgLS0+CiAgICAgICAgPHByb3ZpZGVyCiAgICAgICAgICAgIGFuZHJvaWQ6bmFtZT0iYW5kcm9pZHguY29yZS5jb250ZW50LkZpbGVQcm92aWRlciIKICAgICAgICAgICAgYW5kcm9pZDphdXRob3JpdGllcz0iJHthcHBsaWNhdGlvbklkfS5maWxlcHJvdmlkZXIiCiAgICAgICAgICAgIGFuZHJvaWQ6ZXhwb3J0ZWQ9ImZhbHNlIgogICAgICAgICAgICBhbmRyb2lkOmdyYW50VXJpUGVybWlzc2lvbnM9InRydWUiPgogICAgICAgICAgICA8bWV0YS1kYXRhCiAgICAgICAgICAgICAgICBhbmRyb2lkOm5hbWU9ImFuZHJvaWQuc3VwcG9ydC5GSUxFX1BST1ZJREVSX1BBVEhTIgogICAgICAgICAgICAgICAgYW5kcm9pZDpyZXNvdXJjZT0iQHhtbC9maWxlX3BhdGhzIiAvPgogICAgICAgIDwvcHJvdmlkZXI+CiAgICA8L2FwcGxpY2F0aW9uPgoKPC9tYW5pZmVzdD4K
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Android 13+ 读图片权限 -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <!-- Android 11+ 全文件访问权限：让华为等国产 ROM 显示「全部文件」选项而非仅「仅媒体」 -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="${appName}"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.WordCount">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="${appName}"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- 接收千牛/微信等「分享」的文件（SEND / SEND_MULTIPLE） -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/msword" />
+                <data android:mimeType="application/vnd.ms-word" />
+                <data android:mimeType="application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+                <data android:mimeType="application/vnd.ms-excel" />
+                <data android:mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+                <data android:mimeType="application/vnd.ms-powerpoint" />
+                <data android:mimeType="application/vnd.openxmlformats-officedocument.presentationml.presentation" />
+                <data android:mimeType="application/pdf" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="text/*" />
+                <data android:mimeType="image/png" />
+                <data android:mimeType="image/jpeg" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="application/dxf" />
+                <data android:mimeType="application/x-dxf" />
+                <data android:mimeType="image/vnd.dwg" />
+                <data android:mimeType="application/dwg" />
+                <data android:mimeType="application/octet-stream" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+
+            <!-- 「用其他应用打开」——让文件管理器/微信/千牛的「打开方式」列表里出现 WordCount -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:mimeType="application/msword" />
+                <data android:mimeType="application/vnd.ms-word" />
+                <data android:mimeType="application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+                <data android:mimeType="application/vnd.ms-excel" />
+                <data android:mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+                <data android:mimeType="application/vnd.ms-powerpoint" />
+                <data android:mimeType="application/vnd.openxmlformats-officedocument.presentationml.presentation" />
+                <data android:mimeType="application/pdf" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="application/dxf" />
+                <data android:mimeType="application/x-dxf" />
+                <data android:mimeType="image/vnd.dwg" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+
+        <!-- 导出 PDF 后通过系统查看器打开 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+
+</manifest>
