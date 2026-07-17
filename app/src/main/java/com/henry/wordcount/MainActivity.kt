@@ -213,7 +213,7 @@ fun WordCountApp(initialUris: List<Uri>) {
         if (missing.isEmpty()) {
             picker.launch(arrayOf("*/*"))
         } else {
-            permLauncher.launch(perms.toTypedArray())
+            permLauncher.launch(perms)
         }
     }
 
