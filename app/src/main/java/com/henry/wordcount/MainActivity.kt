@@ -203,7 +203,7 @@ fun WordCountApp(initialUris: List<Uri>) {
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("字数统计  v1.0.9") }) },
+        topBar = { TopAppBar(title = { Text("字数统计  v1.0.11") }) },
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             Surface(shadowElevation = 4.dp) {
@@ -383,7 +383,7 @@ private fun addFiles(
                 // 文档类：批量交给 Python 统计
                 if (docPaths.isNotEmpty()) {
                     var raw: Any? = null
-                    raw = PythonEngine.countFiles(docPaths)
+                    raw = PythonEngine.countFiles(context, docPaths)
                     (raw as? List<*>)?.forEachIndexed { i, item ->
                         val m = item as? Map<*, *>
                         val ok = m?.get("ok") as? Boolean ?: false
@@ -406,7 +406,7 @@ private fun addFiles(
                     try {
                         val text = OcrEngine.recognize(context, f)
                         var resMap: Map<*, *>? = null
-                        resMap = PythonEngine.countText(text, f.name)
+                        resMap = PythonEngine.countText(context, text, f.name)
                         val fr = toFileResult(resMap, f.absolutePath)
                         entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                     } catch (e: Throwable) {
@@ -425,7 +425,7 @@ private fun addFiles(
                         if (text.isBlank()) {
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = f.name, cachePath = f.absolutePath, error = "此老格式文件内容为空或无法读取"))
                         } else {
-                            val resMap = PythonEngine.countText(text, f.name)
+                            val resMap = PythonEngine.countText(context, text, f.name)
                             val fr = toFileResult(resMap, f.absolutePath)
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                         }
@@ -441,7 +441,7 @@ private fun addFiles(
                         if (text.isBlank()) {
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = f.name, cachePath = f.absolutePath, error = "DWG 文件未提取到文字（可能为纯图形/复杂编码），建议导出为 DXF 后统计"))
                         } else {
-                            val resMap = PythonEngine.countText(text, f.name)
+                            val resMap = PythonEngine.countText(context, text, f.name)
                             val fr = toFileResult(resMap, f.absolutePath)
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                         }
@@ -515,7 +515,7 @@ private fun exportUnreliable(
             val out = File(context.getExternalFilesDir(null), "无法准确统计内容_${System.currentTimeMillis()}.pdf")
             var res: String? = null
             withContext(Dispatchers.IO) {
-                res = PythonEngine.buildExportPdf(filesInfo, out.absolutePath)
+                res = PythonEngine.buildExportPdf(context, filesInfo, out.absolutePath)
             }
             if (res != null) {
                 val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", out)

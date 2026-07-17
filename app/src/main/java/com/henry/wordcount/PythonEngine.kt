@@ -7,26 +7,53 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Chaquopy 桥接层：v8 最小改动版。
+ * Chaquopy 桥接层：v9 重试增强版。
  * Python 端返回 JSON 字符串，Kotlin 端用 JSONObject/JSONArray 解析，
  * 彻底绕开 Chaquopy 的 .toJava() 对嵌套结构（list/dict）转换失败的问题。
  *
- * 修复 RUN#68-#71 的 compileDebugKotlin 失败：
- *   toNative() 返回 Any?，而 countFiles 声明为 : Any（非空）。
- *   原写法 `return toNative(JSONArray(s))` 触发
- *   "Type mismatch: inferred type is Any? but Any was expected"。
- *   改为 `return toNative(JSONArray(s)) ?: emptyList<Any?>()` 保证非空，
- *   同时保持 : Any 签名，MainActivity 的 `as? List<*>` 调用点无需改动。
+ * v9 增强：对 Chaquopy AssetFinder 路径丢失错误（第二次调用时常见），
+ * 自动重新初始化 Python 引擎并重试一次。
  */
 object PythonEngine {
 
     private var started = false
 
     fun start(context: Context) {
-        if (!Python.isStarted()) {
-            Python.start(AndroidPlatform(context))
+        // 每次都尝试 start（Chaquopy 内部会判断是否已初始化）
+        try {
+            if (!Python.isStarted()) {
+                Python.start(AndroidPlatform(context))
+            }
+            started = true
+        } catch (e: Exception) {
+            Log.w("PythonEngine", "start 异常（可能需要重新初始化）: ${e.message}")
+            // 强制重新初始化：某些情况下 isStarted() 返回 true 但内部状态已损坏
+            try {
+                Python.start(AndroidPlatform(context))
+                started = true
+            } catch (e2: Exception) {
+                Log.e("PythonEngine", "强制重新初始化也失败: ${e2.message}")
+            }
         }
-        started = true
+    }
+
+    /** 对 AssetFinder 类型的错误做一次重新初始化+重试 */
+    private inline fun <T> withRetry(context: Context, action: () -> T): T {
+        return try {
+            action()
+        } catch (e: Exception) {
+            val msg = e.message ?: ""
+            if (msg.contains("AssetFinder") || msg.contains("chaquopy") || msg.contains("scripts")) {
+                Log.w("PythonEngine", "检测到 AssetFinder 路径错误，重新初始化 Python 后重试")
+                started = false
+                start(context)
+                try { action() } catch (e2: Exception) {
+                    throw e2 // 重试仍失败则抛出原始异常
+                }
+            } else {
+                throw e
+            }
+        }
     }
 
     private fun toNative(obj: Any?): Any? {
@@ -44,27 +71,33 @@ object PythonEngine {
         return obj
     }
 
-    fun countFiles(paths: List<String>): Any {
-        val py = Python.getInstance()
-        val mod = py.getModule("wordcount")
-        val s = mod.callAttr("count_files", paths).toString()
-        val native = toNative(JSONArray(s))
-        return native ?: emptyList<Any?>()
+    fun countFiles(context: Context, paths: List<String>): Any {
+        return withRetry(context) {
+            val py = Python.getInstance()
+            val mod = py.getModule("wordcount")
+            val s = mod.callAttr("count_files", paths).toString()
+            val native = toNative(JSONArray(s))
+            native ?: emptyList<Any?>()
+        }
     }
 
-    fun countText(text: String, name: String): Map<*, *> {
-        val py = Python.getInstance()
-        val mod = py.getModule("wordcount")
-        val s = mod.callAttr("count_text", text, name).toString()
-        @Suppress("UNCHECKED_CAST")
-        return (toNative(JSONObject(s)) as? Map<*, *>) ?: emptyMap<String, Any?>()
+    fun countText(context: Context, text: String, name: String): Map<*, *> {
+        return withRetry(context) {
+            val py = Python.getInstance()
+            val mod = py.getModule("wordcount")
+            val s = mod.callAttr("count_text", text, name).toString()
+            @Suppress("UNCHECKED_CAST")
+            (toNative(JSONObject(s)) as? Map<*, *>) ?: emptyMap<String, Any?>()
+        }
     }
 
-    fun buildExportPdf(filesInfo: List<List<Any?>>, outPath: String): String? {
-        val py = Python.getInstance()
-        val mod = py.getModule("wordcount")
-        val result = mod.callAttr("build_export_pdf", filesInfo, outPath)
-        val s = result.toString()
-        return if (s == "None") null else s
+    fun buildExportPdf(context: Context, filesInfo: List<List<Any?>>, outPath: String): String? {
+        return withRetry(context) {
+            val py = Python.getInstance()
+            val mod = py.getModule("wordcount")
+            val result = mod.callAttr("build_export_pdf", filesInfo, outPath)
+            val s = result.toString()
+            if (s == "None") null else s
+        }
     }
 }
