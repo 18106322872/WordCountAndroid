@@ -294,7 +294,9 @@ fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEnt
                         )
                         if (r.hasUnreliable) Text("含无法准确统计的内容（可导出）", style = MaterialTheme.typography.bodySmall, color = Color(0xFFB26A00))
                     } else if (entry.error != null) {
-                        Text("不支持：${entry.error}", style = MaterialTheme.typography.bodySmall, color = Color(0xFFB00020))
+                        // 截取首行/前200字，避免满屏 traceback；改前缀为"处理出错"
+                        val shortErr = entry.error!!.substringBefore('\n').take(200)
+                        Text("处理出错：$shortErr", style = MaterialTheme.typography.bodySmall, color = Color(0xFFB00020))
                     } else {
                         Text("统计中…", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                     }

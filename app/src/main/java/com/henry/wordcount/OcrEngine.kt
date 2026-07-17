@@ -31,13 +31,15 @@ object OcrEngine {
         // 安全限制：单图不超 20MB（防止超大图导致 OOM）
         if (imageFile.length() > 20L * 1024 * 1024) return ""
 
-        val api = TessBaseAPI()
-        if (!api.init(base.absolutePath, LANG)) {
-            api.end()
-            return ""
-        }
         var bmp: Bitmap? = null
+        var api: TessBaseAPI? = null
         try {
+            api = TessBaseAPI()
+            if (!api.init(base.absolutePath, LANG)) {
+                Log.w("WordCount", "TessBaseAPI.init 失败 for ${imageFile.name}")
+                api.end()
+                return ""
+            }
             // 先只读边界，按尺寸采样缩小，避免超大位图直接喂给 Tesseract 原生层导致崩溃
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeFile(imageFile.absolutePath, bounds)
@@ -64,7 +66,7 @@ object OcrEngine {
             return ""
         } finally {
             bmp?.recycle()
-            api.end()
+            api?.end()
         }
     }
 

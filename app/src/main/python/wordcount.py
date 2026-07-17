@@ -8221,26 +8221,20 @@ def extract_for(path, sheet_filter, out_dir, converter, with_notes):
 
     if ext == ".pdf":
 
-
-
-        items, meta = extract_pdf(path)
-
-
-
-        pg, reason = count_pages(ext, path)
-
-
-
-        meta["pages"] = pg
-
-
-
-        meta["pages_reason"] = reason
-
-
-
-        return items, meta
-
+        try:
+            items, meta = extract_pdf(path)
+            pg, reason = count_pages(ext, path)
+            meta["pages"] = pg
+            meta["pages_reason"] = reason
+            return items, meta
+        except Exception as e:
+            try:
+                from pdfminer.high_level import extract_text as _et
+                text = _et(path)
+            except Exception:
+                text = ""
+            text_items = [p.strip() for p in text.split("\n\n") if p.strip()]
+            return text_items, {"ext": ext, "pages": None, "pages_reason": "PDF error: %s" % e}
 
 
     if ext in (".xlsx", ".xlsm"):
@@ -9838,7 +9832,10 @@ def count_files(paths, sheet_filter="all", with_notes=False):
 
 
         except Exception as e:
-            out.append({"ok": False, "error": "%s\n%s" % (e, traceback.format_exc()),
+            # 只保留异常消息，不输出完整 traceback（Kotlin 侧会直接展示给用户）
+            tb_lines = traceback.format_exception_only(type(e), e)
+            short_msg = "".join(tb_lines).strip() if tb_lines else str(e)
+            out.append({"ok": False, "error": short_msg,
                         "name": os.path.basename(p)})
 
 
