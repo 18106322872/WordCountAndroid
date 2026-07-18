@@ -16,7 +16,7 @@ import kotlin.concurrent.Volatile
  *
  * v1.0.16 安全增强版：
  *   - 默认**启用**（ocrAvailable=true），用户无需手动操作即可识别图片。
- *   - 防崩溃策略：在独立线程中执行 Tesseract JNI 调用，设置 UncaughtExceptionHandler
+ *   - 防崩溃策略：在独立线程中执行 Tesseract JNI 调用，设置异常处理器
  *     兜底捕获 Signal 类崩溃（SIGSEGV/SIGABRT），防止整个 App 闪退；
  *     崩溃时自动标记 ocrCrashed=true 并降级为禁用状态。
  *   - 超时保护：单图 OCR 不超过 10 秒（防止超大/复杂图片卡死）。
@@ -50,17 +50,17 @@ object OcrEngine {
     }
 
     /**
-     * 安全执行 OCR：在线程中调用 Tesseract，设置 UncaughtExceptionHandler 兜底。
+     * 安全执行 OCR：在线程中调用 Tesseract，设置异常处理器兜底。
      * 若发生 Signal 崩溃（SIGSEGV 等）则捕获并自动禁用后续 OCR 调用。
      */
     private fun doRecognizeSafe(base: File, imageFile: File): String {
-        val resultHolder = arrayOf<String?("") as Any)
+        val resultHolder = arrayOf<String?>(null)
         val errorHolder = arrayOf<Throwable?>(null)
 
         val thread = object : Thread("OcrWorker-${System.currentTimeMillis()}") {
             override fun run() {
                 // 设置线程级异常处理器：捕获 JNI Signal 崩溃
-                defaultUncaughtExceptionHandler = Thread.UncaughtExceptionHandler { _, _ ->
+                uncaughtExceptionHandler = Thread.UncaughtExceptionHandler { _, _ ->
                     // 标记崩溃但不让默认处理器杀进程
                     synchronized(errorHolder) { errorHolder[0] = RuntimeException("OCR native crash") }
                 }
@@ -129,7 +129,7 @@ object OcrEngine {
             return ""
         } catch (e: Throwable) {
             Log.w("WordCount", "OCR exception ${imageFile.name}: ${e.javaClass.simpleName}: ${e.message}")
-            throw e // 向上抛出，由外层 UncaughtExceptionHandler 或 join 捕获
+            throw e // 向上抛出，由外层异常处理器或 join 捕获
         } finally {
             try { bmp?.recycle() } catch (_: Exception) {}
             try { api?.end() } catch (_: Exception) {}

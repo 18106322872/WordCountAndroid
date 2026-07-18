@@ -1,22 +1,18 @@
 package com.henry.wordcount
 
-import org.apache.commons.compress.archivers.ArchiveInputStream
-import org.apache.commons.compress.archivers.ArchiveStreamFactory
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry
-import org.apache.commons.compress.archivers.arj.ArjArchiveEntry
+import org.apache.commons.compress.archivers.sevenz.SevenZFile
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
-import org.apache.commons.compress.utils.IOUtils
+import com.github.junrar.Junrar
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.charset.StandardCharsets
 
 /**
- * 压缩包统计层（基于 Apache Commons Compress，项目已有依赖）。
+ * 压缩包统计层（ZIP/7Z/TAR/GZ 基于 Apache Commons Compress；RAR4 基于 junrar）。
  *
- * 支持：ZIP / RAR4 / 7Z / TAR / GZ / TGZ / ARJ / CPIO
- * RAR5 需原生 unrar 库，commons-compress 仅支持 RAR4（绝大多数常见 RAR 文件均为 RAR4 格式）。
+ * 支持：ZIP / RAR4 / 7Z / TAR / GZ / TGZ
  * 对每个内层受支持文件，复用既有引擎抽取文本并统计字数。
  */
 object ArchiveEngine {
@@ -128,20 +124,21 @@ object ArchiveEngine {
         return aggregate(inner)
     }
 
-    // ──────────────────── RAR4 (commons-compress) ────────────────────
+    // ──────────────────── RAR4 (junrar，纯 Java RAR 解压库) ────────────────────
     private fun fromRar(file: File, cacheDir: File): ArchiveResult {
         val inner = mutableListOf<InnerResult>()
-        file.inputStream().use { fis ->
-            val ais = ArchiveStreamFactory().createArchiveInputStream("rar", fis) as? org.apache.commons.compress.archivers.rar.RARArchiveInputStream
-                ?: return aggregate(inner) // 不支持则返回空结果
-            var entry = ais.nextEntry
-            while (entry != null) {
-                if (!entry.isDirectory) {
-                    val bytes = IOUtils.toByteArray(ais)
-                    if (bytes.isNotEmpty()) processEntry(entry.name, bytes, cacheDir, inner)
-                }
-                entry = ais.nextEntry
+        val dest = File(cacheDir, "rar_${System.currentTimeMillis()}")
+        dest.mkdirs()
+        try {
+            // junrar 解包到临时目录后，逐个识别内层文本文件并统计
+            val extracted = Junrar.extract(file.absolutePath, dest.absolutePath)
+            extracted.forEach { f ->
+                if (f.isFile) processEntry(f.name, f.readBytes(), cacheDir, inner)
             }
+        } catch (_: Throwable) {
+            // RAR5 / 加密 / 损坏等情况会抛异常，交由调用方显示“解析失败”
+        } finally {
+            runCatching { dest.deleteRecursively() }
         }
         return aggregate(inner)
     }
@@ -170,18 +167,16 @@ object ArchiveEngine {
         return aggregate(inner)
     }
 
-    /** 7Z（commons-compress 支持） */
+    /** 7Z（commons-compress SevenZFile） */
     private fun fromSevenZip(file: File, cacheDir: File): ArchiveResult {
         val inner = mutableListOf<InnerResult>()
-        file.inputStream().use { fis ->
-            val ais = ArchiveStreamFactory().createArchiveInputStream("7z", fis)
-            var entry = ais.nextEntry
-            while (entry != null) {
+        SevenZFile(file).use { sevenz ->
+            while (true) {
+                val entry = sevenz.nextEntry ?: break
                 if (!entry.isDirectory) {
-                    val bytes = IOUtils.toByteArray(ais)
+                    val bytes = sevenz.getInputStream(entry).readBytes()
                     if (bytes.isNotEmpty()) processEntry(entry.name, bytes, cacheDir, inner)
                 }
-                entry = ais.nextEntry
             }
         }
         return aggregate(inner)

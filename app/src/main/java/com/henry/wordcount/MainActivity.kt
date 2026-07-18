@@ -82,7 +82,7 @@ class MainActivity : ComponentActivity() {
     }
 
     /** v1.0.16: 处理从微信/千牛等应用后续传入的文件，追加到已有列表而非替换 */
-    override fun onNewIntent(intent: Intent?) {
+    override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent) // 必须调用，否则 getIntent() 返回旧 intent
         val newUris = extractUrisFromIntent(intent)
