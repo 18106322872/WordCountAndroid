@@ -415,8 +415,9 @@ private fun addFiles(
                 val files = uris.map { copyUriToCache(context, it) }
             val imageFiles = mutableListOf<File>()
             val oldOfficeFiles = mutableListOf<File>()
-            val ooxmlFiles = mutableListOf<File>()   // v1.0.14: .docx/.xlsx/.pptx
-            val pdfFiles = mutableListOf<File>()     // v1.0.14: .pdf
+            val ooxmlPaths = mutableListOf<String>()    // .docx/.xlsx/.pptx（暂走 Python）
+            val ooxmlNames = mutableListOf<String>()     // 对应文件名
+            val pdfFiles = mutableListOf<File>()     // v1.0.14: 自实现轻量 PDF 解析
             val dwgFiles = mutableListOf<File>()
             val txtFiles = mutableListOf<File>()  // TXT 纯 Kotlin 处理
             for (f in files) {
@@ -424,13 +425,12 @@ private fun addFiles(
                 when {
                     ext in IMAGE_EXTS -> imageFiles.add(f)
                     ext in OLD_OFFICE_EXTS -> oldOfficeFiles.add(f)
-                    ext in OOXML_EXTS -> ooxmlFiles.add(f)
+                    ext in OOXML_EXTS -> { ooxmlPaths.add(f.absolutePath); ooxmlNames.add(f.name) }
                     ext in PDF_EXTS -> pdfFiles.add(f)
                     ext in DWG_EXTS -> dwgFiles.add(f)
                     ext in TXT_EXTS -> txtFiles.add(f)  // 绕开 Python
                     else -> {
                         // 其他格式（如 .rtf 等）：尝试用 Python 处理
-                        // 但大部分常见格式已被上面覆盖
                         txtFiles.add(f)  // 暂时归入 TXT（当作纯文本读）
                     }
                 }
@@ -466,29 +466,30 @@ private fun addFiles(
                 }
 
                 // ════════════════════════════════════════
-                // OOXML (.docx/.xlsx/.pptx): Apache POI 纯 Java
+                // OOXML (.docx/.xlsx/.pptx)：暂走 Python
+                // （poi-ooxml 在 Android 有 StAX 兼容问题，后续版本解决后切纯 Java）
                 // ════════════════════════════════════════
-                ooxmlFiles.forEachIndexed { i, f ->
-                    try {
-                        val text = DocxEngine.extractText(f)
-                        if (text.isBlank()) {
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = f.name, cachePath = f.absolutePath,
-                                error = "${f.extension.uppercase()} 文件内容为空或无法读取"))
-                        } else {
-                            val stats = countTextKotlin(text)
-                            val extDot = ".${f.extension.lowercase()}"
-                            val resMap = mapOf(
-                                "name" to f.name, "ext" to extDot,
-                                "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
-                                "meta" to emptyMap<String, Any?>()
-                            )
-                            val fr = toFileResult(resMap, f.absolutePath)
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                if (ooxmlPaths.isNotEmpty()) {
+                    for (i in ooxmlPaths.indices) {
+                        try {
+                            val raw = PythonEngine.countFiles(context, listOf(ooxmlPaths[i]))
+                            (raw as? List<*>)?.forEachIndexed { _, item ->
+                                val m = item as? Map<*, *>
+                                val ok = m?.get("ok") as? Boolean ?: false
+                                val name = m?.get("name") as? String ?: ooxmlNames.getOrNull(i) ?: "文件"
+                                if (ok) {
+                                    val resMap = m?.get("result") as? Map<*, *>
+                                    val fr = toFileResult(resMap, ooxmlPaths[i])
+                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = name, cachePath = ooxmlPaths[i], result = fr, rawResult = resMap))
+                                } else {
+                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = name, cachePath: ooxmlPaths[i], error = m?.get("error") as? String))
+                                }
+                            }
+                        } catch (e: Throwable) {
+                            Log.w("WordCount", "OOXML 处理失败 [${ooxmlNames.getOrNull(i)}]: ${e.javaClass.simpleName}: ${e.message}")
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = ooxmlNames.getOrNull(i) ?: "文件", cachePath = ooxmlPaths[i],
+                                error = "处理出错：${(e.message ?: "未知错误").substringBefore('\n').take(200)}"))
                         }
-                    } catch (e: Throwable) {
-                        Log.w("WordCount", "OOXML 处理失败 ${f.name}: ${e.javaClass.simpleName}: ${e.message}")
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = f.name, cachePath = f.absolutePath,
-                            error = "${f.extension.uppercase()} 解析失败（${e.message}）"))
                     }
                 }
 
