@@ -195,11 +195,12 @@ fun WordCountApp(initialUris: List<Uri>) {
 
     val totals = run {
         val sel = entries.filter { it.selected && it.result != null }
-        var w = 0; var fe = 0; var nc = 0; var ch = 0
+        var w = 0; var fe = 0; var nc = 0; var ch = 0; var pg = 0
         sel.forEach { r ->
             w += r.result!!.words; fe += r.result!!.fe; nc += r.result!!.nc; ch += r.result!!.chars
+            pg += r.result!!.pages ?: estimatePages(r.result!!.chars)
         }
-        mapOf("words" to w, "fe" to fe, "nc" to nc, "chars" to ch)
+        mapOf("words" to w, "fe" to fe, "nc" to nc, "chars" to ch, "pages" to pg)
     }
 
     Scaffold(
@@ -227,7 +228,7 @@ fun WordCountApp(initialUris: List<Uri>) {
                         Text("合计（已选 ${entries.count { it.selected }} 项）", fontWeight = FontWeight.Bold)
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        Text("字数 ${totals["words"]} ｜ 中文 ${totals["fe"]} ｜ 非中文 ${totals["nc"]} ｜ 页数 ${totals["chars"]}")
+                        Text("字数 ${totals["words"]} ｜ 中文 ${totals["fe"]} ｜ 非中文 ${totals["nc"]} ｜ 页数 ${totals["pages"]}")
                     }
                     Spacer(Modifier.padding(4.dp))
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -304,11 +305,11 @@ fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEnt
                     Text(entry.displayName, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     val r = entry.result
                     if (r != null) {
-                        Text(
-                            "字数 ${r.words} ｜ 中文 ${r.fe} ｜ 非中文 ${r.nc} ｜ 字符 ${r.chars}" +
-                                    (if (r.pages != null) " ｜ 页 ${r.pages}" else if (r.pagesReason != null) " ｜ ${r.pagesReason}" else ""),
-                            style = MaterialTheme.typography.bodySmall, color = Color.Gray
-                        )
+                    Text(
+                        "字数 ${r.words} ｜ 中文 ${r.fe} ｜ 非中文 ${r.nc} ｜ 页 ${r.pages ?: estimatePages(r.chars)}" +
+                                (if (r.pagesReason != null) " ｜ ${r.pagesReason}" else ""),
+                        style = MaterialTheme.typography.bodySmall, color = Color.Gray
+                    )
                         if (r.hasUnreliable) Text("含无法准确统计的内容（可导出）", style = MaterialTheme.typography.bodySmall, color = Color(0xFFB26A00))
                     } else if (entry.error != null) {
                         // 截取首行/前200字，避免满屏 traceback；改前缀为"处理出错"
@@ -448,25 +449,26 @@ private fun addFiles(
                         error = "压缩文件统计功能开发中（v1.0.15）"))
                 }
 
-                // OOXML (docx/xlsx/pptx) → 暂走 Python
+                // OOXML (docx/xlsx/pptx) → 纯 Kotlin 解析（不再经过 Python，规避设备端 Chaquopy 失败）
                 ooxmlFiles.forEachIndexed { i, f ->
                     try {
-                        val raw = PythonEngine.countFiles(context, listOf(f.absolutePath))
-                        (raw as? List<*>)?.forEachIndexed { _, item ->
-                            val m = item as? Map<*, *>
-                            val ok = m?.get("ok") as? Boolean ?: false
-                            val name = m?.get("name") as? String ?: f.name
-                            if (ok) {
-                                val resMap = m?.get("result") as? Map<*, *>
-                                val fr = toFileResult(resMap, f.absolutePath)
-                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-                            } else {
-                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = name, cachePath = f.absolutePath, error = m?.get("error") as? String))
-                            }
+                        val res = OoXmlEngine.extract(f)
+                        if (res == null) {
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = f.name, cachePath = f.absolutePath, error = "无法解析此 OOXML 文件（可能损坏或非标准格式）"))
+                        } else {
+                            val stats = countTextKotlin(res.text)
+                            val resMap = mapOf(
+                                "name" to f.name, "ext" to ".${f.extension.lowercase()}",
+                                "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
+                                "meta" to mapOf("sheets" to res.sheets),
+                                "pages" to res.pages
+                            )
+                            val fr = toFileResult(resMap, f.absolutePath)
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                         }
                     } catch (e: Throwable) {
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = f.name, cachePath = f.absolutePath,
-                            error = "处理出错：${(e.message ?: "未知错误").substringBefore('\n').take(200)}"))
+                        Log.w("WordCount", "OOXML 解析失败 ${f.name}: ${e.message}")
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = f.name, cachePath = f.absolutePath, error = "OOXML 解析失败（${e.message}）"))
                     }
                 }
 
@@ -602,6 +604,9 @@ private fun addFiles(
     }
 }
 
+/** 文本类格式（无明确页概念）按字符量估算页数：每 ~1000 字符一页，至少 1 页。 */
+private fun estimatePages(chars: Int): Int = maxOf(1, (chars + 999) / 1000)
+
 private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
     val stats = m?.get("stats") as? Map<*, *> ?: emptyMap<String, Any>()
     val meta = m?.get("meta") as? Map<*, *> ?: emptyMap<String, Any>()
@@ -627,7 +632,7 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
         fe = (stats["fe"] as? Number)?.toInt() ?: 0,
         nc = (stats["nc"] as? Number)?.toInt() ?: 0,
         chars = (stats["chars"] as? Number)?.toInt() ?: 0,
-        pages = m?.get("pages") as? Int,
+        pages = (m?.get("pages") as? Int) ?: estimatePages((stats["chars"] as? Number)?.toInt() ?: 0),
         pagesReason = m?.get("pages_reason") as? String,
         sheets = (meta["sheets"] as? List<*>)?.mapNotNull { it as? String } ?: emptyList(),
         inner = inner,
