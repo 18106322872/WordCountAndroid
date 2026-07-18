@@ -13,8 +13,8 @@ android {
         // minSdk 26：Apache POI 5.x / log4j 用到 MethodHandle.invoke，D8 要求 Android O(26) 起
         minSdk 26
         targetSdk 34
-        versionCode 17
-        versionName '1.0.17'
+        versionCode 18
+        versionName '1.0.18'
 
         // 只编 arm64-v8a（华为等现代手机），缩小体积、功能零影响
         ndk {
@@ -35,7 +35,7 @@ android {
                     install 'olefile'
                     // 注：pymupdf(fitz) 在 Chaquopy 无 Android wheel，故不引入；
                     // 引擎已对 fitz 缺失做降级（PDF 文字层/图片OCR/.ai/导出PDF 相应降级）。
-                    // 注：图片 OCR 改在 Kotlin 层用 Tesseract(tess-two) 完成，无需 Python 端 onnxruntime。
+                    // 注：图片 OCR 改在 Kotlin 层用 Google ML Kit 完成（稳定、支持中文、无 JNI 崩溃），无需 Python 端。
                 }
             }
         }
@@ -106,8 +106,9 @@ dependencies {
     // Manifest 层主题(Theme.Material3.DayNight.NoActionBar / colorSurface attr) 由 MDC 提供；
     // Compose 内仍用 androidx.compose.material3 的 MaterialTheme。两者共存、互不冲突。
     implementation 'com.google.android.material:material:1.12.0'
-    // 图片 OCR：Tesseract 安卓移植（离线、无需 GMS/账号），模型由 CI 放入 assets
-    implementation 'com.rmtheis:tess-two:9.1.0'
+    // 图片 OCR：Google ML Kit Text Recognition（官方、稳定、支持中文、无 JNI 崩溃）
+    implementation 'com.google.mlkit:text-recognition:16.0.0'
+    implementation 'com.google.mlkit:text-recognition-chinese:16.0.0'
     // 老格式(.doc/.xls/.ppt)解析：Apache POI（Java，安卓原生运行，不依赖 Windows）
     // 仅用 poi + poi-scratchpad（HSSF/HWPF/HSLF），不引入 poi-ooxml，避免安卓缺 javax.xml.stream 的坑
     implementation 'org.apache.poi:poi:5.2.5'

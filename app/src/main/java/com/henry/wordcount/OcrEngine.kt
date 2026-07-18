@@ -1,36 +1,68 @@
 package com.henry.wordcount
 
 import android.content.Context
+import android.graphics.BitmapFactory
 import android.util.Log
+import com.google.android.gms.tasks.Tasks
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import java.io.File
+import java.util.concurrent.TimeUnit
 
 /**
- * OCR 引擎（v1.0.17：默认禁用）。
+ * OCR 引擎（v1.0.18）：基于 Google ML Kit Text Recognition。
  *
- * Tesseract (tess-two) 在部分 Android 设备上通过 JNI 调用原生库时，
- * 会触发 SIGSEGV 信号导致整个 App 进程崩溃（Java 层的 UncaughtExceptionHandler 无法拦截）。
- * 此问题与设备/ABI 相关，无法在运行时可靠预测或规避。
+ * 相比 v1.0.16/1.0.17 使用的 Tesseract(tess-two)，ML Kit 是官方纯 Kotlin 接口、
+ * 无 JNI 原生崩溃（SIGSEGV）风险，且原生支持中文，因此不会再出现图片闪退。
  *
- * 因此 v1.0.17 起 **默认禁用**。后续若需启用，可考虑替换为 Google ML Kit Text Recognition API
- *（纯 Java/Kotlin 接口、无 JNI 崩溃风险、离线可用），但需引入额外的 play-services 依赖。
+ * 识别过程包在 try/catch 中：模型未就绪 / 设备不支持 / 超时 等情况只会返回空串并标记
+ * ocrFailed，绝不会导致 App 崩溃。
  */
 object OcrEngine {
 
-    /** OCR 开关：当前固定为 false（Tesseract JNI 在 Android 上不稳定） */
-    @Volatile var ocrEnabled: Boolean = false
+    /** OCR 开关：ML Kit 稳定，默认开启 */
+    @Volatile var ocrEnabled: Boolean = true
 
-    /** 是否曾因崩溃被自动禁用（供 UI 显示提示） */
-    @Volatile var ocrCrashed: Boolean = false
+    /** 是否曾识别失败（供 UI 显示提示） */
+    @Volatile var ocrFailed: Boolean = false
         private set
 
+    /** 懒加载的中文文字识别器（同时兼容拉丁字母） */
+    private val recognizer by lazy {
+        TextRecognition.getClient(
+            ChineseTextRecognizerOptions.Builder().build()
+        )
+    }
+
     /**
-     * 识别图片文件。当前始终返回空串（OCR 已禁用）。
-     * 调用方应检查 ocrEnabled / ocrCrashed 并向用户展示相应提示。
+     * 识别图片文件中的文字。
+     * @return 识别到的文字；失败或空图返回空串。
      */
     fun recognize(context: Context, imageFile: File): String {
         if (!ocrEnabled) return ""
-        // 以下代码仅在 ocrEnabled 被手动改为 true 时执行（开发者调试用途）
-        Log.w("WordCount", "OCR is experimental and may crash on some devices")
-        return ""
+        return try {
+            val bitmap = decodeSampled(imageFile, 2048) ?: return ""
+            val image = InputImage.fromBitmap(bitmap, 0)
+            // 在 IO 线程上阻塞等待结果（超时 20s，给模型首次加载留足时间）
+            val visionText = Tasks.await(recognizer.process(image), 20, TimeUnit.SECONDS)
+            visionText.text ?: ""
+        } catch (e: Throwable) {
+            Log.w("WordCount", "OCR 失败 ${imageFile.name}: ${e.javaClass.simpleName}: ${e.message}")
+            ocrFailed = true
+            ""
+        }
     }
+
+    /** 安全解码图片：按最大边长缩放，避免超大图 OOM。 */
+    private fun decodeSampled(file: File, maxDim: Int): android.graphics.Bitmap? = try {
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, opts)
+        val w = opts.outWidth
+        val h = opts.outHeight
+        if (w <= 0 || h <= 0) return null
+        val scale = maxOf(1, maxOf(w, h) / maxDim)
+        val opts2 = BitmapFactory.Options().apply { inSampleSize = scale }
+        BitmapFactory.decodeFile(file.absolutePath, opts2)
+    } catch (_: Throwable) { null }
 }

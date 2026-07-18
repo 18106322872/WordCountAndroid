@@ -6,8 +6,7 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
-# 单任务：编译 APK。图片 OCR 用 Kotlin 层 Tesseract(tess-two)，
-# 中文模型 chi_sim.traineddata 在 CI 内下载进 assets，随 APK 内置，完全离线。
+# 单任务：编译 APK。图片 OCR 用 Google ML Kit Text Recognition（自带中文模型、无 JNI 崩溃）。
 
 # 允许默认 GITHUB_TOKEN 创建 Release（否则发布 APK 会 403）
 permissions:
@@ -44,13 +43,6 @@ jobs:
         with:
           gradle-version: 8.9
           cache-disabled: true
-
-      - name: Download Tesseract chi_sim traineddata into assets
-        run: |
-          mkdir -p app/src/main/assets/tessdata
-          curl -L -o app/src/main/assets/tessdata/chi_sim.traineddata \
-            https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/chi_sim.traineddata
-          ls -lh app/src/main/assets/tessdata/
 
       # 版本号抽成独立步骤，后续步骤统一引用，避免作用域为空
       - name: Read version

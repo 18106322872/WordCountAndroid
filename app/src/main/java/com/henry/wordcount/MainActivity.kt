@@ -242,7 +242,7 @@ fun WordCountApp(initialUris: List<Uri>) {
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("字数统计  v1.0.17") }) },
+        topBar = { TopAppBar(title = { Text("字数统计  v1.0.18") }) },
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             Surface(shadowElevation = 4.dp) {
@@ -715,11 +715,35 @@ private fun addFiles(
                             error = "读取失败（${e.message}）"))
                     }
                 }
-                // 图片类：OCR 当前不可用（v1.0.17，Tesseract JNI 在 Android 上不稳定）
+                // 图片类：OCR（v1.0.18 起使用 Google ML Kit，稳定不闪退）
                 imageFiles.forEachIndexed { i, f ->
-                    // 始终显示"暂不支持"——不尝试调用 Tesseract 避免闪退
-                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath,
-                        error = "图片文字识别暂不支持（当前设备兼容性问题）"))
+                    try {
+                        val text = OcrEngine.recognize(context, f)
+                        if (text.isBlank()) {
+                            val err = if (OcrEngine.ocrFailed)
+                                "图片识别失败（模型未就绪或设备不支持）"
+                            else
+                                "未识别到文字（纯图/手写/模糊不清）"
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath,
+                                error = err))
+                        } else {
+                            val stats = countTextKotlin(text)
+                            val resMap = mapOf(
+                                "name" to f.name, "ext" to ".img",
+                                "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
+                                "meta" to emptyMap<String, Any?>()
+                            )
+                            val fr = toFileResult(resMap, f.absolutePath)
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                        }
+                    } catch (e: OutOfMemoryError) {
+                        Runtime.getRuntime().gc()
+                        Log.w("WordCount", "图片过大 OOM ${f.name}")
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, error = "图片过大，内存不足"))
+                    } catch (e: Throwable) {
+                        Log.w("WordCount", "OCR 失败 ${f.name}: ${e.javaClass.simpleName}: ${e.message}")
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, error = "图片识别失败（${e.message}）"))
+                    }
                 }
             }
         } catch (e: Throwable) {
