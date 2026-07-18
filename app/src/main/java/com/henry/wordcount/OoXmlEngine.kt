@@ -42,8 +42,8 @@ object OoXmlEngine {
     internal fun parseDocxXml(bytes: ByteArray): String {
         val sb = StringBuilder()
         val factory = SAXParserFactory.newInstance()
-        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-        factory.setFeature("http://xml.org/sax/features/external-general-entities", false)
+        try { factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true) } catch (_: Exception) {}
+        try { factory.setFeature("http://xml.org/sax/features/external-general-entities", false) } catch (_: Exception) {}
         factory.setNamespaceAware(true)
         val parser = factory.newSAXParser()
         val handler = object : org.xml.sax.helpers.DefaultHandler() {
@@ -100,8 +100,8 @@ object OoXmlEngine {
     internal fun parseSharedStrings(bytes: ByteArray): List<String> {
         val strings = mutableListOf<String>()
         val factory = SAXParserFactory.newInstance()
-        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-        factory.setFeature("http://xml.org/sax/features/external-general-entities", false)
+        try { factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true) } catch (_: Exception) {}
+        try { factory.setFeature("http://xml.org/sax/features/external-general-entities", false) } catch (_: Exception) {}
         factory.setNamespaceAware(true)
         val parser = factory.newSAXParser()
         val handler = object : org.xml.sax.helpers.DefaultHandler() {
@@ -133,8 +133,8 @@ object OoXmlEngine {
     internal fun parseSheetXml(bytes: ByteArray, sharedStrings: List<String>): String {
         val rows = mutableMapOf<Int, MutableList<Pair<Int, String>>>() // rowNum -> [(colIdx, text)]
         val factory = SAXParserFactory.newInstance()
-        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-        factory.setFeature("http://xml.org/sax/features/external-general-entities", false)
+        try { factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true) } catch (_: Exception) {}
+        try { factory.setFeature("http://xml.org/sax/features/external-general-entities", false) } catch (_: Exception) {}
         factory.setNamespaceAware(true)
         val parser = factory.newSAXParser()
         val handler = object : org.xml.sax.helpers.DefaultHandler() {
@@ -229,8 +229,8 @@ object OoXmlEngine {
     internal fun parsePptxSlideXml(bytes: ByteArray): String {
         val sb = StringBuilder()
         val factory = SAXParserFactory.newInstance()
-        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-        factory.setFeature("http://xml.org/sax/features/external-general-entities", false)
+        try { factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true) } catch (_: Exception) {}
+        try { factory.setFeature("http://xml.org/sax/features/external-general-entities", false) } catch (_: Exception) {}
         factory.setNamespaceAware(true)
         val parser = factory.newSAXParser()
         val handler = object : org.xml.sax.helpers.DefaultHandler() {

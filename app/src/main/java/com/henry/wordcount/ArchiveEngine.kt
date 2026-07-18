@@ -247,7 +247,11 @@ object ArchiveEngine {
 
     private fun decodeText(bytes: ByteArray): String {
         // 尝试多种编码
-        val encodings = listOf(Charsets.UTF_8, Charset.forName("GBK"), Charsets.ISO_8859_1, Charset.forName("UTF-16"))
+        val encodings = listOf(
+            Charsets.UTF_8,
+            runCatching { Charset.forName("GB2312") }.getOrNull() ?: Charsets.ISO_8859_1,  // GBK/GB2312 可能不可用
+            Charsets.ISO_8859_1
+        )
         for (enc in encodings) {
             try {
                 val text = String(bytes, enc)
