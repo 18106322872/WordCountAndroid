@@ -442,58 +442,53 @@ private fun addFiles(
                 // 全部纯 Java/Kotlin，不依赖 Chaquopy/Python
                 // ════════════════════════════════════════
 
-                // 压缩包
+                // 压缩包 → 暂不支持，显示提示
                 archiveFiles.forEachIndexed { i, f ->
-                    try {
-                        val result = ArchiveEngine.processArchive(f)
-                        val stats = countTextKotlin(result.text)
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = f.name, cachePath = f.absolutePath,
-                            result = FileResult(name=f.name, ext=".${f.extension.lowercase()}", isArchive=true,
-                                words=stats.first, fe=stats.second, nc=stats.third, chars=stats.fourth,
-                                pages=null, pagesReason=null, sheets=result.sheets, inner=result.inner, hasUnreliable=false)))
-                    } catch (e: Throwable) {
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = f.name, cachePath = f.absolutePath,
-                            error = "压缩包解析失败（${e.message}）"))
-                    }
+                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = f.name, cachePath = f.absolutePath,
+                        error = "压缩文件统计功能开发中（v1.0.15）"))
                 }
 
-                // OOXML (docx/xlsx/pptx) → OoXmlEngine
+                // OOXML (docx/xlsx/pptx) → 暂走 Python
                 ooxmlFiles.forEachIndexed { i, f ->
                     try {
-                        val text = OoXmlEngine.extractText(f)
-                        if (text.isBlank()) {
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = f.name, cachePath = f.absolutePath,
-                                error = "此文件内容为空或无法读取"))
-                        } else {
-                            val stats = countTextKotlin(text)
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = f.name, cachePath = f.absolutePath,
-                                result = FileResult(name=f.name, ext=".${f.extension.lowercase()}", isArchive=false,
-                                    words=stats.first, fe=stats.second, nc=stats.third, chars=stats.fourth,
-                                    pages=null, pagesReason=null, sheets=emptyList(), inner=emptyList(), hasUnreliable=false)))
+                        val raw = PythonEngine.countFiles(context, listOf(f.absolutePath))
+                        (raw as? List<*>)?.forEachIndexed { _, item ->
+                            val m = item as? Map<*, *>
+                            val ok = m?.get("ok") as? Boolean ?: false
+                            val name = m?.get("name") as? String ?: f.name
+                            if (ok) {
+                                val resMap = m?.get("result") as? Map<*, *>
+                                val fr = toFileResult(resMap, f.absolutePath)
+                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                            } else {
+                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = name, cachePath = f.absolutePath, error = m?.get("error") as? String))
+                            }
                         }
                     } catch (e: Throwable) {
                         entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = f.name, cachePath = f.absolutePath,
-                            error = "无法解析此文件（${e.message}）"))
+                            error = "处理出错：${(e.message ?: "未知错误").substringBefore('\n').take(200)}"))
                     }
                 }
 
-                // PDF → PdfExtractor
+                // PDF → 暂走 Python
                 pdfFiles.forEachIndexed { i, f ->
                     try {
-                        val text = PdfExtractor.extractText(f)
-                        if (text.isBlank()) {
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = f.name, cachePath = f.absolutePath,
-                                error = "PDF 未提取到文字（可能是扫描件或图片 PDF）"))
-                        } else {
-                            val stats = countTextKotlin(text)
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = f.name, cachePath = f.absolutePath,
-                                result = FileResult(name=f.name, ext=".pdf", isArchive=false,
-                                    words=stats.first, fe=stats.second, nc=stats.third, chars=stats.fourth,
-                                    pages=null, pagesReason=null, sheets=emptyList(), inner=emptyList(), hasUnreliable=false)))
+                        val raw = PythonEngine.countFiles(context, listOf(f.absolutePath))
+                        (raw as? List<*>)?.forEachIndexed { _, item ->
+                            val m = item as? Map<*, *>
+                            val ok = m?.get("ok") as? Boolean ?: false
+                            val name = m?.get("name") as? String ?: f.name
+                            if (ok) {
+                                val resMap = m?.get("result") as? Map<*, *>
+                                val fr = toFileResult(resMap, f.absolutePath)
+                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                            } else {
+                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = name, cachePath = f.absolutePath, error = m?.get("error") as? String))
+                            }
                         }
                     } catch (e: Throwable) {
                         entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = f.name, cachePath = f.absolutePath,
-                            error = "PDF 解析失败（${e.message}）"))
+                            error = "PDF 处理出错：${(e.message ?: "未知错误").substringBefore('\n').take(200)}"))
                     }
                 }
 
