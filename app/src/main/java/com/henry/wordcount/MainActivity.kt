@@ -280,6 +280,7 @@ fun WordCountApp(initialUris: List<Uri>) {
                             val i = entries.indexOf(e)
                             if (i >= 0) entries.removeAt(i)
                         },
+                        onOpen = { e -> openWithOtherApp(context, e) }
                     )
                 }
                 if (busy) item {
@@ -293,7 +294,7 @@ fun WordCountApp(initialUris: List<Uri>) {
 }
 
 @Composable
-fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEntry) -> Unit) {
+fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEntry) -> Unit, onOpen: (FileEntry) -> Unit) {
     Card(
         Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
@@ -302,7 +303,12 @@ fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEnt
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(checked = entry.selected, onCheckedChange = { onToggle(entry) })
                 Column(Modifier.weight(1f)) {
-                    Text(entry.displayName, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    // 文件名可点击：用其它应用打开
+                    Text(
+                        entry.displayName, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.clickable { onOpen(entry) }
+                    )
                     val r = entry.result
                     if (r != null) {
                     Text(
@@ -321,6 +327,10 @@ fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEnt
                 }
                 Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.small) {
                     Text(" ${entry.result?.ext?.uppercase() ?: "?"} ", Modifier.padding(6.dp, 2.dp), style = MaterialTheme.typography.labelSmall)
+                }
+                // 用其它应用打开
+                IconButton(onClick = { onOpen(entry) }) {
+                    Text("打开", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                 }
                 // 删除按钮
                 IconButton(onClick = { onDelete(entry) }) {
@@ -349,7 +359,7 @@ fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEnt
  * Word 口径：字数 = 中文字符和朝鲜语单词 + 非中文单词
  * 返回 (words, fe, nc, chars)
  */
-private fun countTextKotlin(text: String): Quadruple<Int, Int, Int, Int> {
+fun countTextKotlin(text: String): Quadruple<Int, Int, Int, Int> {
     // FarEast 正则：CJK + 朝鲜语 + 全角（与 Python 端 _FAR 完全一致）
     val farEastRegex = Regex("[\\u1100-\\u11FF\\u3000-\\u303F\\u3130-\\u318F\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uA960-\\uA97C\\uAC00-\\uD7A3\\uD7B0-\\uD7FF\\uF900-\\uFAFF\\uFF00-\\uFFEF]")
     val nonCjkRegex = Regex("[^\\s\\u1100-\\u11FF\\u3000-\\u303F\\u3130-\\u318F\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uA960-\\uA97C\\uAC00-\\uD7A3\\uD7B0-\\uD7FF\\uF900-\\uFAFF\\uFF00-\\uFFEF]+")
@@ -375,6 +385,52 @@ private fun countTextKotlin(text: String): Quadruple<Int, Int, Int, Int> {
 
 /** 简单四元组（避免引入额外依赖）*/
 data class Quadruple<out A, out B, out C, out D>(val first: A, val second: B, val third: C, val fourth: D)
+
+/** 用系统/其它应用打开缓存文件（点击文件名或「打开」触发）。 */
+private fun openWithOtherApp(context: android.content.Context, entry: FileEntry) {
+    try {
+        val file = File(entry.cachePath)
+        if (!file.exists()) {
+            Log.w("WordCount", "打开失败：缓存文件不存在 ${entry.displayName}")
+            return
+        }
+        val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
+        val mime = mimeForExt(entry.result?.ext ?: "")
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mime)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(intent, "用其他应用打开"))
+    } catch (e: Throwable) {
+        Log.w("WordCount", "打开文件失败 ${entry.displayName}: ${e.message}")
+    }
+}
+
+/** 扩展名 → MIME type（用于「用其他应用打开」）。 */
+private fun mimeForExt(ext: String): String {
+    return when (ext.lowercase()) {
+        ".doc" -> "application/msword"
+        ".docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ".xls" -> "application/vnd.ms-excel"
+        ".xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ".ppt" -> "application/vnd.ms-powerpoint"
+        ".pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        ".pdf" -> "application/pdf"
+        ".txt" -> "text/plain"
+        ".csv" -> "text/csv"
+        ".xml" -> "text/xml"
+        ".json" -> "application/json"
+        ".html", ".htm" -> "text/html"
+        ".png" -> "image/png"
+        ".jpg", ".jpeg" -> "image/jpeg"
+        ".gif" -> "image/gif"
+        ".bmp" -> "image/bmp"
+        ".webp" -> "image/webp"
+        ".dwg" -> "application/dwg"
+        ".dxf" -> "application/dxf"
+        else -> "*/*"
+    }
+}
 
 private fun copyUriToCache(context: android.content.Context, uri: Uri): File {
     val name = androidx.documentfile.provider.DocumentFile.fromSingleUri(context, uri)?.name
@@ -443,10 +499,28 @@ private fun addFiles(
                 // 全部纯 Java/Kotlin，不依赖 Chaquopy/Python
                 // ════════════════════════════════════════
 
-                // 压缩包 → 暂不支持，显示提示
+                // 压缩包 → 纯 Kotlin 递归统计内部文件（ZIP/GZ/TGZ/TAR）；rar/7z 提示不支持
                 archiveFiles.forEachIndexed { i, f ->
-                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = f.name, cachePath = f.absolutePath,
-                        error = "压缩文件统计功能开发中（v1.0.15）"))
+                    try {
+                        val res = ArchiveEngine.extract(f, context.cacheDir)
+                        if (res == null) {
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = f.name, cachePath = f.absolutePath,
+                                error = "暂不支持该压缩格式（当前仅支持 ZIP / GZ / TGZ / TAR；RAR / 7Z 需原生库，安卓无法纯 Kotlin 实现）"))
+                        } else {
+                            val resMap = mapOf(
+                                "name" to f.name, "ext" to ".${f.extension.lowercase()}",
+                                "stats" to mapOf("words" to res.words, "fe" to res.fe, "nc" to res.nc, "chars" to res.chars),
+                                "meta" to mapOf("inner" to res.inner.map { innerToMeta(it) }),
+                                "is_archive" to true,
+                                "pages" to res.inner.sumOf { it.pages ?: estimatePages(it.chars) }
+                            )
+                            val fr = toFileResult(resMap, f.absolutePath)
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                        }
+                    } catch (e: Throwable) {
+                        Log.w("WordCount", "压缩包解析失败 ${f.name}: ${e.message}")
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = f.name, cachePath = f.absolutePath, error = "压缩包解析失败（${e.message}）"))
+                    }
                 }
 
                 // OOXML (docx/xlsx/pptx) → 纯 Kotlin 解析（不再经过 Python，规避设备端 Chaquopy 失败）
@@ -472,25 +546,26 @@ private fun addFiles(
                     }
                 }
 
-                // PDF → 暂走 Python
+                // PDF → 纯 Kotlin 解析（不再经过 Python，规避设备端 Chaquopy 失败）
                 pdfFiles.forEachIndexed { i, f ->
                     try {
-                        val raw = PythonEngine.countFiles(context, listOf(f.absolutePath))
-                        (raw as? List<*>)?.forEachIndexed { _, item ->
-                            val m = item as? Map<*, *>
-                            val ok = m?.get("ok") as? Boolean ?: false
-                            val name = m?.get("name") as? String ?: f.name
-                            if (ok) {
-                                val resMap = m?.get("result") as? Map<*, *>
-                                val fr = toFileResult(resMap, f.absolutePath)
-                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-                            } else {
-                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = name, cachePath = f.absolutePath, error = m?.get("error") as? String))
-                            }
+                        val res = PdfExtractor.extract(f)
+                        if (res == null || res.text.isBlank()) {
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = f.name, cachePath = f.absolutePath, error = "无法从该 PDF 提取文字（可能为纯图片扫描件或加密文件）"))
+                        } else {
+                            val stats = countTextKotlin(res.text)
+                            val resMap = mapOf(
+                                "name" to f.name, "ext" to ".pdf",
+                                "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
+                                "meta" to emptyMap<String, Any?>(),
+                                "pages" to res.pages
+                            )
+                            val fr = toFileResult(resMap, f.absolutePath)
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                         }
                     } catch (e: Throwable) {
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = f.name, cachePath = f.absolutePath,
-                            error = "PDF 处理出错：${(e.message ?: "未知错误").substringBefore('\n').take(200)}"))
+                        Log.w("WordCount", "PDF 解析失败 ${f.name}: ${e.message}")
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = f.name, cachePath = f.absolutePath, error = "PDF 解析失败（${e.message}）"))
                     }
                 }
 
@@ -605,7 +680,16 @@ private fun addFiles(
 }
 
 /** 文本类格式（无明确页概念）按字符量估算页数：每 ~1000 字符一页，至少 1 页。 */
-private fun estimatePages(chars: Int): Int = maxOf(1, (chars + 999) / 1000)
+fun estimatePages(chars: Int): Int = maxOf(1, (chars + 999) / 1000)
+
+/** 压缩包内层结果 → toFileResult 可回解析的 meta 结构。 */
+private fun innerToMeta(r: InnerResult): Map<String, Any?> {
+    return mapOf(
+        "name" to r.name,
+        "stats" to mapOf("words" to r.words, "fe" to r.fe, "nc" to r.nc, "chars" to r.chars),
+        "meta" to mapOf("pages" to r.pages)
+    )
+}
 
 private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
     val stats = m?.get("stats") as? Map<*, *> ?: emptyMap<String, Any>()

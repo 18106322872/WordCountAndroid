@@ -64,9 +64,16 @@ jobs:
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
         run: |
-          set -eo pipefail
-          gradle clean --no-daemon
-          gradle assembleDebug --no-build-cache --rerun-tasks --no-daemon
+          set -o pipefail
+          gradle clean --no-daemon > build.log 2>&1 || true
+          if gradle assembleDebug --no-build-cache --rerun-tasks --no-daemon >> build.log 2>&1; then
+            echo "BUILD OK"
+          else
+            # 将构建错误摘要作为 GitHub annotation 输出（便于在 run 页面/摘要中直接看到失败原因）
+            ERR=$(tail -n 50 build.log | tr '\n' ' ' | head -c 4000)
+            echo "::error::BUILD FAILED: $ERR"
+            exit 1
+          fi
 
       - name: Rename APK（WordCount-版本号格式）
         run: |
