@@ -119,12 +119,10 @@ dependencies {
     implementation 'org.apache.poi:poi-ooxml-lite:5.2.5'   // 精简版，减少方法数
     // StAX 实现：Android 缺失 javax.xml.stream，poi-ooxml 必需
     implementation 'com.fasterxml.aalto-woodstox:aalto-xml:1.2.2'
-    // PDF 文本提取：Apache PdfBox（纯 Java，安卓原生运行，无需 Python/Chaqopy）
-    // v1.0.14 新增：彻底解决 Chaquopy AssetFinder 导致的 PDF 100% 失败问题
-    // 使用 PdfBox 2.x（非 3.x），因为 2.x 对 Android 兼容性更好（无 Java Module System 依赖）
-    implementation 'org.apache.pdfbox:pdfbox:2.0.30'
-    // PdfBox 2.x 依赖 fontbox（字体处理）
-    implementation 'org.apache.pdfbox:fontbox:2.0.30'
+    // PDF 文本提取：暂用轻量方案（v1.0.14 先移除 PdfBox，因其在 Android 有 java.awt 编译依赖）
+    // 后续版本可考虑 pdfbox-android（无 AWT 依赖的分支）或自实现 PDF 流解析器
+    // 当前 PDF 格式归入「其他」分类，由 Python/Chaqopy 作为唯一降级方案处理
+    // （因其他格式已全部走纯 Java/Kotlin，Python 引擎仅服务于 PDF，状态污染概率大幅降低）
     implementation 'org.apache.commons:commons-compress:1.26.1'
     implementation 'org.apache.commons:commons-math3:3.6.1'
 }
