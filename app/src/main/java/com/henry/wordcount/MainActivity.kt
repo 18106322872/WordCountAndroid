@@ -203,7 +203,7 @@ fun WordCountApp(initialUris: List<Uri>) {
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("字数统计  v1.0.11") }) },
+        topBar = { TopAppBar(title = { Text("字数统计  v1.0.13") }) },
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             Surface(shadowElevation = 4.dp) {
@@ -326,6 +326,38 @@ fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEnt
 // 业务逻辑
 // ---------------------------------------------------------------------------
 
+/**
+ * 纯 Kotlin 字数统计（与 Python 端 wordcount.py 算法完全一致）。
+ * Word 口径：字数 = 中文字符和朝鲜语单词 + 非中文单词
+ * 返回 (words, fe, nc, chars)
+ */
+private fun countTextKotlin(text: String): Quadruple<Int, Int, Int, Int> {
+    // FarEast 正则：CJK + 朝鲜语 + 全角（与 Python 端 _FAR 完全一致）
+    val farEastRegex = Regex("[\\u1100-\\u11FF\\u3000-\\u303F\\u3130-\\u318F\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uA960-\\uA97C\\uAC00-\\uD7A3\\uD7B0-\\uD7FF\\uF900-\\uFAFF\\uFF00-\\uFFEF]")
+    val nonCjkRegex = Regex("[^\\s\\u1100-\\u11FF\\u3000-\\u303F\\u3130-\\u318F\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uA960-\\uA97C\\uAC00-\\uD7A3\\uD7B0-\\uD7FF\\uF900-\\uFAFF\\uFF00-\\uFFEF]+")
+
+    // 按段落分割（与 Python 端 re.split(r"\n\s*\n") 一致）
+    val paragraphs = text.split(Regex("\\n\\s*\\n"))
+    var totalFe = 0
+    var totalNc = 0
+    var totalChars = 0
+
+    for (para in paragraphs) {
+        val trimmed = para.trim()
+        if (trimmed.isNotEmpty()) {
+            totalFe += farEastRegex.findAll(trimmed).count()
+            totalNc += nonCjkRegex.findAll(trimmed).count()
+            totalChars += trimmed.replace(Regex("\\s"), "").length
+        }
+    }
+
+    val words = totalFe + totalNc
+    return Quadruple(words, totalFe, totalNc, totalChars)
+}
+
+/** 简单四元组（避免引入额外依赖）*/
+data class Quadruple<out A, out B, out C, out D>(val first: A, val second: B, val third: C, val fourth: D)
+
 private fun copyUriToCache(context: android.content.Context, uri: Uri): File {
     val name = androidx.documentfile.provider.DocumentFile.fromSingleUri(context, uri)?.name
         ?: "file_${System.currentTimeMillis()}"
@@ -347,6 +379,7 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): File {
 private val IMAGE_EXTS = setOf("png", "jpg", "jpeg", "bmp", "tif", "tiff", "gif", "webp")
 private val OLD_OFFICE_EXTS = setOf("doc", "xls", "ppt")
 private val DWG_EXTS = setOf("dwg")
+private val TXT_EXTS = setOf("txt")  // TXT 由 Kotlin 直接处理，绕开 Python/Chaquopy
 
 private fun addFiles(
     context: android.content.Context,
@@ -369,12 +402,14 @@ private fun addFiles(
             val imageFiles = mutableListOf<File>()
             val oldOfficeFiles = mutableListOf<File>()
             val dwgFiles = mutableListOf<File>()
+            val txtFiles = mutableListOf<File>()  // TXT 纯 Kotlin 处理
             for (f in files) {
                 val ext = f.extension.lowercase().removePrefix(".")
                 when {
                     ext in IMAGE_EXTS -> imageFiles.add(f)
                     ext in OLD_OFFICE_EXTS -> oldOfficeFiles.add(f)
                     ext in DWG_EXTS -> dwgFiles.add(f)
+                    ext in TXT_EXTS -> txtFiles.add(f)  // 绕开 Python
                     else -> { docPaths.add(f.absolutePath); docNames.add(f.name) }
                 }
             }
@@ -427,6 +462,35 @@ private fun addFiles(
                         Runtime.getRuntime().gc()
                         Log.w("WordCount", "图片过大 OOM ${f.name}")
                         entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, error="图片过大，内存不足"))
+                    }
+                }
+                // TXT 类：纯 Kotlin 处理（完全绕开 Python/Chaquopy，避免 AssetFinder 问题）
+                txtFiles.forEachIndexed { i, f ->
+                    try {
+                        val text = f.readText(Charsets.UTF_8)
+                        if (text.isBlank()) {
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_t", displayName = f.name, cachePath = f.absolutePath,
+                                error = "文件内容为空"))
+                        } else {
+                            val stats = countTextKotlin(text)
+                            val resMap = mapOf(
+                                "name" to f.name,
+                                "ext" to ".txt",
+                                "stats" to mapOf(
+                                    "words" to stats.first,
+                                    "fe" to stats.second,
+                                    "nc" to stats.third,
+                                    "chars" to stats.fourth
+                                ),
+                                "meta" to emptyMap<String, Any?>()
+                            )
+                            val fr = toFileResult(resMap, f.absolutePath)
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_t", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                        }
+                    } catch (e: Throwable) {
+                        Log.w("WordCount", "TXT 读取失败 ${f.name}: ${e.javaClass.simpleName}: ${e.message}")
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_t", displayName = f.name, cachePath = f.absolutePath,
+                            error = "读取失败（${e.message}）"))
                     }
                 }
                 // 老格式(.doc/.xls/.ppt)：Kotlin POI 抽文本 -> 复用 Python 计数

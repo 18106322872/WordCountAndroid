@@ -8,34 +8,53 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Chaquopy 桥接层：v10 双重重试增强版。
- * Python 端返回 JSON 字符串，Kotlin 端用 JSONObject/JSONArray 解析，
- * 彻底绕开 Chaquopy 的 .toJava() 对嵌套结构（list/dict）转换失败的问题。
+ * Chaquopy 桥接层：v11 激进稳定版。
  *
- * v10 增强：
- *   1) 对 Chaquopy AssetFinder 路径丢失错误（第二次调用时常见），
- *      自动重新初始化 Python 引擎并重试。
- *   2) 对 FileNotFoundError / IOError 类系统错误也重试（覆盖面更广）。
- *   3) 重试前先重置 started 标志，确保 Python.start() 真正重新执行。
+ * 核心问题（v1.0.12 验证后确认）：
+ *   Chaquopy AssetFinder 路径在部分设备上不稳定，即使逐文件单例调用也会失败。
+ *   根因是 Chaquopy 内部状态/文件系统层面的时序问题，非调用方式可绕过。
+ *
+ * v11 策略：
+ *   1) 每次 Python 调用前**无条件**重新初始化（绕开 isStarted 缓存判断）
+ *   2) 初始化后立即**预热**——强制 import 所有重度模块，确保 AssetFinder 数据就位
+ *   3) 失败时**最多重试 3 次**（每次都完整重新初始化）
+ *   4) TXT 格式由 Kotlin 直接处理（完全绕开 Python，减少调用频率）
  */
 object PythonEngine {
 
-    private var started = false
+    private const val MAX_RETRIES = 3
 
+    /** 是否已完成预热（避免每次调用都预热） */
+    @Volatile private var warmedUp = false
+
+    /**
+     * 无条件重新初始化 Python 引擎。
+     * 不再依赖 isStarted() 缓存——该缓存可能在设备上不准确。
+     * Chaquopy 内部会处理重复 start() 的幂等性。
+     */
     fun start(context: Context) {
         try {
-            if (!Python.isStarted()) {
-                Python.start(AndroidPlatform(context))
-            }
-            started = true
+            Python.start(AndroidPlatform(context))
+            Log.d("PythonEngine", "Python.start() 完成")
         } catch (e: Exception) {
-            Log.w("PythonEngine", "start 异常（可能需要重新初始化）: ${e.message}")
-            try {
-                Python.start(AndroidPlatform(context))
-                started = true
-            } catch (e2: Exception) {
-                Log.e("PythonEngine", "强制重新初始化也失败: ${e2.message}")
-            }
+            Log.e("PythonEngine", "Python.start() 异常: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    /**
+     * 预热：强制 import 所有重度模块，确保 AssetFinder 在"空闲"状态下完成所有文件提取。
+     * 只在首次调用时执行；如果预热失败不阻断后续操作（各方法有自己的重试机制）。
+     */
+    fun warmup(context: Context) {
+        if (warmedUp) return
+        try {
+            val py = Python.getInstance()
+            val mod = py.getModule("wordcount")
+            mod.callAttr("_chaquopy_warmup")
+            warmedUp = true
+            Log.d("PythonEngine", "预热成功")
+        } catch (e: Exception) {
+            Log.w("PythonEngine", "预热失败（不影响后续调用）: ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 
@@ -48,33 +67,36 @@ object PythonEngine {
                lower.contains("filenotfounderror") ||
                lower.contains("file not found") ||
                lower.contains("/data/data") ||
-               lower.contains("no such file")
+               lower.contains("no such file") ||
+               lower.contains("ioerror") ||
+               lower.contains("oserror")
     }
 
-    /** 对 Chaquopy/路径类错误做一次重新初始化+重试 */
+    /** 多重重试：最多 MAX_RETRIES 次，每次都完整重新初始化+预热 */
     private inline fun <T> withRetry(context: Context, action: () -> T): T {
-        return try {
-            action()
-        } catch (e: Exception) {
-            val msg = e.message ?: ""
-            // 打印完整异常链以便调试
-            Log.w("PythonEngine", "Python 调用异常: ${e.javaClass.simpleName}: $msg")
-            if (isRetryableError(msg)) {
-                Log.w("PythonEngine", "检测到可重试错误，重新初始化 Python 后重试...")
-                started = false
+        var lastException: Exception? = null
+        for (attempt in 1..MAX_RETRIES) {
+            try {
+                // 每次尝试前都重新初始化
                 start(context)
-                try {
-                    val result = action()
-                    Log.d("PythonEngine", "重试成功！")
-                    result
-                } catch (e2: Exception) {
-                    Log.e("PythonEngine", "重试仍失败: ${e2.javaClass.simpleName}: ${e2.message}")
-                    throw e2
+                if (attempt == 1) warmup(context)
+                return action()
+            } catch (e: Exception) {
+                val msg = e.message ?: ""
+                Log.w("PythonEngine", "第 $attempt/$MAX_RETRIES 次调用异常: ${e.javaClass.simpleName}: ${msg.take(120)}")
+                lastException = e
+                if (!isRetryableError(msg)) {
+                    Log.w("PythonEngine", "非重试类错误，直接抛出")
+                    throw e
                 }
-            } else {
-                throw e
+                // 重置预热标志，下次重新预热
+                warmedUp = false
+                // 短暂等待后再重试（给文件系统一点时间稳定）
+                if (attempt < MAX_RETRIES) Thread.sleep(200L)
             }
         }
+        Log.e("PythonEngine", "已重试 $MAX_RETRIES 次均失败")
+        throw lastException!!
     }
 
     private fun toNative(obj: Any?): Any? {

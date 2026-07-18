@@ -9776,6 +9776,36 @@ def count_file(path, sheet_filter="all", with_notes=False, converter=None):
 
 
 
+def _chaquopy_warmup():
+    """预热：在首次 Python 调用时强制 import 所有重度模块，
+    确保 Chaquopy AssetFinder 在"空闲"状态下完成所有 asset 文件提取和缓存。
+    避免在实际文件处理过程中因 import 触发路径问题。
+
+    此函数由 Kotlin 端 PythonEngine.warmup() 在首次调用前自动执行。
+    """
+    import sys
+    mods = []
+    errors = []
+    # 逐个 import，记录成功/失败
+    for mod_name in [
+        "pdfminer.high_level",   # PDF 文字提取
+        "docx",                  # DOCX 处理
+        "openpyxl",              # XLSX 处理
+        "pptx",                  # PPTX 处理
+        "PIL",                   # 图片处理（pillow）
+        "ezdxf",                 # DXF 处理
+        "olefile",               # OLE 文件解析
+        "json",
+    ]:
+        try:
+            __import__(mod_name)
+            mods.append(mod_name)
+        except Exception as e:
+            errors.append(f"{mod_name}: {e}")
+    # 输出诊断信息（通过日志可查看）
+    return {"loaded": mods, "errors": errors, "sys_path_len": len(sys.path)}
+
+
 def _to_py_list(obj):
     """把 Chaquopy 从 Kotlin 传入的 Java 集合转成真正的 Python list。
 
