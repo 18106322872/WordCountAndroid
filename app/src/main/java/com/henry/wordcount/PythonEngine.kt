@@ -1,6 +1,7 @@
 package com.henry.wordcount
 
 import android.content.Context
+import android.util.Log
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
 import org.json.JSONArray
