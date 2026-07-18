@@ -42,7 +42,8 @@ object DwgEngine {
                 flushRun(asciiBuf, seen, out)
                 flushCjk(cjkBuf, seen, out)
             }
-            if (out.length > MAX_OUTPUT_CHARS) out.take(MAX_OUTPUT_CHARS) else out.toString()
+            val result = out.toString()
+            if (result.length > MAX_OUTPUT_CHARS) result.take(MAX_OUTPUT_CHARS) else result
         } catch (_: Throwable) { "" }
     }
 

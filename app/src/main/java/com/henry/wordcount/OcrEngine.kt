@@ -55,14 +55,16 @@ object OcrEngine {
     }
 
     /** 安全解码图片：按最大边长缩放，避免超大图 OOM。 */
-    private fun decodeSampled(file: File, maxDim: Int): android.graphics.Bitmap? = try {
-        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(file.absolutePath, opts)
-        val w = opts.outWidth
-        val h = opts.outHeight
-        if (w <= 0 || h <= 0) return null
-        val scale = maxOf(1, maxOf(w, h) / maxDim)
-        val opts2 = BitmapFactory.Options().apply { inSampleSize = scale }
-        BitmapFactory.decodeFile(file.absolutePath, opts2)
-    } catch (_: Throwable) { null }
+    private fun decodeSampled(file: File, maxDim: Int): android.graphics.Bitmap? {
+        return try {
+            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, opts)
+            val w = opts.outWidth
+            val h = opts.outHeight
+            if (w <= 0 || h <= 0) return null
+            val scale = maxOf(1, maxOf(w, h) / maxDim)
+            val opts2 = BitmapFactory.Options().apply { inSampleSize = scale }
+            BitmapFactory.decodeFile(file.absolutePath, opts2)
+        } catch (_: Throwable) { null }
+    }
 }
