@@ -242,7 +242,7 @@ fun WordCountApp(initialUris: List<Uri>) {
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("字数统计  v1.0.16") }) },
+        topBar = { TopAppBar(title = { Text("字数统计  v1.0.17") }) },
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             Surface(shadowElevation = 4.dp) {
@@ -715,36 +715,11 @@ private fun addFiles(
                             error = "读取失败（${e.message}）"))
                     }
                 }
-                // 图片类：OCR 默认启用（v1.0.16），崩溃后自动降级禁用
+                // 图片类：OCR 当前不可用（v1.0.17，Tesseract JNI 在 Android 上不稳定）
                 imageFiles.forEachIndexed { i, f ->
-                    try {
-                        if (OcrEngine.ocrCrashed) {
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath,
-                                error = "OCR 引擎崩溃已自动禁用（重启 App 后可重试）"))
-                        } else {
-                            val text = OcrEngine.recognize(context, f)
-                            if (text.isBlank()) {
-                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath,
-                                    error = "未识别到文字（可能是纯图片/手写/模糊不清）"))
-                            } else {
-                                val stats = countTextKotlin(text)
-                                val resMap = mapOf(
-                                    "name" to f.name, "ext" to ".img",
-                                    "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
-                                    "meta" to emptyMap<String, Any?>()
-                                )
-                                val fr = toFileResult(resMap, f.absolutePath)
-                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-                            }
-                        }
-                    } catch (e: OutOfMemoryError) {
-                        Runtime.getRuntime().gc()
-                        Log.w("WordCount", "图片过大 OOM ${f.name}")
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, error="图片过大，内存不足"))
-                    } catch (e: Throwable) {
-                        Log.w("WordCount", "OCR 失败 ${f.name}: ${e.javaClass.simpleName}: ${e.message}")
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, error="OCR 识别失败（${e.message}）"))
-                    }
+                    // 始终显示"暂不支持"——不尝试调用 Tesseract 避免闪退
+                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath,
+                        error = "图片文字识别暂不支持（当前设备兼容性问题）"))
                 }
             }
         } catch (e: Throwable) {

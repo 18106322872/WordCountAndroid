@@ -75,34 +75,37 @@ object PdfExtractor {
                     if (text.isNotBlank()) { sb.append(text).append('\n'); textCount++ }
                 } catch (_: Throwable) { /* 单流失败跳过 */ }
             }
-            if (textCount > 0) return sb.toString()
+            if (textCount > 0) {
+                val cleaned = cleanExtractedText(sb.toString())
+                if (cleaned.isNotBlank()) return cleaned
+            }
         } catch (_: Throwable) { /* 标准解析完全失败，尝试备用方案 */ }
 
         // 2) 备用方案：直接从原始字节中提取所有可读文本片段
         return extractRawReadableStrings(bytes)
     }
 
-    /** 从 PDF 原始字节中提取可读 UTF-8 / CP1252 字符串片段。 */
+    /** 从 PDF 原始字节中提取可读 UTF-8 / CP1252 字符串片段（保守模式）。 */
     private fun extractRawReadableStrings(bytes: ByteArray): String {
         val sb = StringBuilder()
         var i = 0
         while (i < bytes.size - 3) {
-            // 尝试检测连续的可读字符序列
             val ch = bytes[i].toInt() and 0xFF
-            if (ch >= 0x20 && ch < 0x7F) { // ASCII 可打印字符
+            if (ch >= 0x20 && ch < 0x7F) {
                 var j = i
                 while (j < bytes.size) {
                     val c2 = bytes[j].toInt() and 0xFF
                     if (c2 < 0x20 || c2 > 0x7E) break
                     j++
                 }
-                if (j - i >= 4) { // 至少 4 个 ASCII 字符才算有意义
-                    sb.append(String(bytes, i, j - i, StandardCharsets.US_ASCII)).append(' ')
+                if (j - i >= 4) {
+                    val candidate = String(bytes, i, j - i, StandardCharsets.US_ASCII)
+                    // 过滤掉 PDF 结构性关键词和操作符（它们不是正文）
+                    if (!isPdfStructuralGarbage(candidate)) sb.append(candidate).append(' ')
                 }
                 i = j
             } else if ((ch == 0xE4 || ch == 0xE5 || ch == 0xE6 || ch == 0xE7 ||
                        ch == 0xE8 || ch == 0xE9) && i + 2 < bytes.size) {
-                // 可能是 UTF-8 中文（3字节序列开头）
                 val b2 = bytes[i+1].toInt() and 0xFF
                 val b3 = bytes[i+2].toInt() and 0xFF
                 if (b2 in 0x80..0xBF && b3 in 0x80..0xBF) {
@@ -125,6 +128,47 @@ object PdfExtractor {
             }
         }
         return sb.toString().trim()
+    }
+
+    /** 对提取的文本做最终清洗：去掉纯数字/符号行、合并多余空行。 */
+    private fun cleanExtractedText(text: String): String {
+        return text.lines()
+            .map { it.trim() }
+            .filter { line ->
+                if (line.length <= 1) return@filter false
+                // 保留含字母/CJK 的行，丢弃纯数字/纯符号行
+                val hasAlpha = line.any { it.isLetter() }
+                hasAlpha
+            }
+            .filter { !isPdfStructuralGarbage(it) }
+            .joinToString("\n")
+    }
+
+    /** 判断 ASCII 片段是否为 PDF 结构性垃圾（非正文内容）。 */
+    private fun isPdfStructuralGarbage(s: String): Boolean {
+        // PDF 操作符 / 关键字 / 字典键 —— 这些不是用户可见文字
+        val lower = s.lowercase()
+        val garbagePrefixes = listOf(
+            "/type", "/subtype", "/filter", "/length", "/root", "/parent",
+            "/resources", "/font", "/encoding", "/tounicode", "/contents", "/mediabox",
+            "/cropbox", "/rotate", "/annots", "/pages", "/kids", "/count", "/catalog",
+            "/basefont", "/firstchar", "/lastchar", "/widths", "/descriptor",
+            "/name", "/cs", "/gs", "/d", "/i", "/j", "/jm", "/mcid",
+            "/structparents", "/lang", "/actualtext", "/alt", "/b", "/c", "/ca",
+            "/s", "/f", "/a", "/n", "/v", "/r", "/tr", "/ref", "/p",
+            "stream", "endstream", "obj", "endobj", "xref", "trailer", "startxref",
+            "flatedecode", "asciihexdecode", "lzwdecode", "ccittfaxdecode", "dctdecode",
+            "beginbfchar", "endbfchar", "beginbfrange", "endbfrange",
+            "/linearized", "/o", "/e", "/h", "/l", "/t", "/helv", "/za db",
+            "cidfont", "cidtounicodemap"
+        )
+        for (prefix in garbagePrefixes) {
+            if (lower.startsWith(prefix)) return true
+        }
+        // 纯数字串或纯符号串 → 不是正文
+        if (s.all { it.isDigit() || it == '.' || it == '-' || it == '+' }) return true
+        if (s.length <= 2 && !s.any { it.isLetterOrDigit() }) return true
+        return false
     }
 
     /** 尝试 Flate 解压；失败返回 null（调用方用原数据）。 */

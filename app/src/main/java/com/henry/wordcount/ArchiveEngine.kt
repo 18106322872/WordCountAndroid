@@ -223,22 +223,48 @@ object ArchiveEngine {
     }
 
     // ──────────────────── 内层文件路由 ────────────────────
-    private val SUPPORTED = setOf(
+    private val SUPPORTED_OOXML = setOf("docx", "xlsx", "pptx")
+    private val SUPPORTED_OLD_OFFICE = setOf("doc", "xls", "ppt")
+    private val SUPPORTED_TEXT = setOf(
         "txt", "csv", "json", "xml", "md", "log", "html", "htm",
-        "docx", "xlsx", "pptx", "pdf", "doc", "xls", "ppt", "dwg"
+        "ini", "cfg", "conf", "yaml", "yml", "toml", "properties",
+        "sql", "sh", "bat", "cmd", "ps1", "py", "js", "ts", "java",
+        "kt", "c", "cpp", "h", "hpp", "cs", "go", "rs", "rb", "php",
+        "swift", "r", "m", "scala", "clj", "vue", "jsx", "tsx", "svelte"
+    )
+
+    /** 已知二进制/无法统计的扩展名——直接跳过，不尝试当文本读 */
+    private val SKIP_EXTS = setOf(
+        "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "svg",
+        "mp3", "mp4", "avi", "mkv", "mov", "wav", "flac",
+        "exe", "dll", "so", "dylib", "a", "o", "obj", "class",
+        "zip", "rar", "7z", "tar", "gz", "bz2", "xz", // 嵌套压缩包不递归展开
+        "ttf", "otf", "woff", "woff2", "eot",
+        "db", "sqlite", "mdb", "accdb",
+        "bin", "dat", "sys", "drv"
     )
 
     private fun processEntry(name: String, bytes: ByteArray, cacheDir: File, inner: MutableList<InnerResult>) {
         val ext = name.substringAfterLast('.', "").lowercase()
-        if (ext !in SUPPORTED) return
+        // 跳过已知不可处理的类型
+        if (ext in SKIP_EXTS) return
         val tmp = writeTemp(bytes, name, cacheDir) ?: return
         try {
-            val ooxml = if (ext in setOf("docx", "xlsx", "pptx")) OoXmlEngine.extract(tmp) else null
+            val ooxml = if (ext in SUPPORTED_OOXML) OoXmlEngine.extract(tmp) else null
             val pdf = if (ext == "pdf") PdfExtractor.extract(tmp) else null
-            val text: String? = ooxml?.text ?: pdf?.text ?: when (ext) {
-                "doc", "xls", "ppt" -> runCatching { OldOfficeEngine.extractText(tmp) }.getOrNull()
-                "dwg" -> runCatching { DwgEngine.extractTextSafe(tmp) }.getOrNull()
-                else -> runCatching { String(bytes, StandardCharsets.UTF_8) }.getOrNull()
+            val text: String? = ooxml?.text ?: pdf?.text ?: when {
+                ext in SUPPORTED_OLD_OFFICE -> runCatching { OldOfficeEngine.extractText(tmp) }.getOrNull()
+                ext == "dwg" -> runCatching { DwgEngine.extractTextSafe(tmp) }.getOrNull()
+                ext in SUPPORTED_TEXT || ext.isBlank() -> runCatching {
+                    // 尝试 UTF-8，失败则尝试 GBK
+                    val t = String(bytes, StandardCharsets.UTF_8)
+                    if (isLikelyText(t)) t else String(bytes, Charset.forName("GBK"))
+                }.getOrNull()
+                // 未知扩展名：检查是否像文本（可打印字符占比 > 70%）
+                else -> runCatching {
+                    val raw = String(bytes, StandardCharsets.ISO_8859_1)
+                    if (isBinaryLike(raw)) null else String(bytes, StandardCharsets.UTF_8)
+                }.getOrNull()
             }
             if (text.isNullOrBlank()) return
             val stats = countTextKotlin(text)
@@ -253,6 +279,28 @@ object ArchiveEngine {
         } finally {
             runCatching { tmp.delete() }
         }
+    }
+
+    /** 判断字符串是否像正常文本（可打印字符占比 > 60%） */
+    private fun isLikelyText(s: String): Boolean {
+        if (s.length < 4) return false
+        var printable = 0
+        for (c in s) {
+            if (c.code >= 0x20 && c.code < 0x7F) printable++
+            else if (c.isLetterOrDigit() || c.code >= 0x2000) printable++
+        }
+        return printable > s.length * 0.6
+    }
+
+    /** 判断 ISO-8859-1 字符串是否像二进制（控制字符太多） */
+    private fun isBinaryLike(s: String): Boolean {
+        if (s.length < 8) return true
+        var control = 0
+        for (i in s.indices) {
+            val c = s[i]
+            if (c.code < 0x20 && c != '\n' && c != '\r' && c != '\t') control++
+        }
+        return control > s.length * 0.25
     }
 
     /** 写临时文件供引擎使用。 */
