@@ -85,13 +85,13 @@ object PdfExtractor {
         return extractRawReadableStrings(bytes)
     }
 
-    /** 从 PDF 原始字节中提取可读 UTF-8 / CP1252 字符串片段（保守模式）。 */
+    /** 从 PDF 原始字节中提取可读文本片段——仅作兜底，且非常保守，避免把字体名/字典键/十六进制算进字数。 */
     private fun extractRawReadableStrings(bytes: ByteArray): String {
         val sb = StringBuilder()
         var i = 0
         while (i < bytes.size - 3) {
             val ch = bytes[i].toInt() and 0xFF
-            if (ch >= 0x20 && ch < 0x7F) {
+            if (ch in 0x20..0x7F) {
                 var j = i
                 while (j < bytes.size) {
                     val c2 = bytes[j].toInt() and 0xFF
@@ -100,8 +100,10 @@ object PdfExtractor {
                 }
                 if (j - i >= 4) {
                     val candidate = String(bytes, i, j - i, StandardCharsets.US_ASCII)
-                    // 过滤掉 PDF 结构性关键词和操作符（它们不是正文）
-                    if (!isPdfStructuralGarbage(candidate)) sb.append(candidate).append(' ')
+                    // 只接受“含空白的自然语言片段”（排除 Helvetica、WinAnsiEncoding、/FontFile2 等单标识符/字体名/字典键）
+                    if (candidate.any { it == ' ' || it == '\t' } && !isPdfStructuralGarbage(candidate)) {
+                        sb.append(candidate).append(' ')
+                    }
                 }
                 i = j
             } else if ((ch == 0xE4 || ch == 0xE5 || ch == 0xE6 || ch == 0xE7 ||
@@ -160,7 +162,12 @@ object PdfExtractor {
             "flatedecode", "asciihexdecode", "lzwdecode", "ccittfaxdecode", "dctdecode",
             "beginbfchar", "endbfchar", "beginbfrange", "endbfrange",
             "/linearized", "/o", "/e", "/h", "/l", "/t", "/helv", "/za db",
-            "cidfont", "cidtounicodemap"
+            "cidfont", "cidtounicodemap",
+            "helvetica", "arial", "times", "courier", "symbol", "zapf",
+            "winansi", "macroman", "identity", "type0", "type1", "truetype",
+            "embedded", "subset", "fontfile", "fontname", "cmap", "wmode",
+            "descendant", "registry", "ordering", "supplement", "differences",
+            "fontbbox", "characterspacing", "wordspacing", "leading", "baseline"
         )
         for (prefix in garbagePrefixes) {
             if (lower.startsWith(prefix)) return true
@@ -207,7 +214,7 @@ object PdfExtractor {
         tjRe.findAll(s).forEach { m ->
             val txt = if (m.groupValues[1].isNotEmpty()) decodeLiteral(m.groupValues[1], toUnicode)
             else decodeHex(m.groupValues[2], toUnicode)
-            out.append(txt)
+            if (!looksGarbled(txt)) out.append(txt)
         }
         // TJ: [ (a) 12 (b) -3 <c> ] TJ
         val tjArrRe = """\[\s*((?:(?:\((?:[^()\\]|\\.)*\)|<[0-9A-Fa-f\s]*>|-?\d+)\s*)*)\]\s*TJ""".toRegex()
@@ -217,10 +224,22 @@ object PdfExtractor {
             partRe.findAll(inner).forEach { p ->
                 val txt = if (p.groupValues[1].isNotEmpty()) decodeLiteral(p.groupValues[1], toUnicode)
                 else decodeHex(p.groupValues[2], toUnicode)
-                out.append(txt)
+                if (!looksGarbled(txt)) out.append(txt)
             }
         }
         return out.toString()
+    }
+
+    /** 判断一段解码结果是否为乱码（控制字符/替换符占比过高），用于跳过无 ToUnicode 的字形索引串等。 */
+    private fun looksGarbled(s: String): Boolean {
+        if (s.isEmpty()) return false
+        var bad = 0
+        for (c in s) {
+            val code = c.code
+            if (code < 0x20 && c != '\n' && c != '\r' && c != '\t') bad++
+            else if (code == 0xFFFD) bad++
+        }
+        return bad > s.length * 0.20
     }
 
     private fun decodeLiteral(lit: String, toUnicode: Map<Int, String>): String {

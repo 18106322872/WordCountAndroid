@@ -19,7 +19,8 @@ object DwgEngine {
     private const val CHUNK = 64 * 1024
     private const val TIMEOUT_MS = 6_000L
     private const val MIN_RUN = 4
-    private const val MAX_OUTPUT_CHARS = 50_000
+    private const val MAX_OUTPUT_CHARS = 8_000
+    private const val MAX_TOKENS = 800
 
     fun extractText(file: File): String = extractTextSafe(file)
 
@@ -37,6 +38,7 @@ object DwgEngine {
                 while (fis.read(buf).also { n = it } != -1) {
                     if (System.currentTimeMillis() > deadline) break
                     scanChunk(buf, n, asciiBuf, cjkBuf, seen, out)
+                    if (seen.size >= MAX_TOKENS) break
                 }
                 // flush 剩余缓冲
                 flushRun(asciiBuf, seen, out)
@@ -105,7 +107,8 @@ object DwgEngine {
         if (buf.isEmpty()) return
         val s = buf.toString()
         buf.setLength(0)
-        if (s.length >= 2) {
+        // 中文串至少 3 字，减少二进制随机字节误判成 CJK 的情况
+        if (s.length >= 3) {
             if (seen.add(s)) out.append(s).append('\n')
         }
     }
@@ -113,20 +116,20 @@ object DwgEngine {
     /**
      * 判断串是否“像真实单词”，用于滤掉二进制乱码：
      *   - 必须含字母
-     *   - 且（含元音 a/e/i/o/u，或同时含字母和数字）
-     * 这样能排除 "xQ9pLm" 这类无元音的随机串，同时保留 "Layer1"、"Door"、"Wall" 等真实文本。
+     *   - 且必须含元音 a/e/i/o/u（去掉“或含数字”的宽松条件，否则随机十六进制如 "1F2A"
+     *     也会被当成单词，导致字数虚高）
+     * 这样能排除无元音的随机串，同时保留 "Layer"、"Door"、"Wall"、"Model" 等真实文本。
      */
     private fun looksLikeWord(s: String): Boolean {
         var hasLetter = false
         var hasVowel = false
-        var hasDigit = false
         for (c in s) {
             if (c.isLetter()) {
                 hasLetter = true
                 if (c.lowercaseChar() in "aeiou") hasVowel = true
-            } else if (c.isDigit()) hasDigit = true
+            }
         }
-        return hasLetter && (hasVowel || hasDigit)
+        return hasLetter && hasVowel
     }
 
     private fun isCjk(c: Char): Boolean {

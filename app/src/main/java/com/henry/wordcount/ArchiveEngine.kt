@@ -131,10 +131,11 @@ object ArchiveEngine {
         val dest = File(cacheDir, "rar_${System.currentTimeMillis()}")
         dest.mkdirs()
         try {
-            // junrar 解包到临时目录后，逐个识别内层文本文件并统计
-            val extracted = Junrar.extract(file.absolutePath, dest.absolutePath)
-            extracted.forEach { f ->
-                if (f.isFile) processEntry(f.name, f.readBytes(), cacheDir, inner)
+            // junrar 解包到临时目录；忽略其返回值（不同版本返回类型不同），
+            // 直接递归遍历解压目录拿到所有内层文件再逐个统计，最稳妥。
+            Junrar.extract(file.absolutePath, dest.absolutePath)
+            dest.walkTopDown().filter { it.isFile }.forEach { f ->
+                try { processEntry(f.name, f.readBytes(), cacheDir, inner) } catch (_: Throwable) {}
             }
         } catch (_: Throwable) {
             // RAR5 / 加密 / 损坏等情况会抛异常，交由调用方显示“解析失败”
@@ -256,20 +257,35 @@ object ArchiveEngine {
             val text: String? = ooxml?.text ?: pdf?.text ?: when {
                 ext in SUPPORTED_OLD_OFFICE -> runCatching { OldOfficeEngine.extractText(tmp) }.getOrNull()
                 ext == "dwg" -> runCatching { DwgEngine.extractTextSafe(tmp) }.getOrNull()
+                // 已知文本类：UTF-8 优先，不可读则尝试 GBK；均不可读（实为二进制）则跳过
                 ext in SUPPORTED_TEXT || ext.isBlank() -> runCatching {
-                    // 尝试 UTF-8，失败则尝试 GBK
                     val t = String(bytes, StandardCharsets.UTF_8)
-                    if (isLikelyText(t)) t else String(bytes, Charset.forName("GBK"))
+                    when {
+                        isReadableText(t) -> t
+                        else -> {
+                            val g = String(bytes, Charset.forName("GBK"))
+                            if (isReadableText(g)) g else null
+                        }
+                    }
                 }.getOrNull()
-                // 未知扩展名：检查是否像文本（可打印字符占比 > 70%）
+                // 未知扩展名：先判断是否二进制；非二进制再按 UTF-8 读取并校验可读性
                 else -> runCatching {
                     val raw = String(bytes, StandardCharsets.ISO_8859_1)
-                    if (isBinaryLike(raw)) null else String(bytes, StandardCharsets.UTF_8)
+                    if (isBinaryLike(raw)) null else {
+                        val t = String(bytes, StandardCharsets.UTF_8)
+                        if (isReadableText(t)) t else null
+                    }
                 }.getOrNull()
             }
             if (text.isNullOrBlank()) return
             val stats = countTextKotlin(text)
-            val pages = ooxml?.pages ?: pdf?.pages ?: estimatePages(stats.fourth)
+            // DWG 是一张图纸，固定 1 页；其余按类型取页数，文本类兜底按字符量估算
+            val pages = when {
+                ooxml != null -> ooxml.pages
+                pdf != null -> pdf.pages
+                ext == "dwg" -> 1
+                else -> estimatePages(stats.fourth)
+            }
             inner.add(
                 InnerResult(
                     name = name.substringAfterLast('/'),
@@ -282,15 +298,34 @@ object ArchiveEngine {
         }
     }
 
-    /** 判断字符串是否像正常文本（可打印字符占比 > 60%） */
-    private fun isLikelyText(s: String): Boolean {
+    /**
+     * 严格判断一段“解码后的文本”是否真的像可读文本（用于挡掉被误当文本的二进制乱码）。
+     * 规则：
+     *   - 长度至少 4
+     *   - 控制字符（<0x20 且非换行/制表）占比不得超过 10%（二进制通常很高）
+     *   - Unicode 替换符(U+FFFD)占比不得超过 2%（解码损坏的标志）
+     *   - 可打印字符（ASCII 可打印 / 字母数字 / CJK）占比必须 > 85%
+     * 满足才认为是文本，否则视为二进制/损坏，不应被统计字数。
+     */
+    private fun isReadableText(s: String): Boolean {
         if (s.length < 4) return false
         var printable = 0
+        var control = 0
+        var replacement = 0
         for (c in s) {
-            if (c.code >= 0x20 && c.code < 0x7F) printable++
-            else if (c.isLetterOrDigit() || c.code >= 0x2000) printable++
+            val code = c.code
+            when {
+                code in 0x20..0x7E -> printable++
+                c.isLetterOrDigit() -> printable++
+                code in 0x4E00..0x9FFF || code in 0x3400..0x4DBF || code in 0x3000..0x303F
+                        || code in 0xFF00..0xFFEF || code in 0x2E80..0x2EFF || code in 0xF900..0xFAFF -> printable++
+                code == 0xFFFD -> replacement++
+                code < 0x20 && c != '\n' && c != '\r' && c != '\t' -> control++
+            }
         }
-        return printable > s.length * 0.6
+        if (control > s.length * 0.10) return false
+        if (replacement > s.length * 0.02) return false
+        return printable > s.length * 0.85
     }
 
     /** 判断 ISO-8859-1 字符串是否像二进制（控制字符太多） */
@@ -301,7 +336,7 @@ object ArchiveEngine {
             val c = s[i]
             if (c.code < 0x20 && c != '\n' && c != '\r' && c != '\t') control++
         }
-        return control > s.length * 0.25
+        return control > s.length * 0.10
     }
 
     /** 写临时文件供引擎使用。 */

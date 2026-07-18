@@ -242,7 +242,7 @@ fun WordCountApp(initialUris: List<Uri>) {
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("字数统计  v1.0.18") }) },
+        topBar = { TopAppBar(title = { Text("字数统计  v1.0.19") }) },
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             Surface(shadowElevation = 4.dp) {
@@ -675,7 +675,8 @@ private fun addFiles(
                             val resMap = mapOf(
                                 "name" to f.name, "ext" to ".dwg",
                                 "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
-                                "meta" to emptyMap<String, Any?>()
+                                "meta" to emptyMap<String, Any?>(),
+                                "pages" to 1
                             )
                             val fr = toFileResult(resMap, f.absolutePath)
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
