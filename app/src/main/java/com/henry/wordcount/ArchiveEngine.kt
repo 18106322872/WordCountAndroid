@@ -7,6 +7,7 @@ import com.github.junrar.Junrar
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
 
 /**
