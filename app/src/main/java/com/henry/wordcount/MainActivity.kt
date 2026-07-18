@@ -380,35 +380,46 @@ private fun addFiles(
             }
 
             withContext(Dispatchers.IO) {
-                // 文档类：批量交给 Python 统计
+                // 文档类：逐文件单独调 Python（隔离每次调用，避免 Chaquopy 内部状态污染导致 AssetFinder 错误）
                 if (docPaths.isNotEmpty()) {
-                    var raw: Any? = null
-                    raw = PythonEngine.countFiles(context, docPaths)
-                    (raw as? List<*>)?.forEachIndexed { i, item ->
-                        val m = item as? Map<*, *>
-                        val ok = m?.get("ok") as? Boolean ?: false
-                        val name = m?.get("name") as? String ?: docNames.getOrNull(i) ?: "文件"
-                        if (ok) {
-                            val resMap = m?.get("result") as? Map<*, *>
-                            val fr = toFileResult(resMap, docPaths[i])
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_d", displayName = name, cachePath = docPaths[i], result = fr, rawResult = resMap))
-                        } else {
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_d", displayName = name, cachePath = docPaths[i], error = m?.get("error") as? String))
+                    for (i in docPaths.indices) {
+                        try {
+                            // 单文件调用：每次只传一个路径，避免批量调用时的状态交叉污染
+                            val raw = PythonEngine.countFiles(context, listOf(docPaths[i]))
+                            (raw as? List<*>)?.forEachIndexed { _, item ->
+                                val m = item as? Map<*, *>
+                                val ok = m?.get("ok") as? Boolean ?: false
+                                val name = m?.get("name") as? String ?: docNames.getOrNull(i) ?: "文件"
+                                if (ok) {
+                                    val resMap = m?.get("result") as? Map<*, *>
+                                    val fr = toFileResult(resMap, docPaths[i])
+                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_d", displayName = name, cachePath = docPaths[i], result = fr, rawResult = resMap))
+                                } else {
+                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_d", displayName = name, cachePath = docPaths[i], error = m?.get("error") as? String))
+                                }
+                            }
+                        } catch (e: Throwable) {
+                            Log.e("WordCount", "文件处理异常 [${docNames.getOrNull(i)}]: ${e.javaClass.simpleName}: ${e.message}", e)
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_d", displayName = docNames.getOrNull(i) ?: "文件", cachePath = docPaths[i],
+                                error = "处理出错：${(e.message ?: "未知错误").substringBefore('\n').take(200)}"))
                         }
                     }
                 }
-                // 图片类：Kotlin Tesseract OCR -> 识别文字交给 Python 计数
-                // 注意：Tesseract 原生层（tess-two/JNI）可能抛出不可捕获的 Signal（SIGSEGV 等），
-                //   Java try-catch(Throwable) 无法拦截此类崩溃。此处已尽量做防护：
-                //   1) OcrEngine 内限制 MAX_DIM=1600 + inSampleSize 采样缩小
-                //   2) 外层 try 包裹 + finally 回收 Bitmap
+                // 图片类：OCR 默认禁用（Tesseract JNI 原生层在部分设备闪退，无法被 Java 拦截）
+                //   当前直接返回"暂不支持图片"提示；若需 OCR 可在设置中开启（有闪退风险）
                 imageFiles.forEachIndexed { i, f ->
                     try {
-                        val text = OcrEngine.recognize(context, f)
-                        var resMap: Map<*, *>? = null
-                        resMap = PythonEngine.countText(context, text, f.name)
-                        val fr = toFileResult(resMap, f.absolutePath)
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                        if (!OcrEngine.ocrEnabled) {
+                            // OCR 默认关闭：返回 0 字数 + 友好提示
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath,
+                                error = "图片文字识别暂不可用（当前版本已默认禁用以防止闪退）"))
+                        } else {
+                            val text = OcrEngine.recognize(context, f)
+                            var resMap: Map<*, *>? = null
+                            resMap = PythonEngine.countText(context, text, f.name)
+                            val fr = toFileResult(resMap, f.absolutePath)
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                        }
                     } catch (e: Throwable) {
                         Log.w("WordCount", "OCR 失败 ${f.name}: ${e.javaClass.simpleName}: ${e.message}")
                         entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, error="OCR 识别失败（${e.message}）"))

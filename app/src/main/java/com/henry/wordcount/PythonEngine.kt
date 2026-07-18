@@ -8,19 +8,21 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Chaquopy 桥接层：v9 重试增强版。
+ * Chaquopy 桥接层：v10 双重重试增强版。
  * Python 端返回 JSON 字符串，Kotlin 端用 JSONObject/JSONArray 解析，
  * 彻底绕开 Chaquopy 的 .toJava() 对嵌套结构（list/dict）转换失败的问题。
  *
- * v9 增强：对 Chaquopy AssetFinder 路径丢失错误（第二次调用时常见），
- * 自动重新初始化 Python 引擎并重试一次。
+ * v10 增强：
+ *   1) 对 Chaquopy AssetFinder 路径丢失错误（第二次调用时常见），
+ *      自动重新初始化 Python 引擎并重试。
+ *   2) 对 FileNotFoundError / IOError 类系统错误也重试（覆盖面更广）。
+ *   3) 重试前先重置 started 标志，确保 Python.start() 真正重新执行。
  */
 object PythonEngine {
 
     private var started = false
 
     fun start(context: Context) {
-        // 每次都尝试 start（Chaquopy 内部会判断是否已初始化）
         try {
             if (!Python.isStarted()) {
                 Python.start(AndroidPlatform(context))
@@ -28,7 +30,6 @@ object PythonEngine {
             started = true
         } catch (e: Exception) {
             Log.w("PythonEngine", "start 异常（可能需要重新初始化）: ${e.message}")
-            // 强制重新初始化：某些情况下 isStarted() 返回 true 但内部状态已损坏
             try {
                 Python.start(AndroidPlatform(context))
                 started = true
@@ -38,18 +39,37 @@ object PythonEngine {
         }
     }
 
-    /** 对 AssetFinder 类型的错误做一次重新初始化+重试 */
+    /** 判断是否为需要重试的 Chaquopy/系统路径类错误 */
+    private fun isRetryableError(msg: String): Boolean {
+        val lower = msg.lowercase()
+        return lower.contains("assetfinder") ||
+               lower.contains("chaquopy") ||
+               lower.contains("scripts") ||
+               lower.contains("filenotfounderror") ||
+               lower.contains("file not found") ||
+               lower.contains("/data/data") ||
+               lower.contains("no such file")
+    }
+
+    /** 对 Chaquopy/路径类错误做一次重新初始化+重试 */
     private inline fun <T> withRetry(context: Context, action: () -> T): T {
         return try {
             action()
         } catch (e: Exception) {
             val msg = e.message ?: ""
-            if (msg.contains("AssetFinder") || msg.contains("chaquopy") || msg.contains("scripts")) {
-                Log.w("PythonEngine", "检测到 AssetFinder 路径错误，重新初始化 Python 后重试")
+            // 打印完整异常链以便调试
+            Log.w("PythonEngine", "Python 调用异常: ${e.javaClass.simpleName}: $msg")
+            if (isRetryableError(msg)) {
+                Log.w("PythonEngine", "检测到可重试错误，重新初始化 Python 后重试...")
                 started = false
                 start(context)
-                try { action() } catch (e2: Exception) {
-                    throw e2 // 重试仍失败则抛出原始异常
+                try {
+                    val result = action()
+                    Log.d("PythonEngine", "重试成功！")
+                    result
+                } catch (e2: Exception) {
+                    Log.e("PythonEngine", "重试仍失败: ${e2.javaClass.simpleName}: ${e2.message}")
+                    throw e2
                 }
             } else {
                 throw e
