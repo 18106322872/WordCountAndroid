@@ -17,10 +17,6 @@ import java.nio.charset.Charset
  */
 object PdfExtractor {
 
-    /**
-     * 从 PDF 文件提取全部可读文本。
-     * 返回拼接的文本内容；如果文件无法解析或为纯图片 PDF 则返回空字符串。
-     */
     fun extractText(file: File): String {
         val bytes = file.readBytes()
         return extractFromBytes(bytes)
@@ -28,7 +24,7 @@ object PdfExtractor {
 
     internal fun extractFromBytes(bytes: ByteArray): String {
         // 验证 PDF 头
-        if (bytes.size < 5 || !bytes.copyOfRange(0, 5).toString(Charsets.US_ASCII).startsWith("%PDF")) {
+        if (bytes.size < 5 || !String(bytes.copyOfRange(0, 5), Charsets.US_ASCII).startsWith("%PDF")) {
             return ""
         }
 
@@ -39,26 +35,24 @@ object PdfExtractor {
         val sb = StringBuilder()
         for ((objNum, offset) in offsets) {
             try {
-                // 读取对象定义：N obj ... endobj
                 val objStart = findObjectStart(bytes, offset) ?: continue
                 val objEnd = findEndObj(bytes, objStart)
                 if (objEnd < 0) continue
 
                 val objBytes = bytes.copyOfRange(objStart, objEnd.coerceAtMost(bytes.size))
+                val rawStr = String(objBytes, Charsets.US_ASCII)
 
                 // 检查是否包含 /FlateDecode 过滤器
-                val hasFlate = objBytes.toString(Charsets.US_ASCII).contains("/Filter") &&
-                        objBytes.toString(Charsets.US_ASCII).contains("FlateDecode")
+                val hasFlate = rawStr.contains("/Filter") && rawStr.contains("FlateDecode")
 
                 if (!hasFlate) {
-                    // 无压缩流：直接在对象体中搜索文本操作符
-                    val text = extractTextFromRaw(objBytes)
+                    val text = extractTextFromRaw(rawStr)
                     if (text.isNotBlank()) sb.append(text).append("\n")
                     continue
                 }
 
                 // 找到 stream...endstream 区间并解压
-                val streamData = extractStreamBytes(objBytes)
+                val streamData = extractStreamBytes(rawStr, objBytes)
                 if (streamData != null) {
                     val decompressed = inflate(streamData)
                     if (decompressed != null) {
@@ -73,12 +67,10 @@ object PdfExtractor {
     }
 
     // ── 对象偏移表构建 ────────────────────────────────────
-
-    /** 构建 PDF 对象号 → 文件偏移量的映射 */
     private fun buildOffsetMap(bytes: ByteArray): Map<Int, Int> {
         val offsets = mutableMapOf<Int, Int>()
 
-        // 方案 A：查找 xref 表（最常见）
+        // 方案 A：查找 xref 表
         val xrefPos = findXrefPosition(bytes)
         if (xrefPos > 0) {
             parseXrefTable(bytes, xrefPos, offsets)
@@ -93,49 +85,41 @@ object PdfExtractor {
 
     /** 从文件尾部向前找 startxref 关键字的位置 */
     private fun findXrefPosition(bytes: ByteArray): Int {
-        // 从末尾往前搜 startxref（通常在最后 ~1KB 内）
         val searchStart = maxOf(0, bytes.size - 4096)
         for (i in bytes.size - 1 downTo searchStart) {
             if (i + 9 < bytes.size &&
                 bytes[i] == 's'.code.toByte() &&
-                bytes.copyOfRange(i, i + 9).toString(Charsets.US_ASCII) == "startxref"
+                String(bytes.copyOfRange(i, i + 9), Charsets.US_ASCII) == "startxref"
             ) {
-                // 读取后面的数字（跳过空白）
                 var pos = i + 9
-                while (pos < bytes.size && bytes[pos].toInt().let { it == 10 || it == 13 || it == 32 }) pos++
+                while (pos < bytes.size && isWhitespaceByte(bytes[pos])) pos++
                 val numStart = pos
-                while (pos < bytes.size && bytes[pos].toInt().let { it >= '0'.code && it <= '9'.code }) pos++
-                return bytes.copyOfRange(numStart, pos).toString(Charsets.US_ASCII).trim().toIntOrNull() ?: -1
+                while (pos < bytes.size && isDigitByte(bytes[pos])) pos++
+                return String(bytes.copyOfRange(numStart, pos), Charsets.US_ASCII).trim().toIntOrNull() ?: -1
             }
         }
         return -1
     }
 
     private fun parseXrefTable(bytes: ByteArray, xrefPos: Int, offsets: MutableMap<Int, Int>) {
-        // 跳过 "xref" 行
         var pos = xrefPos
-        val tail = bytes.copyOfRange(pos, minOf(pos + 200, bytes.size)).toString(Charsets.US_ASCII)
-        // 找到第一个子表的起始对象号
+        val tail = String(bytes.copyOfRange(pos, minOf(pos + 200, bytes.size)), Charsets.US_ASCII)
         val lineEnd = tail.indexOf('\n').takeIf { it > 0 } ?: tail.indexOf('\r').takeIf { it > 0 } ?: return
         pos += lineEnd + 1
 
-        // 循环读取子表
         while (pos < bytes.size) {
-            // 读子表头："start count\n"
             val header = readLine(bytes, pos) ?: break
-            pos += header.first.length + 1 // 含换行
+            pos += header.first.length + 1
             val parts = header.first.trim().split(Regex("\\s+"))
             if (parts.size < 2) break
             val startObj = parts[0].toIntOrNull() ?: break
             val count = parts[1].toIntOrNull() ?: break
 
-            // 读 count 个每行 20 字节的条目
             for (i in 0 until count) {
                 if (pos + 20 > bytes.size) break
-                val entry = bytes.copyOfRange(pos, pos + 20).toString(Charsets.US_ASCII)
+                val entry = String(bytes.copyOfRange(pos, pos + 20), Charsets.US_ASCII)
                 val entryParts = entry.trim().split(Regex("\\s+"))
                 if (entryParts.size >= 3) {
-                    // 类型：n=使用中, f=自由
                     if (entryParts.getOrNull(2)?.startsWith("n") == true) {
                         val off = entryParts.getOrNull(0)?.toLongOrNull()
                         if (off != null && off > 0) {
@@ -150,9 +134,8 @@ object PdfExtractor {
 
     /** 线性扫描：找所有 N 0 obj 模式 */
     private fun linearScanObjects(bytes: ByteArray, offsets: MutableMap<Int, Int>) {
-        val pattern = Regex("(\\d+)\\s+0\\s+obj", setOf(RegexOption.MULTILINE))
-        // 在原始字节中搜索（转为 string 可能丢失二进制信息，但 obj 声明是 ASCII）
-        val text = bytes.toString(Charsets.ISO_8859_1)
+        val text = String(bytes, Charsets.ISO_8859_1)
+        val pattern = Regex("(\\d+)\\s+0\\s*obj", setOf(RegexOption.MULTILINE))
         for (match in pattern.findAll(text)) {
             val objNum = match.groupValues[1].toIntOrNull() ?: continue
             offsets[objNum] = match.range.first
@@ -160,40 +143,34 @@ object PdfExtractor {
     }
 
     // ── 流数据提取 ────────────────────────────────────────
-
     private fun findObjectStart(bytes: ByteArray, offset: Int): Int? {
         var pos = offset
-        // 跳过前导空白
-        while (pos < bytes.size && isWhitespace(bytes[pos])) pos++
-        // 验证 "N 0 obj" 模式
-        val chunk = bytes.copyOfRange(pos, minOf(pos + 50, bytes.size)).toString(Charsets.US_ASCII)
-        if (!Regex("\\d+\\s+0\\s+obj").containsMatchIn(chunk)) return null
+        while (pos < bytes.size && isWhitespaceByte(bytes[pos])) pos++
+        val chunk = String(bytes.copyOfRange(pos, minOf(pos + 50, bytes.size)), Charsets.US_ASCII)
+        if (!Regex("\\d+\\s+0\\s*obj").containsMatchIn(chunk)) return null
         return pos
     }
 
     private fun findEndObj(bytes: ByteArray, start: Int): Int {
         val tail = bytes.copyOfRange(start, minOf(start + (bytes.size - start), bytes.size))
-        val str = tail.toString(Charsets.US_ASCII)
+        val str = String(tail, Charsets.US_ASCII)
         val idx = str.indexOf("endobj")
         return if (idx >= 0) start + idx else -1
     }
 
-    /** 从对象字节数组中提取 stream 和 endstream 之间的原始（可能压缩）数据 */
-    private fun extractStreamBytes(objBytes: ByteArray): ByteArray? {
-        val str = objBytes.toString(Charsets.US_ASCII)
-        val streamIdx = str.indexOf("stream")
+    /** 从原始字节数组和对应的ASCII字符串中提取 stream 数据 */
+    private fun extractStreamBytes(rawStr: String, objBytes: ByteArray): ByteArray? {
+        val streamIdx = rawStr.indexOf("stream")
         if (streamIdx < 0) return null
 
-        // stream 后面可能有 \r\n 或 \n
         var dataStart = streamIdx + 6
-        while (dataStart < objBytes.size && (objBytes[dataStart].toInt() == 10 || objBytes[dataStart].toInt() == 13)) dataStart++
+        while (dataStart < objBytes.size && isNewlineByte(objBytes[dataStart])) dataStart++
 
-        val endStreamIdx = str.indexOf("endstream", dataStart)
+        val endStreamIdx = rawStr.indexOf("endstream", dataStart)
         if (endStreamIdx <= dataStart) return null
 
-        // endstream 前可能有 \r 或 \n
         var dataEnd = endStreamIdx
-        while (dataEnd > dataStart && (objBytes[dataEnd - 1].toInt() == 10 || objBytes[dataEnd - 1].toInt() == 13)) dataEnd--
+        while (dataEnd > dataStart && isNewlineByte(objBytes[dataEnd - 1])) dataEnd--
 
         if (dataEnd <= dataStart) return null
         return objBytes.copyOfRange(dataStart, dataEnd)
@@ -215,41 +192,20 @@ object PdfExtractor {
     }
 
     // ── 文本提取（从 PDF 操作符和字面串）──────────────────
-
-    /**
-     * 从未压缩的 PDF 内容流中提取文本。
-     * 匹配：
-     *   - (hello world)Tj  → 字面字符串 + Tj 操作符
-     *   - [(a)(b)(c)]TJ    → 字符串数组 + TJ 操作符
-     *   - (text)           ← 孤立的字面字符串
-     */
     internal fun extractTextFromDecompressed(data: ByteArray): String {
-        val content = data.toString(Charsets.ISO_8859_1)
+        val content = String(data, Charsets.ISO_8859_1)
         val sb = StringBuilder()
 
         // 提取 (...)Tj 模式
-        val tjPattern = Regex("\\(([^)]*)\\)\\s*Tj")
+        val tjPattern = Regex("\\(([^)]*)\\)\\s*T[jJ]")
         for (m in tjPattern.findAll(content)) {
             val t = unescapePdfString(m.groupValues[1])
             if (t.isNotBlank()) sb.append(t).append(" ")
         }
 
-        // 提取 [(...)...(...)]TJ 模式
-        val tjBigPattern = Regex("\\[((?:[^]\\]]|\\][^)]*)*?)\\]\\s*TJ")
-        for (m in tjBigPattern.findAll(content)) {
-            val inner = m.groupValues[1]
-            // 提取内部每个 (...)
-            val innerPat = Regex("\\(([^)]*)\\)")
-            for (im in innerPat.findAll(inner)) {
-                val t = unescapePdfString(im.groupValues[1])
-                if (t.isNotBlank()) sb.append(t)
-            }
-            sb.append(" ")
-        }
-
-        // 也提取独立的括号字符串（某些 PDF 不用 Tj 操作符）
+        // 也提取独立的括号字符串
         if (sb.isEmpty()) {
-            val standalonePattern = Regex("\\(([^)]{2,})\\)")
+            val standalonePattern = Regex("\\(([^)]{3,})\\)")
             for (m in standalonePattern.findAll(content)) {
                 val t = unescapePdfString(m.groupValues[1])
                 if (t.isNotBlank() && !t.matches(Regex("[\\d\\s]+"))) sb.append(t).append(" ")
@@ -259,13 +215,11 @@ object PdfExtractor {
         return sb.toString()
     }
 
-    /** 从原始（未解压）对象字节中提取文本（用于无 FlateDecode 的简单 PDF）*/
-    private fun extractTextFromRaw(objBytes: ByteArray): String {
-        val str = objBytes.toString(Charsets.ISO_8859_1)
+    /** 从原始对象字符串中提取文本 */
+    private fun extractTextFromRaw(rawStr: String): String {
         val sb = StringBuilder()
-        // 直接搜索 (text)Tj
         val tjPattern = Regex("\\(([^)]*)\\)\\s*T[jJ]")
-        for (m in tjPattern.findAll(str)) {
+        for (m in tjPattern.findAll(rawStr)) {
             val t = unescapePdfString(m.groupValues[1])
             if (t.isNotBlank()) sb.append(t).append(" ")
         }
@@ -285,10 +239,9 @@ object PdfExtractor {
                     'b' -> sb.append('\b')
                     'f' -> sb.append('\u000C')
                     '(' -> sb.append('(')
-                    ')' -> sb.append(')')
+                    ')' -> sb.append(')'
                     '\\' -> sb.append('\\')
                     else -> {
-                        // 八进制转义 \ddd
                         if (next in '0'..'9') {
                             val oct = s.substring(i + 1, minOf(i + 4, s.length)).takeWhile { it in '0'..'7' }
                             if (oct.isNotEmpty()) {
@@ -312,17 +265,26 @@ object PdfExtractor {
     }
 
     // ── 工具方法 ──────────────────────────────────────────
-
-    private fun isWhitespace(b: Byte): Int {
+    private fun isWhitespaceByte(b: Byte): Boolean {
         val v = b.toInt() and 0xFF
-        return if (v == 0x09 || v == 0x0A || v == 0x0D || v == 0x20) 1 else 0
+        return v == 0x09 || v == 0x0A || v == 0x0D || v == 0x20
     }
 
-    /** 从指定位置开始读一行（到 \n 或 \r 或 EOF） */
+    private fun isDigitByte(b: Byte): Boolean {
+        val v = b.toInt() and 0xFF
+        return v in '0'.code..'9'.code
+    }
+
+    private fun isNewlineByte(b: Byte): Boolean {
+        val v = b.toInt() and 0xFF
+        return v == 0x0A || v == 0x0D
+    }
+
+    /** 从指定位置开始读一行 */
     private fun readLine(bytes: ByteArray, start: Int): Pair<String, Int>? {
         if (start >= bytes.size) return null
         var end = start
-        while (end < bytes.size && bytes[end].toInt() != 10 && bytes[end].toInt() != 13) end++
-        return Pair(bytes.copyOfRange(start, end).toString(Charsets.US_ASCII), end)
+        while (end < bytes.size && !isNewlineByte(bytes[end])) end++
+        return Pair(String(bytes.copyOfRange(start, end), Charsets.US_ASCII), end)
     }
 }
