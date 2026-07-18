@@ -26,16 +26,20 @@ object PdfExtractor {
 
     fun extract(file: File): PdfResult? {
         val bytes = try { file.readBytes() } catch (_: Throwable) { return null }
-        if (bytes.size < 5 || !(String(bytes, 0, 5, StandardCharsets.ISO_8859_1).startsWith("%PDF-") ||
-                String(bytes, 0, minOf(5, bytes.size), StandardCharsets.ISO_8859_1).startsWith("%PDF-"))) {
-            // 容错：不以 %PDF 开头也可能仍是 PDF（少数损坏/封装），仍尝试
+        // PDF 魔数检查（宽容模式：不以 %PDF 开头也尝试）
+        if (bytes.size < 5) return null
+        val header = String(bytes, 0, minOf(8, bytes.size), StandardCharsets.ISO_8859_1)
+        if (!header.startsWith("%PDF") && !header.startsWith("%PDF-")) {
+            // 非 PDF 文件，直接返回 null 不浪费时间
+            return null
         }
         return try {
             val pages = countPages(bytes)
-            val text = extractText(bytes)
+            val text = extractTextRobust(bytes)
             PdfResult(text, max(1, pages))
         } catch (_: Throwable) {
-            null
+            // 最后兜底：至少返回页数
+            try { PdfResult("", max(1, countPages(bytes))) } catch (_: Throwable) { null }
         }
     }
 
@@ -50,22 +54,77 @@ object PdfExtractor {
         return max(1, any / 2)
     }
 
-    // ───────────────────────── 文本 ─────────────────────────
-    private fun extractText(bytes: ByteArray): String {
-        val toUnicode = parseToUnicode(bytes)
+    // ───────────────────────── 文本（鲁棒版：逐流容错） ─────────────────────────
+    private fun extractTextRobust(bytes: ByteArray): String {
         val sb = StringBuilder()
-        // 1) 抽取所有流
-        val streamRe = """(?s)stream\r?\n(.*?)endstream""".toRegex()
-        streamRe.findAll(String(bytes, StandardCharsets.ISO_8859_1)).forEach { m ->
-            val raw = m.groupValues[1].toByteArray(StandardCharsets.ISO_8859_1)
-            // 判断该流前后是否像内容流（含文本操作符）
-            val probe = String(raw, StandardCharsets.ISO_8859_1)
-            if (!probe.contains("Tj") && !probe.contains("TJ") && !probe.contains("BT")) return@forEach
-            val data = tryDecompress(raw, bytes, m.range.first) ?: raw
-            val text = decodeContentStream(data, toUnicode)
-            if (text.isNotBlank()) sb.append(text).append('\n')
+        // 1) 先尝试标准流解析
+        try {
+            val toUnicode = parseToUnicode(bytes)
+            val rawStr = String(bytes, StandardCharsets.ISO_8859_1)
+            val streamRe = """(?s)stream\r?\n(.*?)endstream""".toRegex()
+            var streamCount = 0
+            var textCount = 0
+            streamRe.findAll(rawStr).forEach { m ->
+                streamCount++
+                try {
+                    val raw = m.groupValues[1].toByteArray(StandardCharsets.ISO_8859_1)
+                    val probe = String(raw, StandardCharsets.ISO_8859_1)
+                    if (!probe.contains("Tj") && !probe.contains("TJ") && !probe.contains("BT")) return@forEach
+                    val data = tryDecompress(raw, bytes, m.range.first) ?: raw
+                    val text = decodeContentStream(data, toUnicode)
+                    if (text.isNotBlank()) { sb.append(text).append('\n'); textCount++ }
+                } catch (_: Throwable) { /* 单流失败跳过 */ }
+            }
+            if (textCount > 0) return sb.toString()
+        } catch (_: Throwable) { /* 标准解析完全失败，尝试备用方案 */ }
+
+        // 2) 备用方案：直接从原始字节中提取所有可读文本片段
+        return extractRawReadableStrings(bytes)
+    }
+
+    /** 从 PDF 原始字节中提取可读 UTF-8 / CP1252 字符串片段。 */
+    private fun extractRawReadableStrings(bytes: ByteArray): String {
+        val sb = StringBuilder()
+        var i = 0
+        while (i < bytes.size - 3) {
+            // 尝试检测连续的可读字符序列
+            val ch = bytes[i].toInt() and 0xFF
+            if (ch >= 0x20 && ch < 0x7F) { // ASCII 可打印字符
+                var j = i
+                while (j < bytes.size) {
+                    val c2 = bytes[j].toInt() and 0xFF
+                    if (c2 < 0x20 || c2 > 0x7E) break
+                    j++
+                }
+                if (j - i >= 4) { // 至少 4 个 ASCII 字符才算有意义
+                    sb.append(String(bytes, i, j - i, StandardCharsets.US_ASCII)).append(' ')
+                }
+                i = j
+            } else if ((ch == 0xE4 || ch == 0xE5 || ch == 0xE6 || ch == 0xE7 ||
+                       ch == 0xE8 || ch == 0xE9) && i + 2 < bytes.size) {
+                // 可能是 UTF-8 中文（3字节序列开头）
+                val b2 = bytes[i+1].toInt() and 0xFF
+                val b3 = bytes[i+2].toInt() and 0xFF
+                if (b2 in 0x80..0xBF && b3 in 0x80..0xBF) {
+                    var j = i
+                    while (j + 2 < bytes.size) {
+                        val c1 = bytes[j].toInt() and 0xFF
+                        val c2b = bytes[j+1].toInt() and 0xFF
+                        val c3 = bytes[j+2].toInt() and 0xFF
+                        if (c1 in 0xE0..0xEF && c2b in 0x80..0xBF && c3 in 0x80..0xBF) j += 3 else break
+                    }
+                    if (j > i) {
+                        try { sb.append(String(bytes, i, j - i, StandardCharsets.UTF_8)).append(' ') } catch (_: Throwable) {}
+                    }
+                    i = j
+                } else {
+                    i++
+                }
+            } else {
+                i++
+            }
         }
-        return sb.toString()
+        return sb.toString().trim()
     }
 
     /** 尝试 Flate 解压；失败返回 null（调用方用原数据）。 */

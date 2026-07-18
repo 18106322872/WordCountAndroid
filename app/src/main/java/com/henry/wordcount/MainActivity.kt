@@ -70,22 +70,40 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 class MainActivity : ComponentActivity() {
+    /** 外部可通过此引用向已有列表追加新文件（onNewIntent 时使用） */
+    companion object {
+        @Volatile var pendingUris: List<Uri>? = null
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val uris = mutableListOf<Uri>()
-        when (intent?.action) {
-            Intent.ACTION_SEND -> {
-                (intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))?.let { uris.add(it) }
-            }
-            Intent.ACTION_SEND_MULTIPLE -> {
-                intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
-                    ?.forEach { uris.add(it) }
-            }
-            Intent.ACTION_VIEW -> {
-                intent.data?.let { uris.add(it) }
+        val uris = extractUrisFromIntent(intent)
+        setContent { WordCountApp(initialUris = uris) }
+    }
+
+    /** v1.0.16: 处理从微信/千牛等应用后续传入的文件，追加到已有列表而非替换 */
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent) // 必须调用，否则 getIntent() 返回旧 intent
+        val newUris = extractUrisFromIntent(intent)
+        if (newUris.isNotEmpty()) {
+            pendingUris = newUris
+        }
+    }
+
+    private fun extractUrisFromIntent(intent: Intent?): List<Uri> {
+        if (intent == null) return emptyList()
+        return mutableListOf<Uri>().apply {
+            when (intent.action) {
+                Intent.ACTION_SEND -> {
+                    (intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))?.let { add(it) }
+                }
+                Intent.ACTION_SEND_MULTIPLE -> {
+                    intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.forEach { add(it) }
+                }
+                Intent.ACTION_VIEW -> { intent.data?.let { add(it) } }
             }
         }
-        setContent { WordCountApp(initialUris = uris) }
     }
 }
 
@@ -151,6 +169,13 @@ private fun guessExt(context: android.content.Context, uri: Uri): String {
                 "application/vnd.openxmlformats-officedocument.presentationml.presentation" -> ".pptx"
                 "application/dxf", "application/x-dxf" -> ".dxf"
                 "application/dwg", "image/vnd.dwg" -> ".dwg"
+                // 压缩包
+                "application/zip" -> ".zip"
+                "application/x-zip-compressed" -> ".zip"
+                "application/x-rar-compressed", "application/rar" -> ".rar"
+                "application/gzip", "application/x-gzip" -> ".gz"
+                "application/x-tar", "application/tar" -> ".tar"
+                "application/x-7z-compressed" -> ".7z"
                 else -> ""
             }
         }
@@ -193,6 +218,19 @@ fun WordCountApp(initialUris: List<Uri>) {
         }
     }
 
+    // v1.0.16: 监听从微信/千牛后续传入的文件（onNewIntent → pendingUris），追加到已有列表
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        // 每隔 2 秒检查一次是否有新文件需要追加（轻量轮询，避免复杂状态管理）
+        while (true) {
+            kotlinx.coroutines.delay(2000)
+            val uris = MainActivity.pendingUris
+            if (uris != null && uris.isNotEmpty() && !busy) {
+                MainActivity.pendingUris = null // 消费掉
+                addFiles(context, scope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris)
+            }
+        }
+    }
+
     val totals = run {
         val sel = entries.filter { it.selected && it.result != null }
         var w = 0; var fe = 0; var nc = 0; var ch = 0; var pg = 0
@@ -204,7 +242,7 @@ fun WordCountApp(initialUris: List<Uri>) {
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("字数统计  v1.0.15") }) },
+        topBar = { TopAppBar(title = { Text("字数统计  v1.0.16") }) },
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             Surface(shadowElevation = 4.dp) {
@@ -447,7 +485,34 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): File {
     context.contentResolver.openInputStream(uri)?.use { input ->
         out.outputStream().use { input.copyTo(it) }
     }
+    // v1.0.16 兜底：若缓存文件仍无有效扩展名，用 magic bytes 检测并重命名
+    if (out.extension.isBlank() || out.extension.length > 6) {
+        val magicExt = detectExtFromMagicBytes(out)
+        if (magicExt.isNotBlank()) {
+            val renamed = File(out.parentFile, "${out.name}.$magicExt")
+            if (out.renameTo(renamed)) return renamed
+        }
+    }
     return out
+}
+
+/** 用 magic bytes 检测文件真实格式（用于 content URI 无扩展名时兜底）。 */
+private fun detectExtFromMagicBytes(file: File): String {
+    return try {
+        val header = file.inputStream().use { it.readNBytes(8) }
+        when {
+            header.size >= 4 && header[0] == 0x50.toByte() && header[1] == 0x4B.toByte()
+                    && header[2] == 0x03.toByte() && header[3] == 0x04.toByte() -> "zip"
+            header.size >= 6 && header[0] == 0x52.toByte() && header[1] == 0x61.toByte()
+                    && header[2] == 0x72.toByte() && header[3] == 0x21.toByte() -> "rar"
+            header.size >= 2 && (header[0].toInt() and 0xFF) == 0x1F && (header[1].toInt() and 0xFF) == 0x8B -> "gz"
+            header.size >= 4 && header[0] == 0x25.toByte() && header[1] == 0x50.toByte()
+                    && header[2] == 0x44.toByte() && header[3] == 0x46.toByte() -> "pdf"
+            header.size >= 8 && header[0] == 0x37.toByte() && header[1] == 0x7A.toByte()
+                    && header[2] == 0xBC.toByte() && header[3] == 0xAF.toByte() -> "7z"
+            else -> ""
+        }
+    } catch (_: Throwable) { "" }
 }
 
 private val IMAGE_EXTS = setOf("png", "jpg", "jpeg", "bmp", "tif", "tiff", "gif", "webp")
@@ -504,8 +569,15 @@ private fun addFiles(
                     try {
                         val res = ArchiveEngine.extract(f, context.cacheDir)
                         if (res == null) {
+                            // 区分"格式不支持"和"解析失败"
+                            val ext = f.extension.lowercase()
+                            val isSupported = ext in setOf("zip", "rar", "7z", "tar", "gz", "tgz")
+                            val errMsg = if (isSupported)
+                                "压缩包解析失败（文件可能损坏或密码保护）"
+                            else
+                                "暂不支持此格式（.$ext）。支持：ZIP / RAR4 / 7Z / TAR / GZ"
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = f.name, cachePath = f.absolutePath,
-                                error = "暂不支持该压缩格式（当前仅支持 ZIP / GZ / TGZ / TAR；RAR / 7Z 需原生库，安卓无法纯 Kotlin 实现）"))
+                                error = errMsg))
                         } else {
                             val resMap = mapOf(
                                 "name" to f.name, "ext" to ".${f.extension.lowercase()}",
@@ -643,22 +715,27 @@ private fun addFiles(
                             error = "读取失败（${e.message}）"))
                     }
                 }
-                // 图片类：OCR 默认禁用
+                // 图片类：OCR 默认启用（v1.0.16），崩溃后自动降级禁用
                 imageFiles.forEachIndexed { i, f ->
                     try {
-                        if (!OcrEngine.ocrEnabled) {
+                        if (OcrEngine.ocrCrashed) {
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath,
-                                error = "图片文字识别暂不可用（当前版本已默认禁用以防止闪退）"))
+                                error = "OCR 引擎崩溃已自动禁用（重启 App 后可重试）"))
                         } else {
                             val text = OcrEngine.recognize(context, f)
-                            val stats = countTextKotlin(text)
-                            val resMap = mapOf(
-                                "name" to f.name, "ext" to ".img",
-                                "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
-                                "meta" to emptyMap<String, Any?>()
-                            )
-                            val fr = toFileResult(resMap, f.absolutePath)
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                            if (text.isBlank()) {
+                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath,
+                                    error = "未识别到文字（可能是纯图片/手写/模糊不清）"))
+                            } else {
+                                val stats = countTextKotlin(text)
+                                val resMap = mapOf(
+                                    "name" to f.name, "ext" to ".img",
+                                    "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
+                                    "meta" to emptyMap<String, Any?>()
+                                )
+                                val fr = toFileResult(resMap, f.absolutePath)
+                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                            }
                         }
                     } catch (e: OutOfMemoryError) {
                         Runtime.getRuntime().gc()

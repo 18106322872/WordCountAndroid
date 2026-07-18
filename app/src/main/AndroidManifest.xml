@@ -70,6 +70,20 @@
                 <data android:mimeType="application/dxf" />
                 <data android:mimeType="application/x-dxf" />
                 <data android:mimeType="image/vnd.dwg" />
+                <data android:mimeType="application/dwg" />
+                <!-- 压缩包 -->
+                <data android:mimeType="application/zip" />
+                <data android:mimeType="application/x-rar-compressed" />
+                <data android:mimeType="application/rar" />
+                <data android:mimeType="application/gzip" />
+                <data android:mimeType="application/x-gzip" />
+                <data android:mimeType="application/x-tar" />
+                <data android:mimeType="application/x-7z-compressed" />
+                <!-- 图片 -->
+                <data android:mimeType="image/png" />
+                <data android:mimeType="image/jpeg" />
+                <data android:mimeType="image/*" />
+                <!-- 通配兜底 -->
                 <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
