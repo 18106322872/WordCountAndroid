@@ -417,7 +417,8 @@ private fun addFiles(
             val oldOfficeFiles = mutableListOf<File>()
             val ooxmlPaths = mutableListOf<String>()    // .docx/.xlsx/.pptx（暂走 Python）
             val ooxmlNames = mutableListOf<String>()     // 对应文件名
-            val pdfFiles = mutableListOf<File>()     // v1.0.14: 自实现轻量 PDF 解析
+            val pdfPaths = mutableListOf<String>()    // PDF（暂走 Python）
+            val pdfNames = mutableListOf<String>()     // 对应文件名
             val dwgFiles = mutableListOf<File>()
             val txtFiles = mutableListOf<File>()  // TXT 纯 Kotlin 处理
             for (f in files) {
@@ -426,7 +427,7 @@ private fun addFiles(
                     ext in IMAGE_EXTS -> imageFiles.add(f)
                     ext in OLD_OFFICE_EXTS -> oldOfficeFiles.add(f)
                     ext in OOXML_EXTS -> { ooxmlPaths.add(f.absolutePath); ooxmlNames.add(f.name) }
-                    ext in PDF_EXTS -> pdfFiles.add(f)
+                    ext in PDF_EXTS -> { pdfPaths.add(f.absolutePath); pdfNames.add(f.name) }
                     ext in DWG_EXTS -> dwgFiles.add(f)
                     ext in TXT_EXTS -> txtFiles.add(f)  // 绕开 Python
                     else -> {
@@ -438,56 +439,29 @@ private fun addFiles(
 
             withContext(Dispatchers.IO) {
                 // ════════════════════════════════════════
-                // PDF: PdfBox 纯 Java 提取文本 + Kotlin 统计
-                // v1.0.14 彻底绕开 Chaqopy/Python
-                // ════════════════════════════════════════
-                pdfFiles.forEachIndexed { i, f ->
-                    try {
-                        val text = PdfEngine.extractText(f)
-                        if (text.isBlank()) {
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = f.name, cachePath = f.absolutePath,
-                                error = "PDF 文件未提取到文字（可能为扫描件/图片PDF）"))
-                        } else {
-                            val stats = countTextKotlin(text)
-                            val pages = PdfEngine.getPageCount(f).takeIf { it > 0 }
-                            val resMap = mapOf(
-                                "name" to f.name, "ext" to ".pdf",
-                                "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
-                                "meta" to mapOf<String, Any?>("pages" to pages),
-                            )
-                            val fr = toFileResult(resMap, f.absolutePath)
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-                        }
-                    } catch (e: Throwable) {
-                        Log.w("WordCount", "PDF 处理失败 ${f.name}: ${e.javaClass.simpleName}: ${e.message}")
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = f.name, cachePath = f.absolutePath,
-                            error = "PDF 解析失败（${e.message}）"))
-                    }
-                }
-
-                // ════════════════════════════════════════
-                // OOXML (.docx/.xlsx/.pptx)：暂走 Python
-                // （poi-ooxml 在 Android 有 StAX 兼容问题，后续版本解决后切纯 Java）
-                // ════════════════════════════════════════
-                if (ooxmlPaths.isNotEmpty()) {
-                    for (i in ooxmlPaths.indices) {
+                // PDF + OOXML：走 Python（Chaquopy）
+                // TXT/老Office/图片已分离到下面各自处理（纯 Java/Kotlin）
+                val pythonPaths = pdfPaths + ooxmlPaths
+                val pythonNames = pdfNames + ooxmlNames
+                if (pythonPaths.isNotEmpty()) {
+                    for (i in pythonPaths.indices) {
                         try {
-                            val raw = PythonEngine.countFiles(context, listOf(ooxmlPaths[i]))
+                            val raw = PythonEngine.countFiles(context, listOf(pythonPaths[i]))
                             (raw as? List<*>)?.forEachIndexed { _, item ->
                                 val m = item as? Map<*, *>
                                 val ok = m?.get("ok") as? Boolean ?: false
-                                val name = m?.get("name") as? String ?: ooxmlNames.getOrNull(i) ?: "文件"
+                                val name = m?.get("name") as? String ?: pythonNames.getOrNull(i) ?: "文件"
                                 if (ok) {
                                     val resMap = m?.get("result") as? Map<*, *>
-                                    val fr = toFileResult(resMap, ooxmlPaths[i])
-                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = name, cachePath = ooxmlPaths[i], result = fr, rawResult = resMap))
+                                    val fr = toFileResult(resMap, pythonPaths[i])
+                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_py", displayName = name, cachePath = pythonPaths[i], result = fr, rawResult = resMap))
                                 } else {
-                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = name, cachePath: ooxmlPaths[i], error = m?.get("error") as? String))
+                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_py", displayName = name, cachePath = pythonPaths[i], error = m?.get("error") as? String))
                                 }
                             }
                         } catch (e: Throwable) {
-                            Log.w("WordCount", "OOXML 处理失败 [${ooxmlNames.getOrNull(i)}]: ${e.javaClass.simpleName}: ${e.message}")
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = ooxmlNames.getOrNull(i) ?: "文件", cachePath = ooxmlPaths[i],
+                            Log.w("WordCount", "Python 文件处理失败 [${pythonNames.getOrNull(i)}]: ${e.javaClass.simpleName}: ${e.message}")
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_py", displayName = pythonNames.getOrNull(i) ?: "文件", cachePath = pythonPaths[i],
                                 error = "处理出错：${(e.message ?: "未知错误").substringBefore('\n').take(200)}"))
                         }
                     }
