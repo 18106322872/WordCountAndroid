@@ -1,6 +1,7 @@
 package com.henry.wordcount
 
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -24,7 +25,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -57,6 +57,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.net.toUri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -67,7 +68,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.util.zip.ZipFile
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -119,15 +119,18 @@ data class FileEntry(
 
 /** 从 URI 推断文件扩展名（优先 filename，其次 MIME type） */
 private fun guessExt(context: android.content.Context, uri: Uri): String {
+    // 1) 从 URI 的 display name 取扩展名
     val name = androidx.documentfile.provider.DocumentFile.fromSingleUri(context, uri)?.name
     if (!name.isNullOrBlank()) {
         val dotIdx = name.lastIndexOf('.')
         if (dotIdx > 0) return name.substring(dotIdx).lowercase()
     }
+    // 2) 从 ContentResolver 的 MIME type 反推
     try {
         val mime = context.contentResolver.getType(uri)
         if (!mime.isNullOrBlank()) {
             if (mime.startsWith("image/")) {
+                // 图片 MIME → 扩展名映射
                 return when (mime) {
                     "image/png" -> ".png"
                     "image/jpeg" -> ".jpg"
@@ -148,27 +151,11 @@ private fun guessExt(context: android.content.Context, uri: Uri): String {
                 "application/vnd.openxmlformats-officedocument.presentationml.presentation" -> ".pptx"
                 "application/dxf", "application/x-dxf" -> ".dxf"
                 "application/dwg", "image/vnd.dwg" -> ".dwg"
-                "application/zip", "application/x-zip-compressed", "application/x-7z-compressed",
-                "application/x-rar-compressed", "application/gzip",
-                "application/x-tar", "application/x-bzip2", "application/x-xz" -> {
-                    // 从文件名推断压缩格式
-                    val fname = name ?: ""
-                    when {
-                        fname.endsWith(".zip", ignoreCase = true) -> ".zip"
-                        fname.endsWith(".rar", ignoreCase = true) -> ".rar"
-                        fname.endsWith(".7z", ignoreCase = true) -> ".7z"
-                        fname.endsWith(".tar", ignoreCase = true) ||
-                        fname.endsWith(".tgz", ignoreCase = true) -> ".tar"
-                        fname.endsWith(".gz", ignoreCase = true) -> ".gz"
-                        fname.endsWith(".bz2", ignoreCase = true) -> ".bz2"
-                        fname.endsWith(".xz", ignoreCase = true) -> ".xz"
-                        else -> ".zip"
-                    }
-                }
                 else -> ""
             }
         }
     } catch (_: Exception) {}
+    // 3) 从 URI path 取（content URI 通常无效，但 file:// 可以）
     try {
         val path = uri.path
         if (!path.isNullOrBlank()) {
@@ -178,19 +165,6 @@ private fun guessExt(context: android.content.Context, uri: Uri): String {
     } catch (_: Exception) {}
     return ""
 }
-
-// ══════════════════════════════════════════════════════════
-// 文件类型分类（v1.0.15：全部纯 Java/Kotlin，不再依赖 Chaquopy）
-// ══════════════════════════════════════════════════════════
-private val IMAGE_EXTS = setOf("png", "jpg", "jpeg", "bmp", "tif", "tiff", "gif", "webp")
-private val OLD_OFFICE_EXTS = setOf("doc", "xls", "ppt")       // POI scratchpad
-private val OOXML_EXTS = setOf("docx", "xlsx", "pptx")          // OoXmlEngine（ZIP+XML）
-private val PDF_EXTS = setOf("pdf")                              // PdfExtractor（自实现）
-private val DWG_EXTS = setOf("dwg")                              // DwgEngine
-private val ARCHIVE_EXTS = setOf(                                // ArchiveEngine（commons-compress）
-    "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz"
-)
-private val TXT_EXTS = setOf("txt")                               // 纯 Kotlin 读文本
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -202,31 +176,30 @@ fun WordCountApp(initialUris: List<Uri>) {
     val entries = remember { mutableStateListOf<FileEntry>() }
     var busy by remember { mutableStateOf(false) }
 
-    // SAF 文件选择器
+    // SAF 文件选择器（不需要任何存储权限——OpenMultipleDocuments 在所有 Android 版本上均无需授权即可使用）
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) addFiles(context, scope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris)
     }
 
+    /** 选文件入口：直接启动 SAF 选择器（无需任何运行时权限申请） */
     fun pickWithPermission() {
         picker.launch(arrayOf("*/*"))
     }
 
     // 处理启动时从千牛/微信分享进来的文件
-    LaunchedEffect(Unit) {
+    androidx.compose.runtime.LaunchedEffect(Unit) {
         if (initialUris.isNotEmpty()) {
             addFiles(context, scope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, initialUris)
         }
     }
 
-    // 合计统计（已选中且有结果的项目）
     val totals = run {
         val sel = entries.filter { it.selected && it.result != null }
-        var w = 0; var fe = 0; var nc = 0; var ch = 0; var pg = 0
+        var w = 0; var fe = 0; var nc = 0; var ch = 0
         sel.forEach { r ->
             w += r.result!!.words; fe += r.result!!.fe; nc += r.result!!.nc; ch += r.result!!.chars
-            r.result!!.pages?.let { pg += it }
         }
-        mapOf("words" to w, "fe" to fe, "nc" to nc, "chars" to ch, "pages" to pg)
+        mapOf("words" to w, "fe" to fe, "nc" to nc, "chars" to ch)
     }
 
     Scaffold(
@@ -235,7 +208,7 @@ fun WordCountApp(initialUris: List<Uri>) {
         bottomBar = {
             Surface(shadowElevation = 4.dp) {
                 Column(Modifier.padding(12.dp)) {
-                    // 第一行：全选 / 取消全选 / 清空列表 / 合计
+                    // 全选/取消全选 + 合计行
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (entries.isNotEmpty()) {
                             OutlinedButton(onClick = {
@@ -248,18 +221,15 @@ fun WordCountApp(initialUris: List<Uri>) {
                             }) { Text("取消全选", style = MaterialTheme.typography.labelLarge) }
                             OutlinedButton(onClick = {
                                 entries.clear()
-                            }) { Icon(Icons.Default.DeleteSweep, contentDescription = "清空", Modifier.size(18.dp))
-                                Spacer(Modifier.width(4.dp)); Text("清空", style = MaterialTheme.typography.labelLarge) }
+                            }) { Text("清空", style = MaterialTheme.typography.labelLarge) }
                         }
                         Spacer(Modifier.weight(1f))
                         Text("合计（已选 ${entries.count { it.selected }} 项）", fontWeight = FontWeight.Bold)
                     }
-                    // 第二行：字数/中文/非中文/页数
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        Text("字数 ${totals["words"]} ｜ 中文 ${totals["fe"]} ｜ 非中文 ${totals["nc"]} ｜ 页数 ${totals["pages"]}")
+                        Text("字数 ${totals["words"]} ｜ 中文 ${totals["fe"]} ｜ 非中文 ${totals["nc"]} ｜ 页数 ${totals["chars"]}")
                     }
                     Spacer(Modifier.padding(4.dp))
-                    // 第三行：操作按钮
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(onClick = { pickWithPermission() }, modifier = Modifier.weight(1f)) { Text("选择文件") }
                         OutlinedButton(
@@ -301,7 +271,6 @@ fun WordCountApp(initialUris: List<Uri>) {
             ) {
                 items(entries, key = { it.id }) { entry ->
                     FileCard(entry,
-                        cachePath = entry.cachePath,
                         onToggle = { e ->
                             val i = entries.indexOf(e)
                             if (i >= 0) entries[i] = e.copy(selected = !e.selected)
@@ -323,7 +292,7 @@ fun WordCountApp(initialUris: List<Uri>) {
 }
 
 @Composable
-fun FileCard(entry: FileEntry, cachePath: String, onToggle: (FileEntry) -> Unit, onDelete: (FileEntry) -> Unit) {
+fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEntry) -> Unit) {
     Card(
         Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
@@ -332,32 +301,17 @@ fun FileCard(entry: FileEntry, cachePath: String, onToggle: (FileEntry) -> Unit,
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(checked = entry.selected, onCheckedChange = { onToggle(entry) })
                 Column(Modifier.weight(1f)) {
-                    // 文件名可点击 → 打开文件（用其他应用）
-                    Text(
-                        text = entry.displayName,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.clickable {
-                            tryOpenFile(cachePath)
-                        },
-                        color = Color(0xFF1565C0)  // 蓝色提示可点击
-                    )
+                    Text(entry.displayName, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     val r = entry.result
                     if (r != null) {
-                        // 统计摘要行：字数 | 中文 | 非中文 | 页数
-                        val pagesStr = when {
-                            r.pages != null -> "页 ${r.pages}"
-                            r.pagesReason != null -> r.pagesReason
-                            else -> ""
-                        }
                         Text(
-                            "字数 ${r.words} ｜ 中文 ${r.fe} ｜ 非中文 ${r.nc}" +
-                                    (if (pagesStr.isNotBlank()) " ｜ $pagesStr" else ""),
+                            "字数 ${r.words} ｜ 中文 ${r.fe} ｜ 非中文 ${r.nc} ｜ 字符 ${r.chars}" +
+                                    (if (r.pages != null) " ｜ 页 ${r.pages}" else if (r.pagesReason != null) " ｜ ${r.pagesReason}" else ""),
                             style = MaterialTheme.typography.bodySmall, color = Color.Gray
                         )
                         if (r.hasUnreliable) Text("含无法准确统计的内容（可导出）", style = MaterialTheme.typography.bodySmall, color = Color(0xFFB26A00))
                     } else if (entry.error != null) {
+                        // 截取首行/前200字，避免满屏 traceback；改前缀为"处理出错"
                         val shortErr = entry.error!!.substringBefore('\n').take(200)
                         Text("处理出错：$shortErr", style = MaterialTheme.typography.bodySmall, color = Color(0xFFB00020))
                     } else {
@@ -367,72 +321,22 @@ fun FileCard(entry: FileEntry, cachePath: String, onToggle: (FileEntry) -> Unit,
                 Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.small) {
                     Text(" ${entry.result?.ext?.uppercase() ?: "?"} ", Modifier.padding(6.dp, 2.dp), style = MaterialTheme.typography.labelSmall)
                 }
+                // 删除按钮
                 IconButton(onClick = { onDelete(entry) }) {
                     Icon(imageVector = Icons.Default.Close, contentDescription = "删除", tint = Color.Gray)
                 }
             }
-            // 内部文件列表（压缩包内各文件详情）
             entry.result?.inner?.forEach { inner ->
                 Row(Modifier.padding(start = 40.dp, top = 2.dp)) {
                     Text("└ ${inner.name}", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text("字 ${inner.words} 中 ${inner.fe} 非 ${inner.nc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
             }
-            // 工作表名列表（Excel 等）
             entry.result?.sheets?.forEach { s ->
-                Text("▪ $s", Modifier.padding(start = 40.dp, top = 2.dp), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                Text("▪ 工作表：$s", Modifier.padding(start = 40.dp, top = 2.dp), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
             }
         }
     }
-}
-
-/** 封装「用其他应用打开文件」的 Intent 操作 */
-private fun tryOpenFile(filePath: String) {
-    try {
-        val file = File(filePath)
-        if (!file.exists()) return
-        // 注意：cacheDir 的文件需要通过 FileProvider 暴露 URI
-        // 这里用一个简单的 VIEW intent，让系统选择应用打开
-        val context = PlatformContextProvider.context ?: return
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, guessMimeType(file.extension.lowercase()))
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        context.startActivity(Intent.createChooser(intent, "打开文件"))
-    } catch (e: Exception) {
-        Log.w("WordCount", "打开文件失败: ${e.message}")
-    }
-}
-
-/** 简易 MIME 类型推断（用于 Intent 打开） */
-private fun guessMimeType(ext: String): String = when (ext) {
-    "pdf" -> "application/pdf"
-    "doc" -> "application/msword"
-    "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    "xls" -> "application/vnd.ms-excel"
-    "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    "ppt" -> "application/vnd.ms-powerpoint"
-    "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-    "txt", "log", "csv" -> "text/plain"
-    "jpg", "jpeg" -> "image/jpeg"
-    "png" -> "image/png"
-    "gif" -> "image/gif"
-    "webp" -> "image/webp"
-    "html", "htm" -> "text/html"
-    "zip" -> "application/zip"
-    "rar" -> "application/x-rar-compressed"
-    "7z" -> "application/x-7z-compressed"
-    "dwg" -> "image/vnd.dwg"
-    "dxf" -> "application/dxf"
-    else -> "*/*"
-}
-
-/** 平台 Context 提供器（Compose 外部需要访问 Context 时使用）*/
-object PlatformContextProvider {
-    @JvmStatic
-    var context: android.content.Context? = null
 }
 
 // ---------------------------------------------------------------------------
@@ -444,10 +348,12 @@ object PlatformContextProvider {
  * Word 口径：字数 = 中文字符和朝鲜语单词 + 非中文单词
  * 返回 (words, fe, nc, chars)
  */
-internal fun countTextKotlin(text: String): Quadruple<Int, Int, Int, Int> {
+private fun countTextKotlin(text: String): Quadruple<Int, Int, Int, Int> {
+    // FarEast 正则：CJK + 朝鲜语 + 全角（与 Python 端 _FAR 完全一致）
     val farEastRegex = Regex("[\\u1100-\\u11FF\\u3000-\\u303F\\u3130-\\u318F\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uA960-\\uA97C\\uAC00-\\uD7A3\\uD7B0-\\uD7FF\\uF900-\\uFAFF\\uFF00-\\uFFEF]")
     val nonCjkRegex = Regex("[^\\s\\u1100-\\u11FF\\u3000-\\u303F\\u3130-\\u318F\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uA960-\\uA97C\\uAC00-\\uD7A3\\uD7B0-\\uD7FF\\uF900-\\uFAFF\\uFF00-\\uFFEF]+")
 
+    // 按段落分割（与 Python 端 re.split(r"\n\s*\n") 一致）
     val paragraphs = text.split(Regex("\\n\\s*\\n"))
     var totalFe = 0
     var totalNc = 0
@@ -466,54 +372,14 @@ internal fun countTextKotlin(text: String): Quadruple<Int, Int, Int, Int> {
     return Quadruple(words, totalFe, totalNc, totalChars)
 }
 
-/**
- * 根据文件内容和类型估算页数。
- * 规则：
- *   - DOC/DOCX：每 2000 中文字符 ≈ 1 页（Word 默认 A4 宋体五号约每页~40行×38字≈1520字）
- *   - XLSX：按工作表数计页数
- *   - PPT/PPTX：按幻灯片页数计
- *   - PDF：尝试从元数据读取，否则按字符估算
- *   - TXT/其他：按字符数估算（中文 1800 字/页，英文 500 词/页）
- */
-internal fun estimatePages(text: String, ext: String, sheets: List<String> = emptyList(), metaPages: Int? = null): Pair<Int?, String?> {
-    // 如果已有元数据中的页数（如 PDF 的 /Count），优先使用
-    metaPages?.let { return Pair(it, null) }
-
-    // 特殊格式：PPT/PPTX 按工作表/幻灯片数
-    if (ext == ".ppt" || ext == ".pptx") {
-        val slideCount = if (sheets.isNotEmpty()) sheets.size else null
-        slideCount?.let { return Pair(it, null) }
-    }
-
-    // 特殊格式：XLSX 按工作表数
-    if (ext == ".xlsx" || ext == ".xls") {
-        val sheetCount = if (sheets.isNotEmpty()) sheets.size else null
-        sheetCount?.let { return Pair(it, null) }
-    }
-
-    // 通用估算：基于字符数
-    if (text.isBlank()) return Pair(null, null)
-    val stats = countTextKotlin(text)
-    val charCount = stats.fourth
-    val cjkCount = stats.second
-
-    return if (cjkCount > 0) {
-        // 含中文：约 1800 字/页
-        val est = maxOf(1, (charCount + 1799) / 1800)
-        Pair(est, "~${est}页（估算）")
-    } else {
-        // 纯西文：约 3300 字符/页
-        val est = maxOf(1, (charCount + 3299) / 3300)
-        Pair(est, "~${est}页（估算）")
-    }
-}
-
+/** 简单四元组（避免引入额外依赖）*/
 data class Quadruple<out A, out B, out C, out D>(val first: A, val second: B, val third: C, val fourth: D)
 
 private fun copyUriToCache(context: android.content.Context, uri: Uri): File {
     val name = androidx.documentfile.provider.DocumentFile.fromSingleUri(context, uri)?.name
         ?: "file_${System.currentTimeMillis()}"
     val safe = name.replace(Regex("[^\\w.\\-]"), "_")
+    // 保留原始扩展名用于路由判断；如果 filename 没有扩展名则从 MIME type 推断后缀
     var outName = "wc_${System.currentTimeMillis()}_$safe"
     val extFromName = safe.substringAfterLast('.', "").lowercase()
     if (extFromName.isBlank() || extFromName.length > 6 || extFromName.contains(" ")) {
@@ -527,18 +393,14 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): File {
     return out
 }
 
-/**
- * 核心：添加并处理文件列表（v1.0.15 全部纯 Java/Kotlin，零 Python 依赖）。
- *
- * 路由规则：
- *   - 图片          → OCR（默认禁用）
- *   - 老Office(.doc/.xls/.ppt) → OldOfficeEngine(POI)
- *   - OOXML(.docx/.xlsx/.pptx) → OoXmlEngine(ZIP+XML)
- *   - PDF           → PdfExtractor(自实现解析器)
- *   - DWG           → DwgEngine(二进制扫描)
- *   - 压缩包(.zip等) → ArchiveEngine(commons-compress)
- *   - TXT 及其他    → 直接读 UTF-8 文本
- */
+private val IMAGE_EXTS = setOf("png", "jpg", "jpeg", "bmp", "tif", "tiff", "gif", "webp")
+private val OLD_OFFICE_EXTS = setOf("doc", "xls", "ppt")
+private val OOXML_EXTS = setOf("docx", "xlsx", "pptx")
+private val PDF_EXTS = setOf("pdf")
+private val DWG_EXTS = setOf("dwg")
+private val ARCHIVE_EXTS = setOf("zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz")
+private val TXT_EXTS = setOf("txt")
+
 private fun addFiles(
     context: android.content.Context,
     scope: kotlinx.coroutines.CoroutineScope,
@@ -549,21 +411,18 @@ private fun addFiles(
     uris: List<Uri>
 ) {
     if (busyRef()) return
-    // 注册 Context 供外部使用
-    PlatformContextProvider.context = context
-
-    scope.launch(Dispatchers.Main) {
-        busySet(true)
-        try {
-            val files = uris.map { copyUriToCache(context, it) }
+        scope.launch(Dispatchers.Main) {
+            busySet(true)
+            try {
+                runCatching { PythonEngine.start(context) }
+                val files = uris.map { copyUriToCache(context, it) }
             val imageFiles = mutableListOf<File>()
             val oldOfficeFiles = mutableListOf<File>()
-            val ooxmlFiles = mutableListOf<File>()      // v1.0.15: 纯 Kotlin
-            val pdfFiles = mutableListOf<File>()         // v1.0.15: 纯 Kotlin
+            val ooxmlFiles = mutableListOf<File>()       // v1.0.15: OoXmlEngine
+            val pdfFiles = mutableListOf<File>()          // v1.0.15: PdfExtractor
             val dwgFiles = mutableListOf<File>()
-            val archiveFiles = mutableListOf<File>()     // v1.0.15: 新增
+            val archiveFiles = mutableListOf<File>()     // v1.0.15: ArchiveEngine
             val txtFiles = mutableListOf<File>()
-
             for (f in files) {
                 val ext = f.extension.lowercase().removePrefix(".")
                 when {
@@ -574,44 +433,169 @@ private fun addFiles(
                     ext in DWG_EXTS -> dwgFiles.add(f)
                     ext in ARCHIVE_EXTS -> archiveFiles.add(f)
                     ext in TXT_EXTS || ext.isBlank() -> txtFiles.add(f)
-                    else -> txtFiles.add(f)  // 其他未知格式当纯文本读
+                    else -> txtFiles.add(f)
                 }
             }
 
             withContext(Dispatchers.IO) {
-                // ── 1. 压缩包处理 ──────────────────────────────
+                // ════════════════════════════════════════
+                // 全部纯 Java/Kotlin，不依赖 Chaquopy/Python
+                // ════════════════════════════════════════
+
+                // 压缩包
                 archiveFiles.forEachIndexed { i, f ->
-                    processArchiveFile(i, f, entries)
+                    try {
+                        val result = ArchiveEngine.processArchive(f)
+                        val stats = countTextKotlin(result.text)
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = f.name, cachePath = f.absolutePath,
+                            result = FileResult(name=f.name, ext=".${f.extension.lowercase()}", isArchive=true,
+                                words=stats.first, fe=stats.second, nc=stats.third, chars=stats.fourth,
+                                pages=null, pagesReason=null, sheets=result.sheets, inner=result.inner, hasUnreliable=false)))
+                    } catch (e: Throwable) {
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = f.name, cachePath = f.absolutePath,
+                            error = "压缩包解析失败（${e.message}）"))
+                    }
                 }
 
-                // ── 2. OOXML 处理（DOCX/XLSX/PPTX）────────────
+                // OOXML (docx/xlsx/pptx) → OoXmlEngine
                 ooxmlFiles.forEachIndexed { i, f ->
-                    processOoXmlFile(i, f, entries)
+                    try {
+                        val text = OoXmlEngine.extractText(f)
+                        if (text.isBlank()) {
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = f.name, cachePath = f.absolutePath,
+                                error = "此文件内容为空或无法读取"))
+                        } else {
+                            val stats = countTextKotlin(text)
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = f.name, cachePath = f.absolutePath,
+                                result = FileResult(name=f.name, ext=".${f.extension.lowercase()}", isArchive=false,
+                                    words=stats.first, fe=stats.second, nc=stats.third, chars=stats.fourth,
+                                    pages=null, pagesReason=null, sheets=emptyList(), inner=emptyList(), hasUnreliable=false)))
+                        }
+                    } catch (e: Throwable) {
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = f.name, cachePath = f.absolutePath,
+                            error = "无法解析此文件（${e.message}）"))
+                    }
                 }
 
-                // ── 3. PDF 处理 ───────────────────────────────
+                // PDF → PdfExtractor
                 pdfFiles.forEachIndexed { i, f ->
-                    processPdfFile(i, f, entries)
+                    try {
+                        val text = PdfExtractor.extractText(f)
+                        if (text.isBlank()) {
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = f.name, cachePath = f.absolutePath,
+                                error = "PDF 未提取到文字（可能是扫描件或图片 PDF）"))
+                        } else {
+                            val stats = countTextKotlin(text)
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = f.name, cachePath = f.absolutePath,
+                                result = FileResult(name=f.name, ext=".pdf", isArchive=false,
+                                    words=stats.first, fe=stats.second, nc=stats.third, chars=stats.fourth,
+                                    pages=null, pagesReason=null, sheets=emptyList(), inner=emptyList(), hasUnreliable=false)))
+                        }
+                    } catch (e: Throwable) {
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = f.name, cachePath = f.absolutePath,
+                            error = "PDF 解析失败（${e.message}）"))
+                    }
                 }
 
-                // ── 4. 老格式 Office（DOC/XLS/PPT）────────────
+                // 老格式(.doc/.xls/.ppt)：POI scratchpad 抽文本 -> Kotlin 统计（不再经过 Python）
                 oldOfficeFiles.forEachIndexed { i, f ->
-                    processOldOfficeFile(i, f, entries)
+                    try {
+                        val text = OldOfficeEngine.extractText(f)
+                        if (text.isBlank()) {
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = f.name, cachePath = f.absolutePath, error = "此老格式文件内容为空或无法读取"))
+                        } else {
+                            val stats = countTextKotlin(text)
+                            val extDot = ".${f.extension.lowercase()}"
+                            val resMap = mapOf(
+                                "name" to f.name, "ext" to extDot,
+                                "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
+                                "meta" to emptyMap<String, Any?>()
+                            )
+                            val fr = toFileResult(resMap, f.absolutePath)
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                        }
+                    } catch (e: Throwable) {
+                        Log.w("WordCount", "老格式解析失败 ${f.name}: ${e.message}")
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = f.name, cachePath = f.absolutePath, error = "无法解析此老格式（${e.message}），建议另存为 .docx/.xlsx/.pptx"))
+                    }
                 }
 
-                // ── 5. DWG 处理 ───────────────────────────────
+                // DWG(CAD)：二进制扫描提取文字 -> Kotlin 统计（不再经过 Python）
                 dwgFiles.forEachIndexed { i, f ->
-                    processDwgFile(i, f, entries)
+                    try {
+                        val text = DwgEngine.extractText(f)
+                        if (text.isBlank()) {
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = f.name, cachePath = f.absolutePath, error = "DWG 文件未提取到文字（可能为纯图形/复杂编码），建议导出为 DXF 后统计"))
+                        } else {
+                            val stats = countTextKotlin(text)
+                            val resMap = mapOf(
+                                "name" to f.name, "ext" to ".dwg",
+                                "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
+                                "meta" to emptyMap<String, Any?>()
+                            )
+                            val fr = toFileResult(resMap, f.absolutePath)
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                        }
+                    } catch (e: Throwable) {
+                        Log.w("WordCount", "DWG 解析失败 ${f.name}: ${e.message}")
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = f.name, cachePath = f.absolutePath, error = "DWG 解析失败（${e.message}）"))
+                    }
                 }
 
-                // ── 6. TXT 处理 ───────────────────────────────
+                // TXT 类：纯 Kotlin 处理
                 txtFiles.forEachIndexed { i, f ->
-                    processTxtFile(i, f, entries)
+                    try {
+                        val text = f.readText(Charsets.UTF_8)
+                        if (text.isBlank()) {
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_t", displayName = f.name, cachePath = f.absolutePath,
+                                error = "文件内容为空"))
+                        } else {
+                            val stats = countTextKotlin(text)
+                            val resMap = mapOf(
+                                "name" to f.name,
+                                "ext" to ".txt",
+                                "stats" to mapOf(
+                                    "words" to stats.first,
+                                    "fe" to stats.second,
+                                    "nc" to stats.third,
+                                    "chars" to stats.fourth
+                                ),
+                                "meta" to emptyMap<String, Any?>()
+                            )
+                            val fr = toFileResult(resMap, f.absolutePath)
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_t", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                        }
+                    } catch (e: Throwable) {
+                        Log.w("WordCount", "TXT 读取失败 ${f.name}: ${e.javaClass.simpleName}: ${e.message}")
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_t", displayName = f.name, cachePath = f.absolutePath,
+                            error = "读取失败（${e.message}）"))
+                    }
                 }
-
-                // ── 7. 图片处理 ───────────────────────────────
+                // 图片类：OCR 默认禁用
                 imageFiles.forEachIndexed { i, f ->
-                    processImageFile(i, f, context, entries)
+                    try {
+                        if (!OcrEngine.ocrEnabled) {
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath,
+                                error = "图片文字识别暂不可用（当前版本已默认禁用以防止闪退）"))
+                        } else {
+                            val text = OcrEngine.recognize(context, f)
+                            val stats = countTextKotlin(text)
+                            val resMap = mapOf(
+                                "name" to f.name, "ext" to ".img",
+                                "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
+                                "meta" to emptyMap<String, Any?>()
+                            )
+                            val fr = toFileResult(resMap, f.absolutePath)
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                        }
+                    } catch (e: OutOfMemoryError) {
+                        Runtime.getRuntime().gc()
+                        Log.w("WordCount", "图片过大 OOM ${f.name}")
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, error="图片过大，内存不足"))
+                    } catch (e: Throwable) {
+                        Log.w("WordCount", "OCR 失败 ${f.name}: ${e.javaClass.simpleName}: ${e.message}")
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = f.name, cachePath = f.absolutePath, error="OCR 识别失败（${e.message}）"))
+                    }
                 }
             }
         } catch (e: Throwable) {
@@ -621,209 +605,6 @@ private fun addFiles(
             busySet(false)
         }
     }
-}
-
-// ══════════════════════════════════════════════════════════
-// 各类文件处理函数
-// ══════════════════════════════════════════════════════════
-
-private suspend fun processArchiveFile(index: Int, f: File, entries: MutableList<FileEntry>) {
-    try {
-        val result = ArchiveEngine.processArchive(f)
-        val stats = countTextKotlin(result.text)
-        val (pages, pagesReason) = estimatePages(result.text, ".${f.extension.lowercase()}", result.sheets)
-        val fr = FileResult(
-            name = f.name, ext = ".${f.extension.lowercase()}",
-            isArchive = true,
-            words = stats.first, fe = stats.second, nc = stats.third, chars = stats.fourth,
-            pages = pages, pagesReason = pagesReason,
-            sheets = result.sheets, inner = result.inner,
-            hasUnreliable = false
-        )
-        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_arch", displayName = f.name, cachePath = f.absolutePath, result = fr))
-    } catch (e: Throwable) {
-        Log.w("WordCount", "压缩包解析失败 ${f.name}: ${e.message}")
-        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_arch", displayName = f.name, cachePath = f.absolutePath,
-            error = "压缩包解析失败（${e.message}）"))
-    }
-}
-
-private suspend fun processOoXmlFile(index: Int, f: File, entries: MutableList<FileEntry>) {
-    try {
-        val text = OoXmlEngine.extractText(f)
-        if (text.isBlank()) {
-            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_oo", displayName = f.name, cachePath = f.absolutePath,
-                error = "此文件内容为空或无法读取"))
-            return
-        }
-        val stats = countTextKotlin(text)
-        val extDot = ".${f.extension.lowercase()}"
-        val sheets = extractSheetsFromOoXml(f, extDot)
-        val (pages, pagesReason) = estimatePages(text, extDot, sheets)
-        val resMap = mapOf(
-            "name" to f.name, "ext" to extDot,
-            "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
-            "meta" to mapOf<String, Any?>("sheets" to sheets)
-        )
-        val fr = toFileResult(resMap, f.absolutePath)
-        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_oo", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-    } catch (e: Throwable) {
-        Log.w("WordCount", "OOXML 解析失败 ${f.name}: ${e.message}")
-        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_oo", displayName = f.name, cachePath = f.absolutePath,
-            error = "无法解析此文件（${e.message}）"))
-    }
-}
-
-private suspend fun processPdfFile(index: Int, f: File, entries: MutableList<FileEntry>) {
-    try {
-        val text = PdfExtractor.extractText(f)
-        if (text.isBlank()) {
-            // 可能是扫描件/图片 PDF
-            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_pdf", displayName = f.name, cachePath = f.absolutePath,
-                error = "PDF 未提取到文字（可能是扫描件或图片 PDF）"))
-            return
-        }
-        val stats = countTextKotlin(text)
-        val resMap = mapOf(
-            "name" to f.name, "ext" to ".pdf",
-            "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
-            "meta" to emptyMap<String, Any?>()
-        )
-        val fr = toFileResult(resMap, f.absolutePath)
-        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_pdf", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-    } catch (e: Throwable) {
-        Log.w("WordCount", "PDF 解析失败 ${f.name}: ${e.message}")
-        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_pdf", displayName = f.name, cachePath = f.absolutePath,
-            error = "PDF 解析失败（${e.message}）"))
-    }
-}
-
-private suspend fun processOldOfficeFile(index: Int, f: File, entries: MutableList<FileEntry>) {
-    try {
-        val text = OldOfficeEngine.extractText(f)
-        if (text.isBlank()) {
-            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_old", displayName = f.name, cachePath = f.absolutePath,
-                error = "此老格式文件内容为空或无法读取"))
-            return
-        }
-        val stats = countTextKotlin(text)
-        val extDot = ".${f.extension.lowercase()}"
-        val (pages, pagesReason) = estimatePages(text, extDot)
-        val resMap = mapOf(
-            "name" to f.name, "ext" to extDot,
-            "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
-            "meta" to emptyMap<String, Any?>()
-        )
-        val fr = toFileResult(resMap, f.absolutePath)
-        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_old", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-    } catch (e: Throwable) {
-        Log.w("WordCount", "老格式解析失败 ${f.name}: ${e.message}")
-        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_old", displayName = f.name, cachePath = f.absolutePath,
-            error = "无法解析此老格式（${e.message}），建议另存为 .docx/.xlsx/.pptx"))
-    }
-}
-
-private suspend fun processDwgFile(index: Int, f: File, entries: MutableList<FileEntry>) {
-    try {
-        val text = DwgEngine.extractText(f)
-        if (text.isBlank()) {
-            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_dwg", displayName = f.name, cachePath = f.absolutePath,
-                error = "DWG 文件未提取到文字（可能为纯图形/复杂编码），建议导出为 DXF 后统计"))
-            return
-        }
-        val stats = countTextKotlin(text)
-        val resMap = mapOf(
-            "name" to f.name, "ext" to ".dwg",
-            "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
-            "meta" to emptyMap<String, Any?>()
-        )
-        val fr = toFileResult(resMap, f.absolutePath)
-        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_dwg", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-    } catch (e: Throwable) {
-        Log.w("WordCount", "DWG 解析失败 ${f.name}: ${e.message}")
-        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_dwg", displayName = f.name, cachePath = f.absolutePath,
-            error = "DWG 解析失败（${e.message}）"))
-    }
-}
-
-private suspend fun processTxtFile(index: Int, f: File, entries: MutableList<FileEntry>) {
-    try {
-        val text = f.readText(Charsets.UTF_8)
-        if (text.isBlank()) {
-            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_txt", displayName = f.name, cachePath = f.absolutePath,
-                error = "文件内容为空"))
-            return
-        }
-        val stats = countTextKotlin(text)
-        val (pages, pagesReason) = estimatePages(text, ".txt")
-        val resMap = mapOf(
-            "name" to f.name, "ext" to ".txt",
-            "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
-            "meta" to emptyMap<String, Any?>()
-        )
-        val fr = toFileResult(resMap, f.absolutePath)
-        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_txt", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-    } catch (e: Throwable) {
-        Log.w("WordCount", "TXT 读取失败 ${f.name}: ${e.javaClass.simpleName}: ${e.message}")
-        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_txt", displayName = f.name, cachePath = f.absolutePath,
-            error = "读取失败（${e.message}）"))
-    }
-}
-
-private suspend fun processImageFile(index: Int, f: File, context: android.content.Context, entries: MutableList<FileEntry>) {
-    try {
-        if (!OcrEngine.ocrEnabled) {
-            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_img", displayName = f.name, cachePath = f.absolutePath,
-                error = "图片文字识别暂不可用（当前版本已默认禁用以防止闪退）"))
-        } else {
-            val text = OcrEngine.recognize(context, f)
-            val stats = countTextKotlin(text)
-            val resMap = mapOf(
-                "name" to f.name, "ext" to ".img",
-                "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
-                "meta" to emptyMap<String, Any?>()
-            )
-            val fr = toFileResult(resMap, f.absolutePath)
-            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_img", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-        }
-    } catch (e: OutOfMemoryError) {
-        Runtime.getRuntime().gc()
-        Log.w("WordCount", "图片过大 OOM ${f.name}")
-        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_img", displayName = f.name, cachePath = f.absolutePath, error="图片过大，内存不足"))
-    } catch (e: Throwable) {
-        Log.w("WordCount", "OCR 失败 ${f.name}: ${e.javaClass.simpleName}: ${e.message}")
-        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${index}_img", displayName = f.name, cachePath = f.absolutePath, error="OCR 识别失败（${e.message}）"))
-    }
-}
-
-// ══════════════════════════════════════════════════════════
-// 辅助函数
-// ══════════════════════════════════════════════════════════
-
-/** 从 OOXML 文件提取工作表/幻灯片名称 */
-private fun extractSheetsFromOoXml(file: File, ext: String): List<String> {
-    return try {
-        when (ext) {
-            ".xlsx" -> {
-                ZipFile(file).use { zip ->
-                    zip.entries().toList()
-                        .filter { it.name.startsWith("xl/worksheets/sheet") && it.name.endsWith(".xml") }
-                        .sortedBy { it.name }
-                        .mapNotNull { entry ->
-                            val nameMatch = Regex("sheet(\\d*)\\.xml").find(entry.name.substringAfterLast('/'))
-                            nameMatch?.let { "工作表${it.groupValues[0]}" }
-                        }.ifEmpty { listOf("工作表1") }
-                }
-            }
-            ".pptx" -> {
-                ZipFile(file).use { zip ->
-                    val count = zip.entries().count { it.name.startsWith("ppt/slides/slide") && it.name.endsWith(".xml") }
-                    if (count > 0) (1..count).map { "第${it}页" } else emptyList()
-                }
-            }
-            else -> emptyList()
-        }
-    } catch (_: Exception) { emptyList() }
 }
 
 private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
@@ -843,11 +624,6 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
     val imgPages = meta["img_pages"] as? List<*>
     val imageOnly = meta["image_only"] as? Boolean ?: false
     val ext = (m?.get("ext") as? String) ?: ""
-
-    // 从 stats 或 m 中取 pages
-    val explicitPages = (m?.get("pages") as? Number)?.toInt()
-        ?: (stats["pages"] as? Number)?.toInt()
-
     return FileResult(
         name = (m?.get("name") as? String) ?: "",
         ext = ext,
@@ -856,7 +632,7 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
         fe = (stats["fe"] as? Number)?.toInt() ?: 0,
         nc = (stats["nc"] as? Number)?.toInt() ?: 0,
         chars = (stats["chars"] as? Number)?.toInt() ?: 0,
-        pages = explicitPages ?: (m?.get("pages_reason")?.let { null }),  // 有 reason 则 pages=null
+        pages = m?.get("pages") as? Int,
         pagesReason = m?.get("pages_reason") as? String,
         sheets = (meta["sheets"] as? List<*>)?.mapNotNull { it as? String } ?: emptyList(),
         inner = inner,
