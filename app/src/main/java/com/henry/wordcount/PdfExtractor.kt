@@ -7,7 +7,7 @@ import java.nio.charset.StandardCharsets
 import java.util.zip.Inflater
 import java.util.zip.GZIPInputStream
 import kotlin.math.max
-import kotlin.comparisons.minOf
+import kotlin.math.minOf
 
 /**
  * 纯 Kotlin 的 PDF 文本抽取与页数统计层（无任何第三方库）。
