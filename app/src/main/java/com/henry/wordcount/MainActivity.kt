@@ -81,15 +81,6 @@ class MainActivity : ComponentActivity() {
         setContent { WordCountApp(initialUris = uris) }
     }
 
-    /** 运行时从 PackageManager 读取真实版本号，始终与 build.gradle 的 versionName 同步（不依赖 BuildConfig） */
-    private val appVersionName: String
-        get() = try {
-            @Suppress("DEPRECATION")
-            packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0.26"
-        } catch (e: Exception) {
-            "1.0.26"
-        }
-
     /** v1.0.16: 处理从微信/千牛等应用后续传入的文件，追加到已有列表而非替换 */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
@@ -204,6 +195,13 @@ private fun guessExt(context: android.content.Context, uri: Uri): String {
 @Composable
 fun WordCountApp(initialUris: List<Uri>) {
     val context = LocalContext.current
+    // 运行时从 PackageManager 读取真实版本号，始终与 build.gradle 的 versionName 同步（不依赖 BuildConfig）
+    val appVersionName = try {
+        @Suppress("DEPRECATION")
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "1.0.26"
+    } catch (e: Exception) {
+        "1.0.26"
+    }
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
 
