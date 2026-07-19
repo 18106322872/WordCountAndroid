@@ -242,7 +242,7 @@ fun WordCountApp(initialUris: List<Uri>) {
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("字数统计  v1.0.22") }) },
+        topBar = { TopAppBar(title = { Text("字数统计  v1.0.23") }) },
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             Surface(shadowElevation = 4.dp) {
@@ -624,8 +624,8 @@ private fun addFiles(
                 // PDF → 纯 Kotlin 解析（不再经过 Python，规避设备端 Chaquopy 失败）
                 pdfFiles.forEachIndexed { i, f ->
                     try {
-                        val res = PdfExtractor.extract(f)
-                        if (res == null || res.text.isBlank()) {
+                        val res = PdfExtractor.extract(f)  // 永不返回 null
+                        if (res.text.isBlank()) {
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = f.name, cachePath = f.absolutePath, error = "无法从该 PDF 提取文字（可能为纯图片扫描件或加密文件）"))
                         } else {
                             val stats = countTextKotlin(res.text)

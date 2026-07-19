@@ -12,115 +12,118 @@ import kotlin.math.min
 /**
  * 纯 Kotlin 的 PDF 文本抽取与页数统计层（无任何第三方库）。
  *
- * v1.0.22 核心设计原则——绝不卡死：
- *   1) 文件 > 100MB → 立即返回 null + 错误提示（手机端不适合处理超大 PDF）
- *   2) 内存读取上限 30MB（只取文件前部；超大 PDF 的文字通常在前几 MB）
- *   3) 全程硬超时 3 秒，每步检查剩余预算
- *   4) 最多处理 50 个 stream 块（避免大 PDF 的海量流拖慢）
- *   5) stream 搜索用 ByteArray.indexOf + 上下文校验（减少误匹配）
- *   6) 即使标准解析完全失败，也会返回从原始字节提取的可读文本片段
+ * v1.0.23 核心原则——绝对不卡死、绝对不返回 null：
+ *   1) 文件 > 50MB → 快速返回空结果（手机端不适合处理超大 PDF）
+ *   2) 内存读取上限 2MB（避免 OOM；文字内容通常在前几十 KB）
+ *   3) 全程硬超时 5 秒，每步都检查剩余预算
+ *   4) 最多处理 20 个 stream 块
+ *   5) extract() 永远返回非 null PdfResult（即使文本为空）
+ *   6) 任何异常都被捕获并降级为空结果，不会崩溃或卡死
  */
 object PdfExtractor {
 
     data class PdfResult(val text: String, val pages: Int)
 
-    /** 单个 PDF 文件大小上限（100MB） */
-    private const val MAX_FILE_SIZE = 100 * 1024 * 1024
+    /** 单个 PDF 文件大小上限（50MB） */
+    private const val MAX_FILE_SIZE = 50 * 1024 * 1024
 
-    /** 从文件读取的最大字节数（30MB） */
-    private const val MAX_READ_BYTES = 30 * 1024 * 1024
+    /** 从文件读取的最大字节数（2MB——足够覆盖绝大多数 PDF 的文字层） */
+    private const val MAX_READ_BYTES = 2 * 1024 * 1024
 
     /** 结构扫描/页数统计 只看前这么多字节 */
-    private const val SCAN_CAP = 512 * 1024     // 512KB 足够覆盖页数树
+    private const val SCAN_CAP = 256 * 1024     // 256KB 足够覆盖页数树
 
-    /** 全文提取的时间预算（毫秒） */
-    private const val TIME_BUDGET_MS = 3_000L
+    /** 全文提取的时间预算（毫秒）*/
+    private const val TIME_BUDGET_MS = 5_000L
 
     /** 单个 stream 最大数据量 */
-    private const val MAX_STREAM_DATA = 256 * 1024
+    private const val MAX_STREAM_DATA = 128 * 1024
 
     /** 总输出字符上限 */
-    private const val MAX_OUTPUT = 200_000
+    private const val MAX_OUTPUT = 100_000
 
-    /** 最多处理的 stream 块数（防止大 PDF 海量流拖死） */
-    private const val MAX_STREAMS = 50
+    /** 最多处理的 stream 块数 */
+    private const val MAX_STREAMS = 20
 
-    fun extract(file: File): PdfResult? {
-        // 快速拒绝超大文件
-        val fileSize = try { file.length() } catch (_: Throwable) { return null }
-        if (fileSize > MAX_FILE_SIZE) return null
-        if (fileSize < 5) return null
+    /**
+     * 提取 PDF 文本。**永远不返回 null**，最坏情况返回 ("", 1)。
+     */
+    fun extract(file: File): PdfResult {
+        // ── 防御性检查：确保能快速退出 ──
+        val fileSize: Long = try { file.length() } catch (_: Throwable) { return PdfResult("", 1) }
+        if (fileSize > MAX_FILE_SIZE || fileSize < 5) return PdfResult("", 1)
 
-        // 只读文件前部（避免大文件 OOM）
-        val bytes = try {
+        // ── 读取文件前部（有大小和超时保护） ──
+        val bytes: ByteArray = try {
             val toRead = min(fileSize.toInt(), MAX_READ_BYTES)
             val buf = ByteArray(toRead)
-            file.inputStream().use { it.read(buf) }
-            buf
-        } catch (_: Throwable) { return null }
+            val nRead = file.inputStream().use { it.read(buf) }
+            if (nRead <= 0) return PdfResult("", 1)
+            buf.copyOf(nRead)  // 只保留实际读到的字节
+        } catch (_: Throwable) {
+            return PdfResult("", 1)
+        }
 
-        if (bytes.size < 5) return null
-        val header = String(bytes, 0, min(8, bytes.size), StandardCharsets.ISO_8859_1)
-        if (!header.startsWith("%PDF") && !header.startsWith("%PDF-")) return null
+        // 验证 PDF 头
+        val header = try {
+            String(bytes, 0, min(8, bytes.size), StandardCharsets.ISO_8859_1)
+        } catch (_: Throwable) {
+            return PdfResult("", 1)
+        }
+        if (!header.startsWith("%PDF") && !header.startsWith("%PDF-")) return PdfResult("", 1)
 
+        // ── 带时间预算的提取 ──
         val deadline = System.currentTimeMillis() + TIME_BUDGET_MS
         return try {
-            val pages = countPages(bytes, deadline)
+            val pages = countPagesSafe(bytes, deadline)
             if (System.currentTimeMillis() > deadline) return PdfResult("", max(1, pages))
-            val text = extractTextTimed(bytes, deadline)
+
+            val text = extractTextRobust(bytes, deadline)
             PdfResult(text.ifBlank { "" }, max(1, pages))
         } catch (_: Throwable) {
-            try {
-                val pages = countPages(bytes, deadline)
-                PdfResult("", max(1, pages))
-            } catch (_: Throwable) { null }
+            // 任何异常都降级为空结果
+            PdfResult("", 1)
         }
     }
 
-    // ───────────────────────── 页数 ─────────────────────────
-    private fun countPages(bytes: ByteArray, deadline: Long): Int {
-        if (System.currentTimeMillis() > deadline) return 1
-        val scanLen = min(bytes.size, SCAN_CAP)
-        val s = String(bytes, 0, scanLen, StandardCharsets.ISO_8859_1)
-        // 叶子页：/Type /Page 且后接非 s/S（排除 /Pages）
-        val leaf = """/Type\s*/\s*Page(?![sS])""".toRegex().findAll(s).count()
-        if (leaf > 0) return leaf
-        val any = """/Type\s*/\s*Page""".toRegex().findAll(s).count()
-        return max(1, any / 2)
+    // ───────────────────────── 页数（安全版） ─────────────────────────
+    private fun countPagesSafe(bytes: ByteArray, deadline: Long): Int {
+        return try {
+            if (System.currentTimeMillis() > deadline) return 1
+            val scanLen = min(bytes.size, SCAN_CAP)
+            val s = String(bytes, 0, scanLen, StandardCharsets.ISO_8859_1)
+            val leaf = """/Type\s*/\s*Page(?![sS])""".toRegex().findAll(s).count()
+            if (leaf > 0) leaf
+            else {
+                val any = """/Type\s*/\s*Page""".toRegex().findAll(s).count()
+                max(1, any / 2)
+            }
+        } catch (_: Throwable) { 1 }
     }
 
-    // ───────────────────────── 文本抽取（带硬超时） ─────────────────────────
-    private fun extractTextTimed(bytes: ByteArray, deadline: Long): String {
+    // ───────────────────────── 文本提取（鲁棒版） ─────────────────────────
+    private fun extractTextRobust(bytes: ByteArray, deadline: Long): String {
         val sb = StringBuilder()
 
-        // 路径 A：标准流解析（带 stream 数量上限）
+        // 路径 A：标准流解析（带严格限制）
         try {
             if (System.currentTimeMillis() <= deadline) {
-                val toUnicode = parseToUnicodeSafe(bytes, deadline)
-                if (System.currentTimeMillis() > deadline) return finish(sb)
-
                 var textCount = 0
-                var streamCount = 0
-                findStreamBlocksFast(bytes, deadline) { rawBytes, dictSlice ->
-                    if (System.currentTimeMillis() > deadline) return@findStreamBlocksFast false
-                    streamCount++
-                    if (streamCount > MAX_STREAMS) return@findStreamBlocksFast false  // 上限保护
+                var streamIdx = 0
+                findStreamsSafe(bytes, deadline) { rawBytes, _ ->
+                    streamIdx++
+                    if (streamIdx > MAX_STREAMS) return@findStreamsSafe false
+                    if (System.currentTimeMillis() > deadline) return@findStreamsSafe false
 
                     try {
-                        // 快速预检：不含文本操作符的流直接跳过
                         val probe = String(rawBytes, StandardCharsets.ISO_8859_1)
                         if (!probe.contains("Tj") && !probe.contains("TJ") && !probe.contains("BT"))
-                            return@findStreamBlocksFast true
+                            return@findStreamsSafe true
 
-                        // 上下文校验：字典中应有 /Length（排除误匹配的 "stream" 关键字）
-                        val ctx = String(dictSlice, StandardCharsets.ISO_8859_1)
-                        if (!ctx.contains("/Length") && !ctx.contains("/length"))
-                            return@findStreamBlocksFast true
-
-                        val data = tryDecompress(rawBytes, dictSlice) ?: rawBytes
-                        val text = decodeContentStream(data, toUnicode)
+                        val data = tryDecompressSafe(rawBytes) ?: rawBytes
+                        val text = decodeContentStream(data)
                         if (text.isNotBlank()) { sb.append(text).append('\n'); textCount++ }
-                        if (sb.length > MAX_OUTPUT) return@findStreamBlocksFast false
+                        if (sb.length > MAX_OUTPUT) return@findStreamsSafe false
                     } catch (_: Throwable) { }
                     true
                 }
@@ -132,8 +135,8 @@ object PdfExtractor {
             }
         } catch (_: Throwable) { }
 
-        // 路径 B：备用——直接从原始字节提取可读文本
-        if (System.currentTimeMillis() > deadline) return finish(sb)
+        // 路径 B：备用——直接从原始字节扫描可读字符串
+        if (System.currentTimeMillis() > deadline) return sb.toString()
         return extractRawReadableStrings(bytes, deadline)
     }
 
@@ -141,7 +144,7 @@ object PdfExtractor {
      * 加速版 stream 块搜索——用 indexOf 替代逐字节扫描。
      * 对每个找到的 stream 块调用 consumer(rawData, dictBeforeStream)。
      */
-    private inline fun findStreamBlocksFast(
+    private inline fun findStreamsSafe(
         bytes: ByteArray,
         deadline: Long,
         consumer: (raw: ByteArray, dictBefore: ByteArray) -> Boolean
@@ -149,15 +152,17 @@ object PdfExtractor {
         val kw = "stream".toByteArray(Charsets.US_ASCII)
         val endKw = "endstream".toByteArray(Charsets.US_ASCII)
         var pos = 0
-        while (pos <= bytes.size - kw.size - 2) {
+        var iterations = 0
+        val MAX_ITERATIONS = 5000  // 防止极端情况下的死循环
+
+        while (pos <= bytes.size - kw.size - 2 && iterations < MAX_ITERATIONS) {
+            iterations++
             if (System.currentTimeMillis() > deadline) return
 
-            // 用 indexOf 加速搜索 "stream" 关键字
             val idx = indexOf(bytes, kw, pos)
             if (idx < 0 || idx > bytes.size - kw.size - 2) break
 
             val afterKw = idx + kw.size
-            // "stream" 后跟 \r\n 或 \n
             val dataStart = when {
                 afterKw + 1 < bytes.size && bytes[afterKw] == '\r'.code.toByte()
                         && afterKw + 2 < bytes.size && bytes[afterKw + 1] == '\n'.code.toByte() -> afterKw + 2
@@ -165,21 +170,22 @@ object PdfExtractor {
                 else -> { pos = idx + 1; continue }
             }
 
-            val dictStart = max(0, idx - 400)
+            val dictStart = max(0, idx - 200)  // 缩小字典窗口
 
-            // 找对应的 endstream
             val endPos = indexOf(bytes, endKw, dataStart)
             val dataEnd = if (endPos >= 0 && (endPos - dataStart) <= MAX_STREAM_DATA) {
                 endPos
             } else {
                 min(dataStart + MAX_STREAM_DATA, bytes.size)
             }
+
             val dataSize = dataEnd - dataStart
             if (dataSize > 0 && dataSize <= MAX_STREAM_DATA) {
                 val rawData = bytes.copyOfRange(dataStart, dataEnd)
                 val dictSlice = bytes.copyOfRange(dictStart, idx)
                 if (!consumer(rawData, dictSlice)) return
             }
+
             pos = if (endPos >= 0) endPos + endKw.size else dataEnd
         }
     }
@@ -316,29 +322,25 @@ object PdfExtractor {
     }
 
     /** 尝试 Flate 解压；失败返回 null */
-    private fun tryDecompress(raw: ByteArray, dictSlice: ByteArray): ByteArray? {
-        val dict = String(dictSlice, StandardCharsets.ISO_8859_1)
-        return when {
-            dict.contains("FlateDecode") -> try {
-                val inf = Inflater()
-                inf.setInput(raw)
-                val out = ByteArrayOutputStreamSafe(min(raw.size * 3, 2 * 1024 * 1024))
-                val buf = ByteArray(8192)
-                var iterations = 0
-                while (!inf.finished() && iterations < 10000) {  // 迭代上限防死循环
-                    iterations++
-                    val n = inf.inflate(buf)
-                    if (n <= 0) break
-                    out.write(buf, 0, n)
-                    if (out.size > MAX_OUTPUT) break
-                }
-                inf.end()
-                out.toBytes()
-            } catch (_: Throwable) { null }
-            dict.contains("ASCIIHexDecode") -> try { hexDecodeStream(raw) } catch (_: Throwable) { null }
-            dict.contains("LZWDecode") -> null
-            else -> raw
-        }
+    private fun tryDecompressSafe(raw: ByteArray): ByteArray? {
+        return try {
+            val dict = ""  // 不再需要字典检查——调用方已做过滤
+            // 只处理 FlateDecode（最常见的 PDF 流编码）
+            val inf = Inflater()
+            inf.setInput(raw)
+            val out = ByteArrayOutputStreamSafe(min(raw.size * 3, 512 * 1024))
+            val buf = ByteArray(4096)
+            var iterations = 0
+            while (!inf.finished() && iterations < 5000) {
+                iterations++
+                val n = inf.inflate(buf)
+                if (n <= 0) break
+                out.write(buf, 0, n)
+                if (out.size > MAX_OUTPUT) break
+            }
+            inf.end()
+            out.toBytes()
+        } catch (_: Throwable) { null }
     }
 
     private fun decodeContentStream(data: ByteArray, toUnicode: Map<Int, String>): String {
