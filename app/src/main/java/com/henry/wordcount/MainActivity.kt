@@ -242,7 +242,7 @@ fun WordCountApp(initialUris: List<Uri>) {
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("字数统计  v1.0.23") }) },
+        topBar = { TopAppBar(title = { Text("字数统计  v1.0.24") }) },
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             Surface(shadowElevation = 4.dp) {
@@ -625,10 +625,24 @@ private fun addFiles(
                 pdfFiles.forEachIndexed { i, f ->
                     try {
                         val res = PdfExtractor.extract(f)  // 永不返回 null
-                        if (res.text.isBlank()) {
+                        val stats = countTextKotlin(res.text)
+                        // v1.0.24：文字层不可读（扫描件 / 无 ToUnicode 的 CID 字体）→ 改用 PDF 渲染 + OCR
+                        val ocrRes = if (res.text.isBlank() || (stats.second == 0 && stats.first < 10)) {
+                            PdfOcrEngine.extractText(f)
+                        } else null
+                        if (ocrRes != null) {
+                            val ocrStats = countTextKotlin(ocrRes.text)
+                            val resMap = mapOf(
+                                "name" to f.name, "ext" to ".pdf",
+                                "stats" to mapOf("words" to ocrStats.first, "fe" to ocrStats.second, "nc" to ocrStats.third, "chars" to ocrStats.fourth),
+                                "meta" to emptyMap<String, Any?>(),
+                                "pages" to ocrRes.pages
+                            )
+                            val fr = toFileResult(resMap, f.absolutePath)
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = f.name, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                        } else if (res.text.isBlank()) {
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = f.name, cachePath = f.absolutePath, error = "无法从该 PDF 提取文字（可能为纯图片扫描件或加密文件）"))
                         } else {
-                            val stats = countTextKotlin(res.text)
                             val resMap = mapOf(
                                 "name" to f.name, "ext" to ".pdf",
                                 "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),

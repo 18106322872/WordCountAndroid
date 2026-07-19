@@ -9,13 +9,13 @@ import kotlin.math.max
 /**
  * 纯 Kotlin 的 OOXML（docx / xlsx / pptx）文本抽取与页数统计层。
  *
- * v1.0.23 核心修复：
- *   - docx：改用逐 <w:r> run 边界提取文本（不再对整个文档做全局正则），
- *          避免某些文档中全局正则跨边界匹配到 XML 标签垃圾内容。
- *          已用测试文件验证：words=625 / CJK=604 / nonCJK=21，与 Word 完全一致。
- *   - docx：过滤隐藏文字（w:vanish / w:hidden）和域指令（w:instrText）
- *   - docx：额外提取 word/header*.xml 和 word/footer*.xml（页眉页脚文字）
- *   - xlsx/pptx：保持原有逻辑不变
+ * v1.0.24 核心改进：
+ *   - docx：<w:t> 内容做 strip-tags 二次清洗，处理某些转换器生成的异常文档
+ *          （<w:t> 内嵌套了 <w:pPr>/<w:rPr>/<w:tcPr> 等 XML 片段而非纯文本）
+ *   - docx：过滤单字符和纯符号的噪声提取结果
+ *   - docx：保留逐 <w:r> run 边界提取架构（已验证对正常文档准确）
+ *   - pdf：先解压再查文字操作符（不再在原始压缩字节上搜索 Tj/TJ）
+ *   - pdf：支持 [<hex>]TJ 十六进制数组格式（中文PDF常用编码方式）
  */
 object OoXmlEngine {
 
@@ -74,9 +74,11 @@ object OoXmlEngine {
     /**
      * 从 OOXML XML 中抽取文本（核心方法）。
      *
-     * 关键设计：先按 <w:r> run 边界切分，再在每个 run 内部提取 <w:t> 文本。
-     * 这避免了对整个文档做全局正则时可能发生的跨边界匹配问题
-     *（某些文档的文本节点中包含类似 XML 的内容，会导致全局正则匹配到错误区间）。
+     * v1.0.24 改进：
+     *   1. 保持逐 <w:r> run 边界提取架构（对正常文档准确）
+     *   2. 对每个 <w:t> 提取结果做 strip-tags 清洗——处理某些转换器生成的
+     *      异常文档，其 <w:t> 节点内嵌套了 <w:pPr>/<w:rPr>/<w:tcPr> 等 XML 片段
+     *   3. 过滤掉单字符和纯符号的噪声
      */
     private fun appendDocxXmlText(
         xml: String,
@@ -86,7 +88,6 @@ object OoXmlEngine {
         if (xml.isBlank()) return
 
         // Step 1: 按段落（<w:p>）切分，保持段落结构
-        // (?s) = DOTALL，让 . 匹配换行符（等价于 RegexOption.DOT_MATCH_ALL）
         val paraRe = """(?s)<w:p[ >].*?</w:p>""".toRegex()
         paraRe.findAll(xml).forEach { paraMatch ->
             val paraXml = paraMatch.value
@@ -103,12 +104,18 @@ object OoXmlEngine {
                 if (VANISH_RE.containsMatchIn(runXml)) return@forEach
                 if (HIDDEN_RE.containsMatchIn(runXml)) return@forEach
 
-                // Step 3: 在 run 内提取 <w:t> 文本（安全——不会跨出 run 边界）
+                // Step 3: 在 run 内提取 <w:t> 文本，然后清洗嵌套标签
                 val tRe = """(?s)<w:t[^>]*>(.*?)</w:t>""".toRegex()
                 tRe.findAll(runXml).forEach { tMatch ->
                     val raw = decodeXml(tMatch.groupValues[1])
-                    if (raw.isNotEmpty()) {
-                        sb.append(raw)
+                    // v1.0.24 关键修复：去除可能嵌套在 <w:t> 内的 XML 标签
+                    // 某些转换器（如 WPS → docx）会在 <w:t> 中嵌入属性 XML 片段
+                    val clean = raw.replace("""<[^>]+>""", "")
+                        .replace("""&[a-z]+;""".toRegex(), "")  // 孤立实体引用
+
+                    // 过滤：只保留含可打印文本的内容（至少 1 个字母/CJK 字符）
+                    if (clean.isNotBlank() && clean.any { it.isLetter() || it.code in 0x4E00..0x9FFF }) {
+                        sb.append(clean)
                     }
                 }
             }

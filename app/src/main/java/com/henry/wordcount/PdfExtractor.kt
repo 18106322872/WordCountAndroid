@@ -108,20 +108,29 @@ object PdfExtractor {
         // 路径 A：标准流解析（带严格限制）
         try {
             if (System.currentTimeMillis() <= deadline) {
+                // 一次性解析全文件 ToUnicode 映射（文件上限 2MB，安全）
+                val toUnicode = if (System.currentTimeMillis() <= deadline) parseToUnicodeSafe(bytes) else emptyMap()
                 var textCount = 0
                 var streamIdx = 0
-                findStreamsSafe(bytes, deadline) { rawBytes, _ ->
+                findStreamsSafe(bytes, deadline) { rawBytes, dictSlice ->
                     streamIdx++
                     if (streamIdx > MAX_STREAMS) return@findStreamsSafe false
                     if (System.currentTimeMillis() > deadline) return@findStreamsSafe false
 
                     try {
-                        val probe = String(rawBytes, StandardCharsets.ISO_8859_1)
+                        // 图片流（Image XObject）不是文字，直接跳过，避免无谓解压
+                        val dictStr = String(dictSlice, StandardCharsets.ISO_8859_1)
+                        if (dictStr.contains("/Image", ignoreCase = true)) return@findStreamsSafe true
+
+                        // 关键修复 v1.0.24：先在内存解压，再在「解压后」的内容流里查找 Tj/TJ/BT。
+                        // 之前在原始（已压缩）字节上搜索，导致所有 FlateDecode 文字流被整体跳过，
+                        // 绝大多数数字 PDF 也因此提取不到文字。
+                        val data = tryDecompressSafe(rawBytes) ?: rawBytes
+                        val probe = String(data, StandardCharsets.ISO_8859_1)
                         if (!probe.contains("Tj") && !probe.contains("TJ") && !probe.contains("BT"))
                             return@findStreamsSafe true
 
-                        val data = tryDecompressSafe(rawBytes) ?: rawBytes
-                        val text = decodeContentStream(data, emptyMap())
+                        val text = decodeContentStream(data, toUnicode)
                         if (text.isNotBlank()) { sb.append(text).append('\n'); textCount++ }
                         if (sb.length > MAX_OUTPUT) return@findStreamsSafe false
                     } catch (_: Throwable) { }
@@ -201,12 +210,11 @@ object PdfExtractor {
         return -1
     }
 
-    /** 安全版 parseToUnicode——只扫描前 SCAN_CAP 字节 */
+    /** 安全版 parseToUnicode——扫描全文件（文件上限 2MB，安全） */
     private fun parseToUnicodeSafe(bytes: ByteArray, _deadline: Long): Map<Int, String> {
         val map = mutableMapOf<Int, String>()
         try {
-            val scanLen = min(bytes.size, SCAN_CAP)
-            val s = String(bytes, 0, scanLen, StandardCharsets.ISO_8859_1)
+            val s = String(bytes, StandardCharsets.ISO_8859_1)
             val re = """(?s)/ToUnicode\s*(\d+\s+\d+\s+obj)?.*?stream\r?\n(.*?)endstream""".toRegex()
             re.findAll(s).forEach { m ->
                 val cm = m.groupValues[2]
