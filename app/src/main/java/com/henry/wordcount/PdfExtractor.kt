@@ -367,9 +367,13 @@ object PdfExtractor {
                 if (i >= lit.length) break
                 val n = lit[i]
                 when (n) {
-                    'n' -> sb.append('\n'); 'r' -> sb.append('\r'); 't' -> sb.append('\t')
-                    'b' -> sb.append('\b'); 'f' -> sb.append(0x0C.toChar()); '\\' -> sb.append('\\')
-                    '(' -> sb.append('('); ')' -> sb.append(')'
+                    'n' -> sb.append('\n')
+                    'r' -> sb.append('\r')
+                    't' -> sb.append('\t')
+                    'b' -> sb.append('\b')
+                    'f' -> sb.append(0x0C.toChar())
+                    '(' -> sb.append('(')
+                    ')' -> sb.append(')')
                     in '0'..'7' -> {
                         var oct = ""
                         var j = i
