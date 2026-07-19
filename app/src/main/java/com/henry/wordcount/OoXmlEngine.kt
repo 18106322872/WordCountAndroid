@@ -86,7 +86,8 @@ object OoXmlEngine {
         if (xml.isBlank()) return
 
         // Step 1: 按段落（<w:p>）切分，保持段落结构
-        val paraRe = """<w:p[ >].*?</w:p>""".toRegex(RegexOption.DOT_MATCH_ALL)
+        // (?s) = DOTALL，让 . 匹配换行符（等价于 RegexOption.DOT_MATCH_ALL）
+        val paraRe = """(?s)<w:p[ >].*?</w:p>""".toRegex()
         paraRe.findAll(xml).forEach { paraMatch ->
             val paraXml = paraMatch.value
 
@@ -94,7 +95,7 @@ object OoXmlEngine {
             if (paraXml.contains("""w:type="page"""")) onPageBreak?.invoke()
 
             // Step 2: 在段落内逐个处理 <w:r> run
-            val runRe = """<w:r[ >].*?</w:r>""".toRegex(RegexOption.DOT_MATCH_ALL)
+            val runRe = """(?s)<w:r[ >].*?</w:r>""".toRegex()
             runRe.findAll(paraXml).forEach { runMatch ->
                 val runXml = runMatch.value
 
@@ -103,7 +104,7 @@ object OoXmlEngine {
                 if (HIDDEN_RE.containsMatchIn(runXml)) return@forEach
 
                 // Step 3: 在 run 内提取 <w:t> 文本（安全——不会跨出 run 边界）
-                val tRe = """<w:t[^>]*>(.*?)</w:t>""".toRegex(RegexOption.DOT_MATCH_ALL)
+                val tRe = """(?s)<w:t[^>]*>(.*?)</w:t>""".toRegex()
                 tRe.findAll(runXml).forEach { tMatch ->
                     val raw = decodeXml(tMatch.groupValues[1])
                     if (raw.isNotEmpty()) {

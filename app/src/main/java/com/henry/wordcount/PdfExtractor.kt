@@ -121,7 +121,7 @@ object PdfExtractor {
                             return@findStreamsSafe true
 
                         val data = tryDecompressSafe(rawBytes) ?: rawBytes
-                        val text = decodeContentStream(data)
+                        val text = decodeContentStream(data, emptyMap())
                         if (text.isNotBlank()) { sb.append(text).append('\n'); textCount++ }
                         if (sb.length > MAX_OUTPUT) return@findStreamsSafe false
                     } catch (_: Throwable) { }
