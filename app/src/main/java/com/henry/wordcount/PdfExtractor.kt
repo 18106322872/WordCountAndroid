@@ -50,7 +50,9 @@ object PdfExtractor {
         // 只读文件前部（避免大文件 OOM）
         val bytes = try {
             val toRead = min(fileSize.toInt(), MAX_READ_BYTES)
-            file.inputStream().use { it.readBytes(min(toRead, MAX_READ_BYTES)) }
+            val buf = ByteArray(toRead)
+            file.inputStream().use { it.read(buf) }
+            buf
         } catch (_: Throwable) { return null }
 
         if (bytes.size < 5) return null
@@ -366,7 +368,7 @@ object PdfExtractor {
                 val n = lit[i]
                 when (n) {
                     'n' -> sb.append('\n'); 'r' -> sb.append('\r'); 't' -> sb.append('\t')
-                    'b' -> sb.append('\b'); 'f' -> sb.append('\u000C'); '\\' -> sb.append('\\')
+                    'b' -> sb.append('\b'); 'f' -> sb.append(0x0C.toChar()); '\\' -> sb.append('\\')
                     '(' -> sb.append('('); ')' -> sb.append(')'
                     in '0'..'7' -> {
                         var oct = ""
