@@ -6,17 +6,16 @@ import java.util.Collections
 import java.util.zip.ZipFile
 import kotlin.math.max
 
-/**
- * 纯 Kotlin 的 OOXML（docx / xlsx / pptx）文本抽取与页数统计层。
- *
- * v1.0.24 核心改进：
- *   - docx：<w:t> 内容做 strip-tags 二次清洗，处理某些转换器生成的异常文档
- *          （<w:t> 内嵌套了 <w:pPr>/<w:rPr>/<w:tcPr> 等 XML 片段而非纯文本）
- *   - docx：过滤单字符和纯符号的噪声提取结果
- *   - docx：保留逐 <w:r> run 边界提取架构（已验证对正常文档准确）
- *   - pdf：先解压再查文字操作符（不再在原始压缩字节上搜索 Tj/TJ）
- *   - pdf：支持 [<hex>]TJ 十六进制数组格式（中文PDF常用编码方式）
- */
+    /**
+     * 纯 Kotlin 的 OOXML（docx / xlsx / pptx）文本抽取与页数统计层。
+     *
+     * v1.0.26 核心改进：
+     *   - docx：移除过于激进的字母/CJK过滤（v1.0.24 要求 w:t 内容必须含字母或汉字，
+     *          导致纯数字内容如身份证号、学年学期、分数、学分等被丢弃，丢失 ~340 字）
+     *   - docx：移除页眉/页脚提取（Word「字数统计」的"包括文本框、脚注和尾注"不含页眉页脚）
+     *   - docx：页数统计优化（避免纯文本长度估算导致 1 页文档报 4 页）
+     *   - docx：<w:t> 内容做 strip-tags 二次清洗（v1.0.24 遗留，保留）
+     */
 object OoXmlEngine {
 
     data class OoxmlResult(
@@ -45,40 +44,37 @@ object OoXmlEngine {
     }
 
     // ───────────────────────── docx ─────────────────────────
+    /**
+     * 提取 docx 文本。
+     *
+     * 仅提取 word/document.xml（正文+文本框），不提取 header/footer。
+     * Word「字数统计」对话框的"包括文本框、脚注和尾注"选项**不包括**页眉页脚，
+     * 因此页眉页脚不计入统计口径。（v1.0.26 修复：旧版错误地计入了页眉页脚）
+     */
     private fun extractDocx(zip: ZipFile): OoxmlResult {
         val sb = StringBuilder()
         val pageCounter = intArrayOf(0)
 
-        // 1) 主文档 body（word/document.xml）
+        // 1) 主文档 body（word/document.xml）—— 唯一数据源
         val bodyXml = readEntry(zip, "word/document.xml") ?: ""
         appendDocxXmlText(bodyXml, sb) { pageCounter[0]++ }
 
-        // 2) 页眉（word/header1.xml, header2.xml, ...）
-        for (i in 1..10) {
-            val hXml = readEntry(zip, "word/header$i.xml") ?: break
-            appendDocxXmlText(hXml, sb)
-        }
-
-        // 3) 页脚（word/footer1.xml, footer2.xml, ...）
-        for (i in 1..10) {
-            val fXml = readEntry(zip, "word/footer$i.xml") ?: break
-            appendDocxXmlText(fXml, sb)
-        }
-
         val text = sb.toString()
-        val est = max(1, (text.length + 1499) / 1500)
-        val pages = if (pageCounter[0] > 0) pageCounter[0] + 1 else est
+        // 页数：有明确分页符时用分页符计数；否则保守返回 1
+        // （OOXML 不含排版信息，无法精确计算页数；避免将 1 页文档误报为多页）
+        val pages = max(1, if (pageCounter[0] > 0) pageCounter[0] + 1 else 1)
         return OoxmlResult(text, pages, "docx")
     }
 
     /**
      * 从 OOXML XML 中抽取文本（核心方法）。
      *
-     * v1.0.24 改进：
-     *   1. 保持逐 <w:r> run 边界提取架构（对正常文档准确）
-     *   2. 对每个 <w:t> 提取结果做 strip-tags 清洗——处理某些转换器生成的
-     *      异常文档，其 <w:t> 节点内嵌套了 <w:pPr>/<w:rPr>/<w:tcPr> 等 XML 片段
-     *   3. 过滤掉单字符和纯符号的噪声
+     * v1.0.26 修复：
+     *   1. 移除 v1.0.24 的字母/CJK 过滤——旧逻辑要求 w:t 内容必须含字母或汉字，
+     *      导致纯数字内容（身份证号、学年学期、分数、学分等）被丢弃，单文件可丢 ~340 字。
+     *      新逻辑：保留所有可打印字符（与桌面版 Python / Word 口径一致）。
+     *   2. 保持逐 <w:r> run 边界提取架构（对正常文档准确）
+     *   3. 对每个 <w:t> 提取结果做 strip-tags 清洗（v1.0.24 遗留）
      */
     private fun appendDocxXmlText(
         xml: String,
@@ -108,13 +104,13 @@ object OoXmlEngine {
                 val tRe = """(?s)<w:t[^>]*>(.*?)</w:t>""".toRegex()
                 tRe.findAll(runXml).forEach { tMatch ->
                     val raw = decodeXml(tMatch.groupValues[1])
-                    // v1.0.24 关键修复：去除可能嵌套在 <w:t> 内的 XML 标签
-                    // 某些转换器（如 WPS → docx）会在 <w:t> 中嵌入属性 XML 片段
+                    // 清洗可能嵌套在 <w:t> 内的 XML 标签和孤立实体引用
                     val clean = raw.replace("""<[^>]+>""", "")
-                        .replace("""&[a-z]+;""".toRegex(), "")  // 孤立实体引用
+                        .replace("""&[a-z]+;""".toRegex(), "")
 
-                    // 过滤：只保留含可打印文本的内容（至少 1 个字母/CJK 字符）
-                    if (clean.isNotBlank() && clean.any { it.isLetter() || it.code in 0x4E00..0x9FFF }) {
+                    // v1.0.26：只要求非空白且含可打印字符（不再强制要求字母/汉字）
+                    // 与桌面版 wordcount.py 的 ord(c) >= 32 判定对齐
+                    if (clean.isNotBlank() && clean.any { it.code >= 32 || it == '\t' || it == '\n' || it == '\r' }) {
                         sb.append(clean)
                     }
                 }
