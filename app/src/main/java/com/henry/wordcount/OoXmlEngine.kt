@@ -9,7 +9,9 @@ import kotlin.math.max
 /**
  * 纯 Kotlin 的 OOXML（docx / xlsx / pptx）文本抽取与页数统计层。
  *
- * v1.0.21 改进：
+ * v1.0.22 改进：
+ *   - docx：过滤隐藏文字（w:vanish / w:hidden）和域指令（w:instrText），
+ *          使字数统计与 Word「字数统计」对话框一致
  *   - docx：额外提取 word/header*.xml 和 word/footer*.xml（页眉页脚文字）
  *   - xlsx：按行列视觉顺序提取（匹配"全选→复制→粘贴到 Word"的效果），
  *     单元格间用制表符分隔，行间用换行分隔
@@ -76,17 +78,55 @@ object OoXmlEngine {
         onPageBreak: (() -> Unit)? = null
     ) {
         if (xml.isBlank()) return
-        val re = """<w:t[^>]*>(.*?)</w:t>|<w:br[^>]*w:type="page"[^>]*/>|<w:tab[^>]*/>|<w:br[^>]*/>|</w:p>""".toRegex(RegexOption.DOT_MATCHES_ALL)
-        re.findAll(xml).forEach { m ->
+
+        // ── 预处理：移除 Word 不计入字数统计的内容 ──
+        // 1) 域指令文本（<w:instrText>），如 PAGE / TOC / MERGEFORMAT 等
+        // 2) 包含 w:vanish 的整段 <w:r>（隐藏文字，Word 字数统计默认排除）
+        // 3) 包含 w:hidden 的整段 <w:r>（隐藏文字）
+        var cleaned = xml
+
+        // 移除域指令文本（必须最先做，避免 instrText 内容泄漏到后续匹配）
+        cleaned = INSTR_TEXT_RE.replace(cleaned, "")
+
+        // 移除包含 vanish/hidden 属性的完整 run（非贪婪 .*? 保证不跨 run 边界）
+        cleaned = VANISH_RUN_RE.replace(cleaned, "")
+        cleaned = HIDDEN_RUN_RE.replace(cleaned, "")
+
+        // ── 从清洗后的 XML 提取可见文本 ──
+        val re = TEXT_EXTRACT_RE
+        re.findAll(cleaned).forEach { m ->
             val v = m.value
             when {
-                v.startsWith("<w:t") -> sb.append(decodeXml(m.groupValues[1]))
+                v.startsWith("<w:t") -> {
+                    val raw = decodeXml(m.groupValues[1])
+                    // 二次保险：过滤纯 XML 残留和空白-only 文本
+                    if (raw.isNotBlank() && !raw.startsWith("<?") && !raw.startsWith("<!")) {
+                        sb.append(raw)
+                    }
+                }
                 v.contains("""w:type="page"""") -> { onPageBreak?.invoke(); sb.append('\n') }
                 v.startsWith("<w:tab") -> sb.append('\t')
                 v.startsWith("<w:br") -> sb.append('\n')
                 else -> sb.append('\n') // </w:p>
             }
         }
+    }
+
+    companion object {
+        /** 域指令文本正则：<w:instrText>...</w:instrText> */
+        private val INSTR_TEXT_RE = """<w:instrText[^>]*>.*?</w:instrText>""".toRegex(RegexOption.DOT_MATCHES_ALL)
+
+        /** 含 w:vanish 的完整 <w:r>...</w:r> 路径 */
+        private val VANISH_RUN_RE =
+            """<w:r\b[^>]*>.*?<w:rPr\b[^>]*>.*?<w:vanish\s*/?>.*?</w:rPr>.*?</w:r>""".toRegex(RegexOption.DOT_MATCHES_ALL)
+
+        /** 含 w:hidden 的完整 <w:r>...</w:r> 路径 */
+        private val HIDDEN_RUN_RE =
+            """<w:r\b[^>]*>.*?<w:rPr\b[^>]*>.*?<w:hidden\s*/?>.*?</w:rPr>.*?</w:r>""".toRegex(RegexOption.DOT_MATCHES_ALL)
+
+        /** 文本提取正则：w:t 文本 | 分页符 | 制表符 | 换行符 | 段落结束 */
+        private val TEXT_EXTRACT_RE =
+            """<w:t[^>]*>(.*?)</w:t>|<w:br[^>]*w:type="page"[^>]*/>|<w:tab[^>]*/>|<w:br[^>]*/>|</w:p>""".toRegex(RegexOption.DOT_MATCHES_ALL)
     }
 
     // ───────────────────────── xlsx ─────────────────────────

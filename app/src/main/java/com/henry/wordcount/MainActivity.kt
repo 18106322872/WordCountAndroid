@@ -242,7 +242,7 @@ fun WordCountApp(initialUris: List<Uri>) {
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("字数统计  v1.0.21") }) },
+        topBar = { TopAppBar(title = { Text("字数统计  v1.0.22") }) },
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             Surface(shadowElevation = 4.dp) {
