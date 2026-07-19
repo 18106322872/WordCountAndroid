@@ -5,8 +5,8 @@ import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import java.io.File
-import kotlin.math.maxOf
-import kotlin.math.minOf
+import kotlin.math.max
+import kotlin.math.min
 
 /**
  * PDF 文本提取的 OCR 兜底引擎（v1.0.24）。
@@ -51,7 +51,7 @@ object PdfOcrEngine {
         return try {
             val pageCount = renderer.pageCount
             val sb = StringBuilder()
-            val limit = minOf(pageCount, MAX_PAGES)
+            val limit = min(pageCount, MAX_PAGES)
             for (i in 0 until limit) {
                 val page = try { renderer.openPage(i) } catch (_: Throwable) { continue }
                 try {
@@ -59,8 +59,8 @@ object PdfOcrEngine {
                     val h = page.height
                     if (w <= 0 || h <= 0) continue
                     val scale = computeScale(w, h)
-                    val bw = maxOf(1, (w * scale).toInt())
-                    val bh = maxOf(1, (h * scale).toInt())
+                    val bw = max(1, (w * scale).toInt())
+                    val bh = max(1, (h * scale).toInt())
                     val bmp = try {
                         Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
                     } catch (e: Throwable) {
@@ -91,7 +91,7 @@ object PdfOcrEngine {
 
     /** 计算渲染缩放：原生尺寸已 <= MAX_DIM 则 1x，否则等比缩放到上限 */
     private fun computeScale(w: Int, h: Int): Float {
-        val max = maxOf(w, h)
-        return if (max <= MAX_DIM) 1f else MAX_DIM.toFloat() / max
+        val maxSide = max(w, h)
+        return if (maxSide <= MAX_DIM) 1f else MAX_DIM.toFloat() / maxSide
     }
 }

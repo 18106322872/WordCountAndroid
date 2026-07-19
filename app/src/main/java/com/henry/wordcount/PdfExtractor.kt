@@ -109,7 +109,7 @@ object PdfExtractor {
         try {
             if (System.currentTimeMillis() <= deadline) {
                 // 一次性解析全文件 ToUnicode 映射（文件上限 2MB，安全）
-                val toUnicode = if (System.currentTimeMillis() <= deadline) parseToUnicodeSafe(bytes) else emptyMap()
+                val toUnicode = if (System.currentTimeMillis() <= deadline) parseToUnicodeSafe(bytes, deadline) else emptyMap()
                 var textCount = 0
                 var streamIdx = 0
                 findStreamsSafe(bytes, deadline) { rawBytes, dictSlice ->
