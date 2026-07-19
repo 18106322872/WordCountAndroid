@@ -7,7 +7,7 @@ import java.nio.charset.StandardCharsets
 import java.util.zip.Inflater
 import java.util.zip.GZIPInputStream
 import kotlin.math.max
-import kotlin.math.minOf
+import kotlin.math.min
 
 /**
  * 纯 Kotlin 的 PDF 文本抽取与页数统计层（无任何第三方库）。
@@ -41,7 +41,7 @@ object PdfExtractor {
     fun extract(file: File): PdfResult? {
         val bytes = try { file.readBytes() } catch (_: Throwable) { return null }
         if (bytes.size < 5) return null
-        val header = String(bytes, 0, minOf(8, bytes.size), StandardCharsets.ISO_8859_1)
+        val header = String(bytes, 0, min(8, bytes.size), StandardCharsets.ISO_8859_1)
         if (!header.startsWith("%PDF") && !header.startsWith("%PDF-")) return null
         return try {
             val deadline = System.currentTimeMillis() + TIME_BUDGET_MS
@@ -56,7 +56,7 @@ object PdfExtractor {
     // ───────────────────────── 页数 ─────────────────────────
     /** 只在文件前 SCAN_CAP 字节中搜索 /Type /Page，避免大文件全转 String */
     private fun countPages(bytes: ByteArray): Int {
-        val scanLen = minOf(bytes.size, SCAN_CAP)
+        val scanLen = min(bytes.size, SCAN_CAP)
         val s = String(bytes, 0, scanLen, StandardCharsets.ISO_8859_1)
         // 叶子页：/Type /Page 且后接非 s/S（排除 /Pages）
         val leaf = """/Type\s*/\s*Page(?![sS])""".toRegex().findAll(s).count()
@@ -132,7 +132,7 @@ object PdfExtractor {
                 var endPos = findEndStream(bytes, dataStart, endKeyword)
                 val dataEnd = if (endPos >= 0) endPos else {
                     // 没找到 endstream，用长度限制兜底
-                    minOf(dataStart + MAX_STREAM_DATA, bytes.size)
+                    min(dataStart + MAX_STREAM_DATA, bytes.size)
                 }
                 val dataSize = dataEnd - dataStart
                 if (dataSize > 0 && dataSize <= MAX_STREAM_DATA) {
@@ -169,7 +169,7 @@ object PdfExtractor {
     private fun parseToUnicodeSafe(bytes: ByteArray, _deadline: Long): Map<Int, String> {
         val map = mutableMapOf<Int, String>()
         try {
-            val scanLen = minOf(bytes.size, SCAN_CAP)
+            val scanLen = min(bytes.size, SCAN_CAP)
             val s = String(bytes, 0, scanLen, StandardCharsets.ISO_8859_1)
             // 用非贪婪但有限制的正则
             val re = """(?s)/ToUnicode\s*(\d+\s+\d+\s+obj)?.*?stream\r?\n(.*?)endstream""".toRegex()
@@ -199,7 +199,7 @@ object PdfExtractor {
     /** 从 PDF 原始字节中提取可读文本片段——带大小和时间限制 */
     private fun extractRawReadableStrings(bytes: ByteArray, deadline: Long): String {
         val sb = StringBuilder()
-        val scanLen = minOf(bytes.size, SCAN_CAP)
+        val scanLen = min(bytes.size, SCAN_CAP)
         var i = 0
         while (i < scanLen - 3) {
             if (System.currentTimeMillis() > deadline) break
@@ -297,7 +297,7 @@ object PdfExtractor {
             useFlate -> try {
                 val inf = Inflater()
                 inf.setInput(raw)
-                val out = ByteArrayOutputStreamSafe(minOf(raw.size * 3, 2 * 1024 * 1024))
+                val out = ByteArrayOutputStreamSafe(min(raw.size * 3, 2 * 1024 * 1024))
                 val buf = ByteArray(8192)
                 while (!inf.finished()) {
                     val n = inf.inflate(buf)
