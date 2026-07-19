@@ -81,6 +81,15 @@ class MainActivity : ComponentActivity() {
         setContent { WordCountApp(initialUris = uris) }
     }
 
+    /** 运行时从 PackageManager 读取真实版本号，始终与 build.gradle 的 versionName 同步（不依赖 BuildConfig） */
+    private val appVersionName: String
+        get() = try {
+            @Suppress("DEPRECATION")
+            packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0.26"
+        } catch (e: Exception) {
+            "1.0.26"
+        }
+
     /** v1.0.16: 处理从微信/千牛等应用后续传入的文件，追加到已有列表而非替换 */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
@@ -242,7 +251,7 @@ fun WordCountApp(initialUris: List<Uri>) {
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("字数统计  v${BuildConfig.VERSION_NAME}") }) },
+        topBar = { TopAppBar(title = { Text("字数统计  v$appVersionName") }) },
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             Surface(shadowElevation = 4.dp) {
