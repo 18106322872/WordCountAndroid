@@ -136,7 +136,7 @@ object ArchiveEngine {
             if (header.size >= 8 && header[0] == 0x52.toByte() && header[1] == 0x61.toByte()
                 && header[2] == 0x72.toByte() && header[3] == 0x21.toByte()
                 && header[4] == 0x1A.toByte() && header[5] == 0x07.toByte()
-                && header[6].toInt() and 0x01 == 0x01) {
+                && (header[6].toInt() and 0x01) == 0x01) {
                 // 第 7 字节的 bit 0 = 1 表示 RAR5
                 return null // 让调用方显示"RAR5 不支持"提示
             }
