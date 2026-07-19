@@ -242,7 +242,7 @@ fun WordCountApp(initialUris: List<Uri>) {
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("字数统计  v1.0.19") }) },
+        topBar = { TopAppBar(title = { Text("字数统计  v1.0.20") }) },
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             Surface(shadowElevation = 4.dp) {
@@ -572,10 +572,13 @@ private fun addFiles(
                             // 区分"格式不支持"和"解析失败"
                             val ext = f.extension.lowercase()
                             val isSupported = ext in setOf("zip", "rar", "7z", "tar", "gz", "tgz")
-                            val errMsg = if (isSupported)
-                                "压缩包解析失败（文件可能损坏或密码保护）"
+                            val errMsg = if (isSupported) {
+                            if (ext == "rar")
+                                "RAR 格式不支持（仅支持 RAR4，RAR5 需先用电脑转为 ZIP）"
                             else
-                                "暂不支持此格式（.$ext）。支持：ZIP / RAR4 / 7Z / TAR / GZ"
+                                "压缩包解析失败（文件可能损坏或密码保护）"
+                        } else
+                            "暂不支持此格式（.$ext）。支持：ZIP / RAR4 / 7Z / TAR / GZ"
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = f.name, cachePath = f.absolutePath,
                                 error = errMsg))
                         } else {

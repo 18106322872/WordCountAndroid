@@ -131,14 +131,22 @@ object ArchiveEngine {
         val dest = File(cacheDir, "rar_${System.currentTimeMillis()}")
         dest.mkdirs()
         try {
-            // junrar 解包到临时目录；忽略其返回值（不同版本返回类型不同），
-            // 直接递归遍历解压目录拿到所有内层文件再逐个统计，最稳妥。
+            // v1.0.20: 检测 RAR5（junrar 仅支持 RAR4）
+            val header = file.inputStream().use { it.readNBytes(8) }
+            if (header.size >= 8 && header[0] == 0x52.toByte() && header[1] == 0x61.toByte()
+                && header[2] == 0x72.toByte() && header[3] == 0x21.toByte()
+                && header[4] == 0x1A.toByte() && header[5] == 0x07.toByte()
+                && header[6].toInt() and 0x01 == 0x01) {
+                // 第 7 字节的 bit 0 = 1 表示 RAR5
+                return null // 让调用方显示"RAR5 不支持"提示
+            }
+
             Junrar.extract(file.absolutePath, dest.absolutePath)
             dest.walkTopDown().filter { it.isFile }.forEach { f ->
                 try { processEntry(f.name, f.readBytes(), cacheDir, inner) } catch (_: Throwable) {}
             }
         } catch (_: Throwable) {
-            // RAR5 / 加密 / 损坏等情况会抛异常，交由调用方显示“解析失败”
+            // RAR5 / 加密 / 损坏等情况会抛异常
         } finally {
             runCatching { dest.deleteRecursively() }
         }
@@ -258,22 +266,27 @@ object ArchiveEngine {
                 ext in SUPPORTED_OLD_OFFICE -> runCatching { OldOfficeEngine.extractText(tmp) }.getOrNull()
                 ext == "dwg" -> runCatching { DwgEngine.extractTextSafe(tmp) }.getOrNull()
                 // 已知文本类：UTF-8 优先，不可读则尝试 GBK；均不可读（实为二进制）则跳过
+                // v1.0.20: 归档内层文件用更宽松的可读性判定（归档上下文下假阳性比假阴性危害小）
                 ext in SUPPORTED_TEXT || ext.isBlank() -> runCatching {
                     val t = String(bytes, StandardCharsets.UTF_8)
                     when {
-                        isReadableText(t) -> t
+                        isReadableText(t, lenient = true) -> t
                         else -> {
                             val g = String(bytes, Charset.forName("GBK"))
-                            if (isReadableText(g)) g else null
+                            if (isReadableText(g, lenient = true)) g else null
                         }
                     }
                 }.getOrNull()
-                // 未知扩展名：先判断是否二进制；非二进制再按 UTF-8 读取并校验可读性
+                // 未知扩展名：依次尝试 UTF-8 / GBK，不再先用 ISO-8859-1 判二进制
+                // （ISO-8859-1 模式会把含少量非 ASCII 字节的文本误判为二进制）
                 else -> runCatching {
-                    val raw = String(bytes, StandardCharsets.ISO_8859_1)
-                    if (isBinaryLike(raw)) null else {
-                        val t = String(bytes, StandardCharsets.UTF_8)
-                        if (isReadableText(t)) t else null
+                    val t = String(bytes, StandardCharsets.UTF_8)
+                    when {
+                        isReadableText(t, lenient = true) -> t
+                        else -> {
+                            val g = String(bytes, Charset.forName("GBK"))
+                            if (isReadableText(g, lenient = true)) g else null
+                        }
                     }
                 }.getOrNull()
             }
@@ -307,7 +320,7 @@ object ArchiveEngine {
      *   - 可打印字符（ASCII 可打印 / 字母数字 / CJK）占比必须 > 85%
      * 满足才认为是文本，否则视为二进制/损坏，不应被统计字数。
      */
-    private fun isReadableText(s: String): Boolean {
+    private fun isReadableText(s: String, lenient: Boolean = false): Boolean {
         if (s.length < 4) return false
         var printable = 0
         var control = 0
@@ -323,9 +336,13 @@ object ArchiveEngine {
                 code < 0x20 && c != '\n' && c != '\r' && c != '\t' -> control++
             }
         }
-        if (control > s.length * 0.10) return false
-        if (replacement > s.length * 0.02) return false
-        return printable > s.length * 0.85
+        // v1.0.20: 放宽阈值，修复 ZIP/RAR 全 0 问题
+        val maxControl = if (lenient) 0.20 else 0.15
+        val maxReplacement = if (lenient) 0.05 else 0.03
+        val minPrintable = if (lenient) 0.60 else 0.75
+        if (control > s.length * maxControl) return false
+        if (replacement > s.length * maxReplacement) return false
+        return printable > s.length * minPrintable
     }
 
     /** 判断 ISO-8859-1 字符串是否像二进制（控制字符太多） */
