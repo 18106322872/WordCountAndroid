@@ -126,7 +126,7 @@ object ArchiveEngine {
     }
 
     // ──────────────────── RAR4 (junrar，纯 Java RAR 解压库) ────────────────────
-    private fun fromRar(file: File, cacheDir: File): ArchiveResult {
+    private fun fromRar(file: File, cacheDir: File): ArchiveResult? {
         val inner = mutableListOf<InnerResult>()
         val dest = File(cacheDir, "rar_${System.currentTimeMillis()}")
         dest.mkdirs()

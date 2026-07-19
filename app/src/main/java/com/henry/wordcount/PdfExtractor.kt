@@ -449,14 +449,14 @@ object PdfExtractor {
 /** 简单可增长的字节输出流（避免引入 Apache Commons 等依赖）。 */
 private class ByteArrayOutputStreamSafe(initial: Int) {
     private var buf = ByteArray(if (initial < 32) 32 else initial)
-    private var size = 0
+    var size = 0
     fun write(b: Int) {
         if (size >= buf.size) buf = buf.copyOf(buf.size * 2)
         buf[size++] = b.toByte()
     }
     fun write(b: ByteArray, off: Int, len: Int) {
         if (size + len > buf.size) { var n = buf.size; while (n < size + len) n *= 2; buf = buf.copyOf(n) }
-        System.arraycopy(b, off, buf, size, size); size += len
+        System.arraycopy(b, off, buf, size, len); size += len
     }
     fun toBytes(): ByteArray = buf.copyOf(size)
 }
