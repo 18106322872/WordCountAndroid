@@ -355,6 +355,10 @@ def reexec_with_venv():
 
 
 
+    # v1.3.15：打包成 PyInstaller exe 后 sys.frozen 为真，依赖已全部内嵌，
+    # 不能再尝试用 venv 的 python 重新执行自身（临时目录里没有 wordcount.py）
+    if getattr(sys, "frozen", False):
+        return
     if os.path.abspath(sys.executable).lower() != os.path.abspath(VENV_PY).lower():
 
 
@@ -2572,37 +2576,26 @@ def extract_cdr(path):
 
 
 def _cell_text(v):
-
-
+    """将单元格值转为文本。v1.3.15：Excel 日期序列号（int/float，范围约 20000~60000）
+    转为中文短日期格式（如「7月1日」），与复制到 Word 后的显示文本一致，
+    解决日期列被当纯数字导致 CJK/非CJK 单词大幅偏少的问题。"""
+    from datetime import datetime, timedelta
 
     if v is None:
-
-
-
         return ""
-
-
-
+    if isinstance(v, bool):
+        return str(v)
+    # ── Excel 日期序列号 → 中文短日期 ──
+    vi = int(v) if isinstance(v, float) else v
+    if isinstance(v, (int, float)) and 20000 < vi < 60000:
+        try:
+            dt = datetime(1899, 12, 30) + timedelta(days=vi)
+            return dt.strftime("%m月%d日")
+        except Exception:
+            pass
     if isinstance(v, float):
-
-
-
         return str(int(v)) if v.is_integer() else str(v)
-
-
-
     return str(v).strip()
-
-
-
-
-
-
-
-
-
-
-
 def extract_excel(path, sheet_filter="all"):
 
 
@@ -2629,18 +2622,11 @@ def extract_excel(path, sheet_filter="all"):
 
     elif sheet_filter == "all":
 
-
-
-        targets = names
-
-
+        targets = [s for s in names if wb[s].sheet_state != "hidden"]
 
     else:
 
-
-
-        targets = [s for s in names if s == sheet_filter] or names
-
+        targets = [s for s in names if s == sheet_filter and wb[s].sheet_state != "hidden"] or [s for s in names if wb[s].sheet_state != "hidden"]
 
 
     items = []
@@ -8221,20 +8207,26 @@ def extract_for(path, sheet_filter, out_dir, converter, with_notes):
 
     if ext == ".pdf":
 
-        try:
-            items, meta = extract_pdf(path)
-            pg, reason = count_pages(ext, path)
-            meta["pages"] = pg
-            meta["pages_reason"] = reason
-            return items, meta
-        except Exception as e:
-            try:
-                from pdfminer.high_level import extract_text as _et
-                text = _et(path)
-            except Exception:
-                text = ""
-            text_items = [p.strip() for p in text.split("\n\n") if p.strip()]
-            return text_items, {"ext": ext, "pages": None, "pages_reason": "PDF error: %s" % e}
+
+
+        items, meta = extract_pdf(path)
+
+
+
+        pg, reason = count_pages(ext, path)
+
+
+
+        meta["pages"] = pg
+
+
+
+        meta["pages_reason"] = reason
+
+
+
+        return items, meta
+
 
 
     if ext in (".xlsx", ".xlsm"):
@@ -9776,36 +9768,6 @@ def count_file(path, sheet_filter="all", with_notes=False, converter=None):
 
 
 
-def _chaquopy_warmup():
-    """预热：在首次 Python 调用时强制 import 所有重度模块，
-    确保 Chaquopy AssetFinder 在"空闲"状态下完成所有 asset 文件提取和缓存。
-    避免在实际文件处理过程中因 import 触发路径问题。
-
-    此函数由 Kotlin 端 PythonEngine.warmup() 在首次调用前自动执行。
-    """
-    import sys
-    mods = []
-    errors = []
-    # 逐个 import，记录成功/失败
-    for mod_name in [
-        "pdfminer.high_level",   # PDF 文字提取
-        "docx",                  # DOCX 处理
-        "openpyxl",              # XLSX 处理
-        "pptx",                  # PPTX 处理
-        "PIL",                   # 图片处理（pillow）
-        "ezdxf",                 # DXF 处理
-        "olefile",               # OLE 文件解析
-        "json",
-    ]:
-        try:
-            __import__(mod_name)
-            mods.append(mod_name)
-        except Exception as e:
-            errors.append(f"{mod_name}: {e}")
-    # 输出诊断信息（通过日志可查看）
-    return {"loaded": mods, "errors": errors, "sys_path_len": len(sys.path)}
-
-
 def _to_py_list(obj):
     """把 Chaquopy 从 Kotlin 传入的 Java 集合转成真正的 Python list。
 
@@ -9862,15 +9824,12 @@ def count_files(paths, sheet_filter="all", with_notes=False):
 
 
         except Exception as e:
-            # 只保留异常消息，不输出完整 traceback（Kotlin 侧会直接展示给用户）
-            tb_lines = traceback.format_exception_only(type(e), e)
-            short_msg = "".join(tb_lines).strip() if tb_lines else str(e)
-            out.append({"ok": False, "error": short_msg,
+            out.append({"ok": False, "error": "%s\n%s" % (e, traceback.format_exc()),
                         "name": os.path.basename(p)})
 
 
 
-    return json.dumps(out, ensure_ascii=False)
+    return out
 
 
 
@@ -9918,7 +9877,7 @@ def count_text(text, name="图片"):
 
 
 
-    _result = {
+    return {
 
 
 
@@ -9939,7 +9898,6 @@ def count_text(text, name="图片"):
 
 
     }
-    return json.dumps(_result, ensure_ascii=False)
 
 
 
@@ -10033,9 +9991,11 @@ def main():
 
 
 
-        description="统一字数统计（PDF/CAD/Excel/PPT -> Word 口径）")
+        description="统一字数统计 v1.3.15（PDF/CAD/Excel/PPT -> Word 口径）")
 
 
+
+    ap.add_argument("--version", action="version", version="%(prog)s v1.3.15")
 
     ap.add_argument("inputs", nargs="+", help="文件或目录（可多个）")
 

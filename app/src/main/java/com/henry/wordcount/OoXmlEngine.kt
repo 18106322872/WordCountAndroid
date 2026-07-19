@@ -137,78 +137,157 @@ object OoXmlEngine {
      * xlsx 文本提取——模拟"全选 → 复制 → 粘贴到 Word"的效果：
      *   按工作表顺序，每个工作表内按行优先（从上到下、从左到右），
      *   同一行单元格间用 \t 分隔，行间用 \n 分隔。
+     *
+     * v1.0.25 关键修复（与桌面版 openpyxl / Word 口径对齐，实测 words=1988/fe=1780/nc=208）：
+     *   1. 单元格正则支持自闭合空单元格 <c .../>——旧正则 <c ...>(.*?)</c> 会把自闭合空格
+     *      与紧随其后的单元格"吞"成一个，导致列错位 + 该格 t="s" 落到内层从而共享字符串解析失效。
+     *   2. 共享字符串判定改为看 <c> 开标签属性是否含 t="s"（旧代码在内层 body 里找 t="s"，
+     *      而 t="s" 只存在于开标签，导致判定永远为 false，所有共享字符串被输出成索引数字）。
+     *   3. Excel 日期序列号（整数 20000~60000）转中文短日期「MM月DD日」，与复制到 Word 的显示一致。
+     *   4. 通过 workbook.xml + workbook.xml.rels 排除隐藏工作表（state=hidden/veryHidden），只统计可见表。
+     *   5. 不再往被统计文本插入 [工作表N] 标签（旧代码会因此每个表多算约 3 个中文 + 2 个非中文词）。
      */
     private fun extractXlsx(zip: ZipFile): OoxmlResult {
         val shared = readSharedStrings(zip)
 
-        // 工作表按文件名序号排序
-        val sheetEntries = Collections.list(zip.entries())
-            .filter { it.name.matches("""xl/worksheets/sheet\d+\.xml""".toRegex()) }
-            .sortedBy { """\d+""".toRegex().find(it.name)?.value?.toInt() ?: 0 }
+        // 1) 解析 workbook.xml：按顺序取 (name, state, r:id)
+        val wbXml = readEntry(zip, "xl/workbook.xml") ?: ""
+        val nameAttrRe = "name=\"([^\"]*)\"".toRegex()
+        val stateAttrRe = "state=\"([^\"]*)\"".toRegex()
+        val ridAttrRe = "r:id=\"([^\"]*)\"".toRegex()
+        // Triple: (name, state, r:id)
+        val sheetRefs = mutableListOf<Triple<String, String, String>>()
+        """<sheet\b[^>]*/>""".toRegex().findAll(wbXml).forEach { m ->
+            val tag = m.value
+            val nm = nameAttrRe.find(tag)?.groupValues?.get(1) ?: ""
+            val st = stateAttrRe.find(tag)?.groupValues?.get(1) ?: "visible"
+            val ri = ridAttrRe.find(tag)?.groupValues?.get(1) ?: ""
+            sheetRefs.add(Triple(nm, st, ri))
+        }
+
+        // 2) 解析 rels：r:id → worksheet 文件路径
+        val relsXml = readEntry(zip, "xl/_rels/workbook.xml.rels") ?: ""
+        val idAttrRe = "Id=\"([^\"]*)\"".toRegex()
+        val tgtAttrRe = "Target=\"([^\"]*)\"".toRegex()
+        val rid2tgt = HashMap<String, String>()
+        """<Relationship\b[^>]*/>""".toRegex().findAll(relsXml).forEach { m ->
+            val tag = m.value
+            val id = idAttrRe.find(tag)?.groupValues?.get(1)
+            val tg = tgtAttrRe.find(tag)?.groupValues?.get(1)
+            if (id != null && tg != null) rid2tgt[id] = tg
+        }
+
+        // 3) 仅保留可见工作表，按 workbook.xml 顺序。Pair: (sheetName, worksheetPath)
+        val visible = mutableListOf<Pair<String, String>>()
+        for ((nm, state, rid) in sheetRefs) {
+            if (state == "hidden" || state == "veryHidden") continue
+            var tgt = rid2tgt[rid] ?: continue
+            tgt = tgt.trimStart('/')
+            val path = if (tgt.startsWith("xl/")) tgt else "xl/$tgt"
+            visible.add(Pair(nm, path))
+        }
+        // 兜底：workbook.xml/rels 解析不到可见表时，退回旧逻辑（全部 sheetN.xml，按序号）
+        val sheetsToRead: List<Pair<String, String>> = if (visible.isNotEmpty()) visible else
+            Collections.list(zip.entries())
+                .filter { it.name.matches("""xl/worksheets/sheet\d+\.xml""".toRegex()) }
+                .sortedBy { """\d+""".toRegex().find(it.name)?.value?.toInt() ?: 0 }
+                .mapIndexed { i, e -> Pair("工作表${i + 1}", e.name) }
+
+        // 支持自闭合 / 完整 元素的正则
+        val rowRe = """<row\b([^>]*?)(?:/>|>(.*?)</row>)""".toRegex(RegexOption.DOT_MATCHES_ALL)
+        val rowNumRe = "r=\"(\\d+)\"".toRegex()
+        val cellRe = """<c\b([^>]*?)(?:/>|>(.*?)</c>)""".toRegex(RegexOption.DOT_MATCHES_ALL)
+        val cellRefRe = "r=\"([A-Z]+)(\\d+)\"".toRegex()
+        val vRe = """<v>(.*?)</v>""".toRegex(RegexOption.DOT_MATCHES_ALL)
+        val tRe = """<t[^>]*>(.*?)</t>""".toRegex(RegexOption.DOT_MATCHES_ALL)
 
         val sheetNames = mutableListOf<String>()
         val sb = StringBuilder()
 
-        sheetEntries.forEachIndexed { idx, entry ->
-            sheetNames.add("工作表${idx + 1}")
-            val xml = readEntry(zip, entry.name) ?: return@forEachIndexed
-            sb.append("\n[工作表${idx + 1}]\n")
+        sheetsToRead.forEachIndexed { idx, vs ->
+            val (vsName, vsPath) = vs
+            sheetNames.add(if (vsName.isNotBlank()) vsName else "工作表${idx + 1}")
+            val xml = readEntry(zip, vsPath) ?: return@forEachIndexed
 
-            // 按行提取：先找所有 <row> 元素，每行内按 ref 排序单元格
-            val rowRe = """<row[^>]*r="(\d+)"[^>]*>(.*?)</row>""".toRegex(RegexOption.DOT_MATCHES_ALL)
+            // 按行提取
             val rows = mutableListOf<Pair<Int, String>>()
             rowRe.findAll(xml).forEach { rm ->
-                val rowNum = rm.groupValues[1].toIntOrNull() ?: 0
-                rows.add(Pair(rowNum, rm.groupValues[2]))
+                val body = rm.groupValues[2]
+                if (body.isEmpty()) return@forEach // 自闭合空行
+                val rowNum = rowNumRe.find(rm.groupValues[1])?.groupValues?.get(1)?.toIntOrNull() ?: return@forEach
+                rows.add(Pair(rowNum, body))
             }
             rows.sortBy { it.first }
 
             for ((_, rowBody) in rows) {
-                val line = StringBuilder()
                 // 行内单元格按列号排序
-                val cells = mutableListOf<Triple<Int, String, String>>() // (colNum, type, value)
-                val cellRe = """<c[^>]*r="([A-Z]+)(\d+)"[^>]*>(.*?)</c>""".toRegex(RegexOption.DOT_MATCHES_ALL)
-                val vRe = """<v>(.*?)</v>""".toRegex(RegexOption.DOT_MATCHES_ALL)
-                val tRe = """<t[^>]*>(.*?)</t>""".toRegex(RegexOption.DOT_MATCHES_ALL)
-
+                val cells = mutableListOf<Pair<Int, String>>() // (colNum, text)
                 cellRe.findAll(rowBody).forEach { cm ->
-                    val colStr = cm.groupValues[1]
-                    val colNum = colNameToIndex(colStr)
-                    val body = cm.groupValues[3]
-                    val isInline = body.contains("""t="inlineStr"""")
-                    val txt = if (isInline) {
-                        tRe.find(body)?.groupValues?.get(1)?.let { decodeXml(it) } ?: ""
-                    } else {
-                        val idxStr = vRe.find(body)?.groupValues?.get(1)?.trim()
-                        if (body.contains("""t="s""") && idxStr != null) {
-                            idxStr.toIntOrNull()?.let { shared.getOrNull(it) } ?: ""
-                        } else {
-                            idxStr ?: "" // 数字/公式值原样输出
-                        }
-                    }
-                    cells.add(Triple(colNum, "", txt))
+                    val attrs = cm.groupValues[1]
+                    val inner = cm.groupValues[2] // 自闭合时为空串
+                    val ref = cellRefRe.find(attrs) ?: return@forEach
+                    val colNum = colNameToIndex(ref.groupValues[1])
+                    cells.add(Pair(colNum, cellText(attrs, inner, shared, vRe, tRe)))
                 }
-
-                // 按列号排序后拼接（模拟 Excel 阅读顺序）
                 cells.sortBy { it.first }
+                val line = StringBuilder()
                 var first = true
-                for ((_, _, txt) in cells) {
+                for ((_, txt) in cells) {
                     if (txt.isNotBlank()) {
                         if (!first) line.append('\t')
                         line.append(txt)
                         first = false
                     }
                 }
-                if (line.isNotEmpty()) {
-                    sb.append(line).append('\n')
-                }
+                if (line.isNotEmpty()) sb.append(line).append('\n')
             }
-            sb.append('\n')
+            sb.append('\n') // 工作表间空行（段落分隔）
         }
 
         val text = sb.toString()
-        val pages = max(1, sheetEntries.size)
+        val pages = max(1, sheetNames.size)
         return OoxmlResult(text, pages, "xlsx", sheetNames)
+    }
+
+    /**
+     * 单元格取值：处理共享字符串 / inlineStr / 公式字符串 / 数字 / Excel 日期序列号。
+     * 注意：类型判定必须看 <c> 开标签属性 attrs（t="s"/"str"/"inlineStr"），不能在 inner 里找。
+     */
+    private fun cellText(
+        attrs: String,
+        inner: String,
+        shared: List<String>,
+        vRe: Regex,
+        tRe: Regex
+    ): String {
+        if (inner.isEmpty()) return ""
+        // inlineStr：<is>...<t>..</t></is>
+        if (attrs.contains("t=\"inlineStr\"")) {
+            return tRe.find(inner)?.let { decodeXml(it.groupValues[1]) } ?: ""
+        }
+        val v = vRe.find(inner)?.groupValues?.get(1)?.trim() ?: ""
+        // 共享字符串：t="s"，<v> 是索引
+        if (attrs.contains("t=\"s\"") && v.isNotEmpty()) {
+            return v.toIntOrNull()?.let { shared.getOrNull(it) } ?: ""
+        }
+        // 公式字符串结果：t="str"
+        if (attrs.contains("t=\"str\"")) {
+            return decodeXml(v)
+        }
+        // 数字：识别 Excel 日期序列号（整数 20000~60000）→ 中文短日期，与 Word 显示一致
+        if (v.isNotEmpty()) {
+            val d = v.toDoubleOrNull()
+            if (d != null && d == Math.floor(d) && d > 20000 && d < 60000) {
+                return try {
+                    val date = java.time.LocalDate.of(1899, 12, 30).plusDays(d.toLong())
+                    String.format("%02d月%02d日", date.monthValue, date.dayOfMonth)
+                } catch (_: Throwable) {
+                    v
+                }
+            }
+            return v
+        }
+        return ""
     }
 
     /** Excel 列名 → 列索引（A=0, B=1, ..., Z=25, AA=26, ...） */
@@ -242,7 +321,8 @@ object OoXmlEngine {
     private fun readSharedStrings(zip: ZipFile): List<String> {
         val xml = readEntry(zip, "xl/sharedStrings.xml") ?: return emptyList()
         val out = mutableListOf<String>()
-        val siRe = """<si>(.*?)</si>""".toRegex(RegexOption.DOT_MATCHES_ALL)
+        // 支持自闭合 <si/>（空字符串），保持索引对齐
+        val siRe = """<si\b[^>]*?(?:/>|>(.*?)</si>)""".toRegex(RegexOption.DOT_MATCHES_ALL)
         val tRe = """<t[^>]*>(.*?)</t>""".toRegex(RegexOption.DOT_MATCHES_ALL)
         siRe.findAll(xml).forEach { siMatch ->
             val inner = siMatch.groupValues[1]
