@@ -112,22 +112,21 @@ object OoXmlEngine {
         }
     }
 
-    companion object {
-        /** 域指令文本正则：<w:instrText>...</w:instrText> */
-        private val INSTR_TEXT_RE = """<w:instrText[^>]*>.*?</w:instrText>""".toRegex(RegexOption.DOT_MATCHES_ALL)
+    // ───────────────────────── 正则常量（object 顶层，非 companion） ──
+    /** 域指令文本正则：<w:instrText>...</w:instrText> */
+    private val INSTR_TEXT_RE = """<w:instrText[^>]*>.*?</w:instrText>""".toRegex(RegexOption.DOT_MATCHES_ALL)
 
-        /** 含 w:vanish 的完整 <w:r>...</w:r> 路径 */
-        private val VANISH_RUN_RE =
-            """<w:r\b[^>]*>.*?<w:rPr\b[^>]*>.*?<w:vanish\s*/?>.*?</w:rPr>.*?</w:r>""".toRegex(RegexOption.DOT_MATCHES_ALL)
+    /** 含 w:vanish 的完整 <w:r>...</w:r> 路径 */
+    private val VANISH_RUN_RE =
+        """<w:r\b[^>]*>.*?<w:rPr\b[^>]*>.*?<w:vanish\s*/?>.*?</w:rPr>.*?</w:r>""".toRegex(RegexOption.DOT_MATCHES_ALL)
 
-        /** 含 w:hidden 的完整 <w:r>...</w:r> 路径 */
-        private val HIDDEN_RUN_RE =
-            """<w:r\b[^>]*>.*?<w:rPr\b[^>]*>.*?<w:hidden\s*/?>.*?</w:rPr>.*?</w:r>""".toRegex(RegexOption.DOT_MATCHES_ALL)
+    /** 含 w:hidden 的完整 <w:r>...</w:r> 路径 */
+    private val HIDDEN_RUN_RE =
+        """<w:r\b[^>]*>.*?<w:rPr\b[^>]*>.*?<w:hidden\s*/?>.*?</w:rPr>.*?</w:r>""".toRegex(RegexOption.DOT_MATCHES_ALL)
 
-        /** 文本提取正则：w:t 文本 | 分页符 | 制表符 | 换行符 | 段落结束 */
-        private val TEXT_EXTRACT_RE =
-            """<w:t[^>]*>(.*?)</w:t>|<w:br[^>]*w:type="page"[^>]*/>|<w:tab[^>]*/>|<w:br[^>]*/>|</w:p>""".toRegex(RegexOption.DOT_MATCHES_ALL)
-    }
+    /** 文本提取正则：w:t 文本 | 分页符 | 制表符 | 换行符 | 段落结束 */
+    private val TEXT_EXTRACT_RE =
+        """<w:t[^>]*>(.*?)</w:t>|<w:br[^>]*w:type="page"[^>]*/>|<w:tab[^>]*/>|<w:br[^>]*/>|</w:p>""".toRegex(RegexOption.DOT_MATCHES_ALL)
 
     // ───────────────────────── xlsx ─────────────────────────
     /**
