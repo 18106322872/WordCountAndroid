@@ -34,24 +34,29 @@ object PdfOcrEngine {
      * @return 识别到的纯文本 + 页数；任何失败 / 无文字返回 null
      */
     fun extractText(file: File): PdfOcrResult? {
-        if (!OcrEngine.ocrEnabled) return null
+        if (!OcrEngine.ocrEnabled) {
+            Log.w("WordCount", "PdfOcr 跳过: ocrEnabled=false (ML Kit 未就绪)")
+            return null
+        }
         val pfd = try {
             ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
         } catch (e: Throwable) {
-            Log.w("WordCount", "PdfOcr 打开文件失败 ${file.name}: ${e.message}")
+            Log.w("WordCount", "PdfOcr 打开文件失败 ${file.name}: ${e.javaClass.simpleName}: ${e.message}")
             return null
         }
         val renderer = try {
             PdfRenderer(pfd)
         } catch (e: Throwable) {
-            Log.w("WordCount", "PdfOcr 创建 Renderer 失败 ${file.name}: ${e.message}")
+            Log.w("WordCount", "PdfOcr 创建 Renderer 失败 ${file.name}: ${e.javaClass.simpleName}: ${e.message}")
             runCatching { pfd.close() }
             return null
         }
         return try {
             val pageCount = renderer.pageCount
+            Log.d("WordCount", "PdfOcr ${file.name}: pageCount=$pageCount")
             val sb = StringBuilder()
             val limit = min(pageCount, MAX_PAGES)
+            var ocrSuccessPages = 0
             for (i in 0 until limit) {
                 val page = try { renderer.openPage(i) } catch (_: Throwable) { continue }
                 try {
@@ -70,7 +75,7 @@ object PdfOcrEngine {
                     try {
                         page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                         val t = OcrEngine.recognizeBitmap(bmp, skipPostFilter = true)
-                        if (t.isNotBlank()) sb.append(t).append('\n')
+                        if (t.isNotBlank()) { sb.append(t).append('\n'); ocrSuccessPages++ }
                     } finally {
                         bmp.recycle()
                     }
@@ -79,6 +84,7 @@ object PdfOcrEngine {
                 }
             }
             val text = sb.toString().trim()
+            Log.d("WordCount", "PdfOcr ${file.name}: ocrSuccessPages=$ocrSuccessPages/$limit, textLen=${text.length}")
             if (text.isBlank()) null else PdfOcrResult(text, pageCount)
         } catch (e: Throwable) {
             Log.w("WordCount", "PdfOcr 处理异常 ${file.name}: ${e.message}")

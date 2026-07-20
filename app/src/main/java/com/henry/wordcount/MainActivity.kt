@@ -480,9 +480,76 @@ private fun mimeForExt(ext: String): String {
 /** 缓存文件 + 原始显示名称（用于修复 wc_XXXX 临时名问题） */
 data class CachedFile(val file: File, val displayName: String)
 
+/** 判断字符串是否像真实文件名（含非十六进制字符、有扩展名、长度合理） */
+private fun looksLikeRealFilename(s: String): Boolean {
+    val trimmed = s.trim()
+    if (trimmed.length < 3 || trimmed.length > 200) return false
+    // 纯十六进制/数字字符串（如 UUID 片段）不算真文件名
+    val alphaCount = trimmed.count { it.isLetter() }
+    if (alphaCount == 0) return false  // 纯数字/符号
+    // 必须包含至少一个非十六进制字母（排除纯 hash）
+    val nonHexAlpha = trimmed.count { it.isLetter() && it !in 'a'..'f' && it !in 'A'..'F' }
+    if (alphaCount > 0 && nonHexAlpha == 0 && trimmed.length > 10) {
+        // 全是 hex 字母+数字且较长 → 可能是 hash/UUID
+        return false
+    }
+    return true
+}
+
+/**
+ * 多策略获取 URI 对应的原始文件名。
+ * 某些设备/内容 provider 的 DocumentFile.name 返回内部 ID（如 9e20f478899dc29...），
+ * 需要依次尝试多种来源，取第一个看起来像真实文件名的结果。
+ */
+private fun resolveDisplayName(context: android.content.Context, uri: Uri): String {
+    // 策略1: DocumentFile.fromSingleUri（原有逻辑）
+    val fromDocFile = androidx.documentfile.provider.DocumentFile.fromSingleUri(context, uri)?.name
+    if (!fromDocFile.isNullOrBlank() && looksLikeRealFilename(fromDocFile)) {
+        return fromDocFile
+    }
+
+    // 策略2: ContentResolver query OpenableColumns.DISPLAY_NAME
+    try {
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val nameIdx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (nameIdx >= 0 && cursor.moveToFirst()) {
+                val dbName = cursor.getString(nameIdx)
+                if (!dbName.isNullOrBlank() && looksLikeRealFilename(dbName)) {
+                    return dbName
+                }
+            }
+        }
+    } catch (_: Throwable) {}
+
+    // 策略3: URI path 最后一段
+    uri.lastPathSegment?.let { seg ->
+        if (!seg.isBlank() && looksLikeRealFilename(seg)) {
+            return seg
+        }
+    }
+
+    // 策略4: URL decode 后的路径最后一段
+    try {
+        val decoded = java.net.URLDecoder.decode(uri.lastPathSegment ?: "", "UTF-8")
+        if (!decoded.isBlank() && looksLikeRealFilename(decoded) && decoded != uri.lastPathSegment) {
+            return decoded
+        }
+    } catch (_: Throwable) {}
+
+    // 策略5: URI path 去掉前导斜杠后的最后一部分
+    uri.path?.let { path ->
+        val parts = path.split("/").filter { it.isNotBlank() }
+        parts.lastOrNull()?.let { last ->
+            if (looksLikeRealFilename(last)) return last
+        }
+    }
+
+    // 全部失败：用策略1的结果（即使不像真名），至少不会比原来更差
+    return fromDocFile.ifNullOrBlank { "file_${System.currentTimeMillis()}" }
+}
+
 private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFile {
-    val originalName = androidx.documentfile.provider.DocumentFile.fromSingleUri(context, uri)?.name
-        ?: "file_${System.currentTimeMillis()}"
+    val originalName = resolveDisplayName(context, uri)
     val safe = originalName.replace(Regex("[^\\w.\\-]"), "_")
     // 保留原始扩展名用于路由判断；如果 filename 没有扩展名则从 MIME type 推断后缀
     var outName = "wc_${System.currentTimeMillis()}_$safe"
@@ -636,24 +703,25 @@ private fun addFiles(
                     }
                 }
 
-                // PDF → 纯 Kotlin 解析（不再经过 Python，规避设备端 Chaquopy 失败）
+                // PDF → Kotlin 提取 + OCR(PdfRenderer/ML Kit) + 不可用时 Python 后备
                 pdfFiles.forEachIndexed { i, cf ->
                     val f = cf.file
                     val dName = cf.displayName
                     try {
                         val res = PdfExtractor.extract(f)  // 永不返回 null
                         val stats = countTextKotlin(res.text)
-                        // v1.0.27: OCR 触发条件优化——
+                        // OCR 触发条件：
                         //   1) 文本为空 → OCR
                         //   2) 文本极少（<10字）且无中文 → 可能是乱码 → OCR
                         //   3) PdfExtractor 标记文本不可靠（路径B垃圾/结构残留）→ OCR
-                        val ocrRes = if (res.text.isBlank()
+                        val needOcr = res.text.isBlank()
                             || (stats.second == 0 && stats.first < 10)
                             || !res.reliable
-                        ) {
-                            PdfOcrEngine.extractText(f)
-                        } else null
+
+                        val ocrRes = if (needOcr) PdfOcrEngine.extractText(f) else null
+
                         if (ocrRes != null) {
+                            // PDF OCR 成功（PdfRenderer + ML Kit）
                             val ocrStats = countTextKotlin(ocrRes.text)
                             val resMap = mapOf(
                                 "name" to dName, "ext" to ".pdf",
@@ -663,9 +731,54 @@ private fun addFiles(
                             )
                             val fr = toFileResult(resMap, f.absolutePath)
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                        } else if (needOcr && !res.reliable) {
+                            // 需要 OCR 但 PdfOcrEngine 失败 + 文本不可靠 → 尝试 Python 后备
+                            Log.w("WordCount", "PdfOcrEngine 失败且文本不可靠，尝试 Python 后备: $dName")
+                            var pyOk = false
+                            try {
+                                val pyResults = PythonEngine.countFiles(context, listOf(f.absolutePath))
+                                @Suppress("UNCHECKED_CAST")
+                                val pyList = pyResults as? List<Map<String, Any?>>
+                                if (!pyList.isNullOrEmpty()) {
+                                    val py0 = pyList[0]
+                                    val pyOkFlag = py0["ok"] as? Boolean ?: false
+                                    if (pyOkFlag) {
+                                        val pyData = py0["result"] as? Map<String, Any?>
+                                        if (pyData != null) {
+                                            val pyWords = (pyData["words"] as? Number)?.toInt() ?: 0
+                                            val pyFe = (pyData["fe"] as? Number)?.toInt() ?: 0
+                                            val pyNc = (pyData["nc"] as? Number)?.toInt() ?: 0
+                                            val pyChars = (pyData["chars"] as? Number)?.toInt() ?: 0
+                                            val pyPages = (pyData["pages"] as? Number)?.toInt() ?: res.pages
+                                            val resMap = mapOf(
+                                                "name" to dName, "ext" to ".pdf",
+                                                "stats" to mapOf("words" to pyWords, "fe" to pyFe, "nc" to pyNc, "chars" to pyChars),
+                                                "meta" to emptyMap<String, Any?>(),
+                                                "pages" to pyPages
+                                            )
+                                            val fr = toFileResult(resMap, f.absolutePath)
+                                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_py", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                                            pyOk = true
+                                            Log.d("WordCount", "Python 后备成功: $dName words=$pyWords chars=$pyChars pages=$pyPages")
+                                        }
+                                    }
+                                }
+                            } catch (e: Throwable) {
+                                Log.w("WordCount", "PDF Python 后备异常 $dName: ${e.javaClass.simpleName}: ${e.message}")
+                            }
+                            if (!pyOk) {
+                                // 全部失败：文本不可靠且无法 OCR → 显示明确错误，不显示垃圾数字
+                                entries.add(FileEntry(
+                                    id = "e${System.currentTimeMillis()}_${i}_pdf_err",
+                                    displayName = dName,
+                                    cachePath = f.absolutePath,
+                                    error = "此 PDF 无法识别（扫描件/图片 PDF 需要 OCR 引擎，请确认设备已安装 Google Play 服务）"
+                                ))
+                            }
                         } else if (res.text.isBlank()) {
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = dName, cachePath = f.absolutePath, error = "无法从该 PDF 提取文字（可能为纯图片扫描件或加密文件）"))
                         } else {
+                            // 文本可靠(或不需要 OCR 且有文本) → 直接使用 Kotlin 提取结果
                             val resMap = mapOf(
                                 "name" to dName, "ext" to ".pdf",
                                 "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
