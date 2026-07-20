@@ -67,37 +67,6 @@ jobs:
             exit 1
           fi
 
-      # 失败时把 build.log 末尾公开写到 commit comment（公开仓库匿名可读，便于无 token 诊断）
-      - name: Upload build log on failure
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SHA: ${{ github.sha }}
-        run: |
-          python3 - <<'PY'
-          import os, json, urllib.request
-          try:
-              with open('build.log', encoding='utf-8', errors='replace') as fh:
-                  lines = fh.read().splitlines()
-          except Exception:
-              lines = []
-          tail = "\n".join(lines[-90:])[-7000:]
-          body = "**BUILD FAILED** (push %s)\n\n```\n%s\n```" % (os.environ.get('SHA', '?'), tail)
-          data = json.dumps({"body": body}).encode('utf-8')
-          url = "https://api.github.com/repos/18106322872/WordCountAndroid/commits/%s/comments" % os.environ.get('SHA', '')
-          req = urllib.request.Request(url, data=data, method='POST', headers={
-              "Authorization": "Bearer %s" % os.environ['GH_TOKEN'],
-              "Accept": "application/vnd.github+json",
-              "Content-Type": "application/json",
-              "User-Agent": "ci-log",
-          })
-          try:
-              with urllib.request.urlopen(req, timeout=30) as r:
-                  print("posted comment, status", r.status)
-          except Exception as e:
-              print("post failed:", e)
-          PY
-
       - name: Rename APK（WordCount-版本号格式）
         run: |
           echo "APK 输出目录："
