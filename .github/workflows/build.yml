@@ -58,21 +58,42 @@ jobs:
         run: |
           set -o pipefail
           gradle clean --no-daemon > build.log 2>&1 || true
-          if gradle assembleDebug --no-build-cache --rerun-tasks --no-daemon >> build.log 2>&1; then
-            echo "BUILD OK"
-          else
-            # 将构建错误摘要作为 GitHub annotation 输出（便于在 run 页面/摘要中直接看到失败原因）
-            ERR=$(tail -n 80 build.log | tr '\n' ' ' | head -c 6000)
-            echo "::error::BUILD FAILED: $ERR"
-            # v1.0.36 诊断：将 build.log 尾部 POST 到 commit comment（匿名可读，无需 admin 权限）
-            LOG_TAIL=$(tail -n 120 build.log)
-            curl -s -X POST \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/18106322872/WordCountAndroid/commits/${{ github.sha }}/comments" \
-              -d "{\"body\": \"## 🧪 CI Build Diagnostics (v1.0.36)\\n\\`\`\`\\n${LOG_TAIL}\\n\`\`\`\"}" || true
-            exit 1
-          fi
+          gradle assembleDebug --no-build-cache --rerun-tasks --no-daemon >> build.log 2>&1
+          echo "BUILD OK"
+
+      # 构建失败时：用 python3 正确 JSON 编码，把编译错误行 + 日志尾部 POST 到 commit comment（匿名可读，无需 admin 权限）
+      - name: Post build failure diagnostics
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import os, json, urllib.request
+          try:
+              lines = open('build.log', encoding='utf-8', errors='replace').read().splitlines()
+          except Exception as e:
+              lines = ['(build.log 不存在: %s)' % e]
+          tail = '\n'.join(lines[-160:])
+          keys = ('e: ', 'error:', 'Error:', 'FAILURE', 'What went wrong', 'Caused by', 'Unresolved', 'Compilation error', 'A problem occurred', '> Task')
+          errlines = [l for l in lines if any(k in l for k in keys)]
+          body = ("## CI Build Diagnostics (%s)\n\n### 关键错误行\n```\n%s\n```\n\n### 日志尾部\n```\n%s\n```" %
+                  (os.environ.get('SHA','')[:7], '\n'.join(errlines[-70:]) or '(未匹配到错误关键字)', tail[-4500:]))
+          print(body)
+          data = json.dumps({"body": body}).encode('utf-8')
+          req = urllib.request.Request(
+              "https://api.github.com/repos/18106322872/WordCountAndroid/commits/%s/comments" % os.environ['SHA'],
+              data=data,
+              headers={"Authorization": "Bearer " + os.environ['GH_TOKEN'],
+                       "Accept": "application/vnd.github+json",
+                       "Content-Type": "application/json"},
+              method="POST")
+          try:
+              r = urllib.request.urlopen(req)
+              print("comment posted:", r.status)
+          except Exception as e:
+              print("comment post failed:", e)
+          PY
 
       - name: Rename APK（WordCount-版本号格式）
         run: |
