@@ -497,72 +497,58 @@ private fun looksLikeRealFilename(s: String): Boolean {
 }
 
 /**
- * 多策略获取 URI 对应的原始文件名。
- * 某些设备/内容 provider 的 DocumentFile.name 返回内部 ID（如 9e20f478899dc29...），
- * 需要依次尝试多种来源，取第一个看起来像真实文件名的结果。
+ * 获取 URI 对应的显示文件名。
+ * v1.0.34 重写：移除 looksLikeRealFilename 过滤器（它在用户设备上导致所有策略失败并回退到 hash）。
+ * 策略优先级：ContentResolver > DocumentFile > URI路径提取 > 友好名兜底。
  */
 private fun resolveDisplayName(context: android.content.Context, uri: Uri): String {
-    // 策略1: DocumentFile.fromSingleUri（原有逻辑）
-    val fromDocFile = androidx.documentfile.provider.DocumentFile.fromSingleUri(context, uri)?.name
-    Log.d("WordCount", "resolveDisplayName策略1(DocumentFile.name): '${fromDocFile}'")
-    if (!fromDocFile.isNullOrBlank() && looksLikeRealFilename(fromDocFile)) {
-        return fromDocFile
-    }
-
-    // 策略2: ContentResolver query OpenableColumns.DISPLAY_NAME（系统权威来源，不过滤）
-    // 某些设备/ROM的DocumentFile返回内部ID，但ContentResolver通常能返回正确名称
+    // 策略1（最可靠）: ContentResolver 查询 OpenableColumns.DISPLAY_NAME
+    // 使用明确的列投影（避免 null 投影在某些 ROM 上返回空 cursor）
     try {
-        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-            val nameIdx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-            if (nameIdx >= 0 && cursor.moveToFirst()) {
-                val dbName = cursor.getString(nameIdx)
-                Log.d("WordCount", "resolveDisplayName策略2(ContentResolver): '$dbName'")
-                if (!dbName.isNullOrBlank()) {
-                    // 不过滤：ContentResolver是系统报告的最佳可用名称
-                    if (looksLikeRealFilename(dbName)) return dbName
-                    // 即使看起来像hash也记录下来（可能优于其他策略）
-                    Log.d("WordCount", "  策略2名称不像真实文件名但仍保留: '$dbName'")
+        context.contentResolver.query(
+            uri,
+            arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
+            null, null, null
+        )?.use { cursor ->
+            if (cursor.moveToFirst() && cursor.columnCount > 0) {
+                val name = cursor.getString(0)
+                if (!name.isNullOrBlank()) {
+                    Log.d("WordCount", "resolveDisplayName s1(ContentResolver): '$name'")
+                    return name.trim()
                 }
             }
         }
     } catch (_: Throwable) {}
 
-    // 策略3: URI path 最后一段
+    // 策略2: DocumentFile.fromSingleUri
+    androidx.documentfile.provider.DocumentFile.fromSingleUri(context, uri)?.name?.let { name ->
+        if (name.isNotBlank()) {
+            Log.d("WordCount", "resolveDisplayName s2(DocumentFile): '$name'")
+            return name.trim()
+        }
+    }
+
+    // 策略3: 从 URI path 提取文件名
+    // SAF 格式: content://.../document/primary%3Apath%2Fto%2Ffile.pdf
     uri.lastPathSegment?.let { seg ->
-        Log.d("WordCount", "resolveDisplayName策略3(lastPathSegment): '$seg'")
-        if (!seg.isBlank() && looksLikeRealFilename(seg)) {
-            return seg
-        }
+        try {
+            val decoded = java.net.URLDecoder.decode(seg, "UTF-8")
+            // SAF 路径通常编码为 "primary:Download/file.pdf" 或类似格式
+            var extracted = decoded.substringAfterLast('/')
+                .substringAfterLast('\\')
+                .substringAfterLast(':')
+            if (extracted.isNotBlank() && extracted.length < 250) {
+                Log.d("WordCount", "resolveDisplayName s3(URI path): '$extracted'")
+                return extracted.trim()
+            }
+        } catch (_: Throwable) {}
     }
 
-    // 策略4: URL decode 后的路径最后一段
-    try {
-        val decoded = java.net.URLDecoder.decode(uri.lastPathSegment ?: "", "UTF-8")
-        Log.d("WordCount", "resolveDisplayName策略4(decoded): '$decoded'")
-        if (!decoded.isBlank() && looksLikeRealFilename(decoded) && decoded != uri.lastPathSegment) {
-            return decoded
-        }
-    } catch (_: Throwable) {}
-
-    // 策略5: URI path 去掉前导斜杠后的最后一部分
-    uri.path?.let { path ->
-        val parts = path.split("/").filter { it.isNotBlank() }
-        parts.lastOrNull()?.let { last ->
-            Log.d("WordCount", "resolveDisplayName策略5(path): '$last'")
-            if (looksLikeRealFilename(last)) return last
-        }
-    }
-
-    // 全部失败：不要用hash/UUID作为显示名（某些ROM的DocumentFile和ContentResolver都返回内部ID）
-    // 构造一个基于文件类型的友好名称
-    val looksLikeHash = !fromDocFile.isNullOrBlank() && !looksLikeRealFilename(fromDocFile)
-    val fallback = when {
-        looksLikeHash -> "未知文件"
-        !fromDocFile.isNullOrBlank() -> fromDocFile
-        else -> "未知文件"
-    }
-    Log.w("WordCount", "resolveDisplayName全部策略失败，使用fallback: '$fallback' (uri=$uri, docFile='$fromDocFile', looksHash=$looksLikeHash)")
-    return fallback
+    // 兜底：基于时间戳的友好名称（带扩展名）
+    val ext = guessExt(context, uri).let { if (it.isNotBlank()) ".$it" else "" }
+    val friendly = "文件${System.currentTimeMillis()}$ext"
+    Log.w("WordCount", "resolveDisplayName 全部策略失败，使用兜底名称: '$friendly' (uri=$uri)")
+    return friendly
 }
 
 private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFile {
@@ -727,12 +713,15 @@ private fun addFiles(
                     try {
                         val res = PdfExtractor.extract(f)  // 永不返回 null
                         val stats = countTextKotlin(res.text)
-                        // 判断是否"应该优先用OCR结果"（而非PdfExtractor的文本提取结果）
-                        // v1.0.32关键改进：新增CJK占比检测，捕捉"有少量二进制残留但被标为reliable"的情况
+                        // 判断 PdfExtractor 提取结果是否为"垃圾文本"（二进制残留/编码噪音）
+                        // v1.0.34 改用中文字数绝对值判定（之前用 chars<500 阈值，但 PdfExtractor 常提取到上千字符的垃圾）
                         val totalChars = stats.fourth
-                        val cjkRatio = if (totalChars > 0) stats.second.toDouble() / totalChars else 0.0
+                        val cjkCount = stats.second  // 中文字符绝对数
+                        val cjkRatio = if (totalChars > 0) cjkCount.toDouble() / totalChars else 0.0
+                        // 判定标准：CJK 字符极少（<30字）→ 几乎肯定不是正常中文内容（正常中文PDF至少几十到几百字）
+                        // 12345.pdf 真值=5字(全ASCII)，夸克扫描王应几百字但PdfExtractor只提取到二进制残渣
                         val looksLikeGarbage = res.text.isNotBlank()
-                            && cjkRatio < 0.05 && totalChars < 500  // 几乎无中文+字数少→可能是二进制残留
+                            && cjkCount < 30 && cjkRatio < 0.15
                         val needOcrPref = res.text.isBlank()
                             || (stats.second == 0 && stats.first < 50)   // 无中文且<50词（放宽阈值）
                             || !res.reliable
@@ -741,7 +730,7 @@ private fun addFiles(
                         // ★ v1.0.32核心改动：对所有PDF都尝试OCR（不再由needOcr决定是否调用）
                         val ocrRes = PdfOcrEngine.extractText(f)
 
-                        Log.d("WordCount", "PDF $dName: ext=${stats.first}w/${stats.fourth}c reliable=${res.reliable} cjkRatio=%.2f needOcr=$needOcrPref looksGarbage=$looksLikeGarbage ocrOk=${ocrRes != null}".format(cjkRatio))
+                        Log.d("WordCount", "PDF $dName: ${stats.first}w/${stats.second}fe/${stats.third}nc/${stats.fourth}ch reliable=${res.reliable} cjkRatio=%.2f looksGarbage=$looksLikeGarbage (cjkCount=$cjkCount<30)".format(cjkRatio))
 
                         if (ocrRes != null) {
                             // PDF OCR 成功（PdfRenderer + ML Kit）→ 用OCR结果
