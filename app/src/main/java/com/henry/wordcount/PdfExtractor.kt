@@ -380,16 +380,11 @@ object PdfExtractor {
     private fun isImageXObject(dictStr: String): Boolean {
         // 快速检查：不含 Image 关键字直接返回 false
         if (!dictStr.contains("Image", ignoreCase = true)) return false
-        // 精确匹配 XObject 图片子类型
-        val isSubtypeImage = """/Subtype\s*/\s*Image"""".toRegex(RegexOption.IGNORE_CASE).containsMatchIn(dictStr)
+        // 精确匹配 XObject 图片子类型：/Subtype/Image 或 /S/Image。
+        // 不再用 contains("/Image") 简单匹配，避免 ProcSet[/PDF/Text/ImageB/ImageC/ImageI]
+        // 这类页面级资源声明被误判为图片流而跳过，导致纯文字 PDF 整体丢失。
+        return """/Subtype\s*/\s*Image""".toRegex(RegexOption.IGNORE_CASE).containsMatchIn(dictStr)
                 || """/S\s*/\s*Image""".toRegex(RegexOption.IGNORE_CASE).containsMatchIn(dictStr)
-        if (!isSubtypeImage) return false
-        // 额外验证：确保这是 XObject（不是 ProcSet 等意外匹配）
-        val isXObject = dictStr.contains("/XObject", ignoreCase = true)
-                || dictStr.contains("/Type\\s*/\\s*XObject".toRegex(RegexOption.IGNORE_CASE))
-        // 如果明确是 XObject 子类型 + 有 XObject 上下文 → 真图片流
-        // 如果只有 /Subtype/Image 但无 XObject 上下文 → 也可能是图片（保守判断）
-        return isSubtypeImage
     }
 
     /** v1.0.27: 检查字符串是否含 CJK 或高字节字符 */
