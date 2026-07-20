@@ -553,9 +553,15 @@ private fun resolveDisplayName(context: android.content.Context, uri: Uri): Stri
         }
     }
 
-    // 全部失败：优先用策略2拿到的值（即使不像真名），其次策略1，最后生成友好名
-    val fallback = if (!fromDocFile.isNullOrBlank()) fromDocFile else "未知文件"
-    Log.w("WordCount", "resolveDisplayName全部策略失败，使用fallback: '$fallback' (uri=$uri)")
+    // 全部失败：不要用hash/UUID作为显示名（某些ROM的DocumentFile和ContentResolver都返回内部ID）
+    // 构造一个基于文件类型的友好名称
+    val looksLikeHash = !fromDocFile.isNullOrBlank() && !looksLikeRealFilename(fromDocFile)
+    val fallback = when {
+        looksLikeHash -> "未知文件"
+        !fromDocFile.isNullOrBlank() -> fromDocFile
+        else -> "未知文件"
+    }
+    Log.w("WordCount", "resolveDisplayName全部策略失败，使用fallback: '$fallback' (uri=$uri, docFile='$fromDocFile', looksHash=$looksLikeHash)")
     return fallback
 }
 
@@ -735,7 +741,7 @@ private fun addFiles(
                         // ★ v1.0.32核心改动：对所有PDF都尝试OCR（不再由needOcr决定是否调用）
                         val ocrRes = PdfOcrEngine.extractText(f)
 
-                        Log.d("WordCount", "PDF $dName: ext=${stats.first}w/${stats.fourth}c reliable=${res.reliable} cjkRatio=%.2f needOcr=$needOcrPref ocrOk=${ocrRes != null}".format(cjkRatio))
+                        Log.d("WordCount", "PDF $dName: ext=${stats.first}w/${stats.fourth}c reliable=${res.reliable} cjkRatio=%.2f needOcr=$needOcrPref looksGarbage=$looksLikeGarbage ocrOk=${ocrRes != null}".format(cjkRatio))
 
                         if (ocrRes != null) {
                             // PDF OCR 成功（PdfRenderer + ML Kit）→ 用OCR结果
@@ -748,46 +754,66 @@ private fun addFiles(
                             )
                             val fr = toFileResult(resMap, f.absolutePath)
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-                        } else if (needOcrPref && !res.reliable) {
-                            // 需要OCR但OCR失败 + 文本不可靠 → 尝试 Python 后备
-                            Log.w("WordCount", "PdfOcrEngine失败且文本不可靠，尝试Python后备: $dName")
+                        } else {
+                            // ★ OCR 失败（ML Kit 在此设备不可用）→ 根据文本质量决定后续
+                            Log.w("WordCount", "PDF OCR失败: $dName (reliable=${res.reliable}, looksGarbage=$looksLikeGarbage, words=${stats.first}, chars=${stats.fourth})")
+
+                            // 当文本看起来像垃圾(无CJK且少字符) 或 文本标记为不可靠时 → 尝试Python后备
+                            val shouldTryPython = looksLikeGarbage || (needOcrPref && !res.reliable)
                             var pyOk = false
-                            try {
-                                val pyResults = PythonEngine.countFiles(context, listOf(f.absolutePath))
-                                @Suppress("UNCHECKED_CAST")
-                                val pyList = pyResults as? List<Map<String, Any?>>
-                                if (!pyList.isNullOrEmpty()) {
-                                    val py0 = pyList[0]
-                                    val pyOkFlag = py0["ok"] as? Boolean ?: false
-                                    if (pyOkFlag) {
-                                        val pyData = py0["result"] as? Map<String, Any?>
-                                        if (pyData != null) {
-                                            val pyStats = pyData["stats"] as? Map<String, Any?>
-                                            val pyWords = (pyStats?.get("words") as? Number)?.toInt() ?: 0
-                                            val pyFe = (pyStats?.get("fe") as? Number)?.toInt() ?: 0
-                                            val pyNc = (pyStats?.get("nc") as? Number)?.toInt() ?: 0
-                                            val pyChars = (pyStats?.get("chars") as? Number)?.toInt() ?: 0
-                                            val pyPages = (pyData["pages"] as? Number)?.toInt() ?: res.pages
-                                            val resMap = mapOf(
-                                                "name" to dName, "ext" to ".pdf",
-                                                "stats" to mapOf("words" to pyWords, "fe" to pyFe, "nc" to pyNc, "chars" to pyChars),
-                                                "meta" to emptyMap<String, Any?>(),
-                                                "pages" to pyPages
-                                            )
-                                            val fr = toFileResult(resMap, f.absolutePath)
-                                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_py", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-                                            pyOk = true
-                                            Log.d("WordCount", "Python后备成功: $dName words=$pyWords chars=$pyChars pages=$pyPages")
+
+                            if (shouldTryPython) {
+                                try {
+                                    Log.d("WordCount", "PDF 尝试Python后备: $dName")
+                                    val pyResults = PythonEngine.countFiles(context, listOf(f.absolutePath))
+                                    @Suppress("UNCHECKED_CAST")
+                                    val pyList = pyResults as? List<Map<String, Any?>>
+                                    if (!pyList.isNullOrEmpty()) {
+                                        val py0 = pyList[0]
+                                        val pyOkFlag = py0["ok"] as? Boolean ?: false
+                                        if (pyOkFlag) {
+                                            val pyData = py0["result"] as? Map<String, Any?>
+                                            if (pyData != null) {
+                                                val pyStats = pyData["stats"] as? Map<String, Any?>
+                                                val pyWords = (pyStats?.get("words") as? Number)?.toInt() ?: 0
+                                                val pyFe = (pyStats?.get("fe") as? Number)?.toInt() ?: 0
+                                                val pyNc = (pyStats?.get("nc") as? Number)?.toInt() ?: 0
+                                                val pyChars = (pyStats?.get("chars") as? Number)?.toInt() ?: 0
+                                                val pyPages = (pyData["pages"] as? Number)?.toInt() ?: res.pages
+                                                val resMap = mapOf(
+                                                    "name" to dName, "ext" to ".pdf",
+                                                    "stats" to mapOf("words" to pyWords, "fe" to pyFe, "nc" to pyNc, "chars" to pyChars),
+                                                    "meta" to emptyMap<String, Any?>(),
+                                                    "pages" to pyPages
+                                                )
+                                                val fr = toFileResult(resMap, f.absolutePath)
+                                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_py", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                                                pyOk = true
+                                                Log.d("WordCount", "PDF Python后备成功: $dName words=$pyWords chars=$pyChars pages=$pyPages")
+                                            }
                                         }
                                     }
+                                } catch (e: Throwable) {
+                                    Log.w("WordCount", "PDF Python后备异常 $dName: ${e.javaClass.simpleName}: ${e.message}")
                                 }
-                            } catch (e: Throwable) {
-                                Log.w("WordCount", "PDF Python后备异常 $dName: ${e.javaClass.simpleName}: ${e.message}")
                             }
+
                             if (!pyOk) {
-                                // v1.0.32关键修复：有文本则降级使用，不报错
-                                if (res.text.isNotBlank()) {
-                                    Log.w("WordCount", "PDF OCR+Python均失败，降级使用提取文本: $dName (${stats.first}words/${stats.fourth}chars)")
+                                // Python也失败(或未尝试) → 最终判断
+                                if (looksLikeGarbage) {
+                                    // ★ 绝不显示垃圾数字！显示明确错误
+                                    Log.e("WordCount", "PDF 显示错误(垃圾文本被拦截): $dName extracted=${stats.first}w/${stats.fourth}c cjkRatio=%.2f".format(cjkRatio))
+                                    entries.add(FileEntry(
+                                        id = "e${System.currentTimeMillis()}_${i}_pdf_err",
+                                        displayName = dName,
+                                        cachePath = f.absolutePath,
+                                        error = "此 PDF 为扫描件/图片型文件，OCR 引擎不可用（设备可能缺少 Google Play 服务支持）。无法准确统计字数。"
+                                    ))
+                                } else if (res.text.isBlank()) {
+                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = dName, cachePath = f.absolutePath, error = "无法从该 PDF 提取文字（可能为纯图片扫描件或加密文件）"))
+                                } else {
+                                    // 文本不像是垃圾 → 降级使用提取结果（至少不是乱码）
+                                    Log.w("WordCount", "PDF 降级使用提取文本: $dName (${stats.first}w/${stats.fourth}c)")
                                     val resMap = mapOf(
                                         "name" to dName, "ext" to ".pdf",
                                         "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
@@ -796,27 +822,8 @@ private fun addFiles(
                                     )
                                     val fr = toFileResult(resMap, f.absolutePath)
                                     entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_fallback", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-                                } else {
-                                    entries.add(FileEntry(
-                                        id = "e${System.currentTimeMillis()}_${i}_pdf_err",
-                                        displayName = dName,
-                                        cachePath = f.absolutePath,
-                                        error = "此 PDF 无法识别（扫描件/图片 PDF 需要 OCR 引擎，请确认设备已安装 Google Play 服务）"
-                                    ))
                                 }
                             }
-                        } else if (res.text.isBlank()) {
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = dName, cachePath = f.absolutePath, error = "无法从该 PDF 提取文字（可能为纯图片扫描件或加密文件）"))
-                        } else {
-                            // 文本可靠(或不需要OCR且有文本) → 直接使用 Kotlin 提取结果
-                            val resMap = mapOf(
-                                "name" to dName, "ext" to ".pdf",
-                                "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
-                                "meta" to emptyMap<String, Any?>(),
-                                "pages" to res.pages
-                            )
-                            val fr = toFileResult(resMap, f.absolutePath)
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                         }
                     } catch (e: Throwable) {
                         Log.w("WordCount", "PDF 解析失败 ${f.name}: ${e.message}")
