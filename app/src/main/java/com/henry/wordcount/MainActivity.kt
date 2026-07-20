@@ -67,7 +67,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import android.graphics.Bitmap
+import android.graphics.pdf.PdfRenderer
+import android.os.ParcelFileDescriptor
 import java.io.File
+import java.io.FileOutputStream
 
 class MainActivity : ComponentActivity() {
     /** 外部可通过此引用向已有列表追加新文件（onNewIntent 时使用） */
@@ -498,12 +502,27 @@ private fun looksLikeRealFilename(s: String): Boolean {
 
 /**
  * 获取 URI 对应的显示文件名。
- * v1.0.34 重写：移除 looksLikeRealFilename 过滤器（它在用户设备上导致所有策略失败并回退到 hash）。
- * 策略优先级：ContentResolver > DocumentFile > URI路径提取 > 友好名兜底。
+ * v1.0.35 重写：所有策略结果必须通过 looksLikeHash() 检测，
+ * 某些 ROM 的 ContentResolver / DocumentFile 返回内部 ID（如 9e20f478899dc29...），
+ * 必须拦截并降级为友好名称。
  */
 private fun resolveDisplayName(context: android.content.Context, uri: Uri): String {
+    // 辅助函数：检测字符串是否像 hash/UUID/内部 ID
+    fun looksLikeHash(s: String): Boolean {
+        val t = s.trim()
+        if (t.length < 8) return false
+        // 纯 hex 字符串（长度>=16，典型 UUID/hash）
+        if (t.matches(Regex("^[a-fA-F0-9]{16,}$"))) return true
+        if (t.matches(Regex("^[a-fA-F0-9]{8}-([a-fA-F0-9]{4}-){3}[a-fA-F0-9]{12}$"))) return true
+        // wc_ 或 file_ 前缀 + 长数字（临时文件名模式）
+        if (t.matches(Regex("^(wc_|file_)[0-9a-f]{10,}"))) return true
+        // 以数字和少量字母为主的长字符串（内部 ID 特征）：字母+数字混合，长度>20，无中文/无常见扩展名
+        if (t.length > 20 && !t.contains(".") && !t.any { it.code in 0x4E00..0x9FFF } &&
+            t.count { it.isLetterOrDigit() } > t.length * 0.9) return true
+        return false
+    }
+
     // 策略1（最可靠）: ContentResolver 查询 OpenableColumns.DISPLAY_NAME
-    // 使用明确的列投影（避免 null 投影在某些 ROM 上返回空 cursor）
     try {
         context.contentResolver.query(
             uri,
@@ -512,42 +531,46 @@ private fun resolveDisplayName(context: android.content.Context, uri: Uri): Stri
         )?.use { cursor ->
             if (cursor.moveToFirst() && cursor.columnCount > 0) {
                 val name = cursor.getString(0)
-                if (!name.isNullOrBlank()) {
-                    Log.d("WordCount", "resolveDisplayName s1(ContentResolver): '$name'")
+                if (!name.isNullOrBlank() && !looksLikeHash(name)) {
+                    Log.d("WordCount", "resolveDisplayName s1(ContentResolver OK): '$name'")
                     return name.trim()
                 }
+                Log.d("WordCount", "resolveDisplayName s1 被hash拦截: '$name'")
             }
         }
     } catch (_: Throwable) {}
 
     // 策略2: DocumentFile.fromSingleUri
     androidx.documentfile.provider.DocumentFile.fromSingleUri(context, uri)?.name?.let { name ->
-        if (name.isNotBlank()) {
-            Log.d("WordCount", "resolveDisplayName s2(DocumentFile): '$name'")
+        if (name.isNotBlank() && !looksLikeHash(name)) {
+            Log.d("WordCount", "resolveDisplayName s2(DocumentFile OK): '$name'")
             return name.trim()
         }
+        Log.d("WordCount", "resolveDisplayName s2 被hash拦截/空: '$name'")
     }
 
-    // 策略3: 从 URI path 提取文件名
-    // SAF 格式: content://.../document/primary%3Apath%2Fto%2Ffile.pdf
+    // 策略3: 从 URI path 提取文件名（SAF 编码路径解码）
     uri.lastPathSegment?.let { seg ->
         try {
             val decoded = java.net.URLDecoder.decode(seg, "UTF-8")
-            // SAF 路径通常编码为 "primary:Download/file.pdf" 或类似格式
             var extracted = decoded.substringAfterLast('/')
                 .substringAfterLast('\\')
                 .substringAfterLast(':')
-            if (extracted.isNotBlank() && extracted.length < 250) {
-                Log.d("WordCount", "resolveDisplayName s3(URI path): '$extracted'")
+            // 去掉 SAF document ID 前缀（如 "primary:"）
+            extracted = extracted.removePrefix("primary:")
+                .removePrefix("home:")
+                .removePrefix("document:")
+            if (extracted.isNotBlank() && extracted.length < 250 && !looksLikeHash(extracted)) {
+                Log.d("WordCount", "resolveDisplayName s3(URI path OK): '$extracted'")
                 return extracted.trim()
             }
         } catch (_: Throwable) {}
     }
 
-    // 兜底：基于时间戳的友好名称（带扩展名）
+    // 兜底：基于时间戳的友好名称（绝不显示 hash）
     val ext = guessExt(context, uri).let { if (it.isNotBlank()) ".$it" else "" }
     val friendly = "文件${System.currentTimeMillis()}$ext"
-    Log.w("WordCount", "resolveDisplayName 全部策略失败，使用兜底名称: '$friendly' (uri=$uri)")
+    Log.w("WordCount", "resolveDisplayName 全部策略失败/被hash拦截 → 兜底: '$friendly' (uri=$uri)")
     return friendly
 }
 
@@ -574,6 +597,68 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFi
         }
     }
     return CachedFile(out, originalName)
+}
+
+/**
+ * v1.0.35 新增：将 PDF 每页渲染为 PNG 图片文件。
+ * 用途：当 ML Kit OCR 不可用时，把 PDF 页面交给 Python RapidOCR（图片 OCR）识别。
+ *
+ * 使用 Android 系统 PdfRenderer（minSdk 26 已满足，无需额外依赖），
+ * 与 PdfOcrEngine 共用同一渲染机制，区别在于输出到文件而非 Bitmap→MLKit。
+ *
+ * @return 渲染出的 PNG 文件列表（可能为空）；调用方负责事后清理临时文件
+ */
+private fun renderPdfPagesToPngs(pdfFile: File): List<File> {
+    val pngs = mutableListOf<File>()
+    val pfd = try {
+        ParcelFileDescriptor.open(pdfFile, ParcelFileDescriptor.MODE_READ_ONLY)
+    } catch (e: Throwable) {
+        Log.w("WordCount", "renderPdfPagesToPngs 打开失败: ${e.message}")
+        return emptyList()
+    }
+    val renderer = try {
+        PdfRenderer(pfd)
+    } catch (e: Throwable) {
+        Log.w("WordCount", "renderPdfPagesToPngs 创建 Renderer 失败: ${e.message}")
+        runCatching { pfd.close() }
+        return emptyList()
+    }
+    try {
+        val pageCount = renderer.pageCount
+        val limit = minOf(pageCount, 40) // 最多 40 页，避免 OOM
+        val tmpDir = pdfFile.parentFile ?: File(System.getProperty("java.io.tmpdir"))
+        for (i in 0 until limit) {
+            val page = try { renderer.openPage(i) } catch (_: Throwable) { continue }
+            try {
+                val w = page.width; val h = page.height
+                if (w <= 0 || h <= 0) continue
+                // 2.0x 缩放（与 Python 端 fitz.Matrix(2.5,2.5) 接近，兼顾速度和识别率）
+                val scale = minOf(2048f / maxOf(w, h), 2f).coerceAtLeast(1f)
+                val bw = maxOf(1, (w * scale).toInt())
+                val bh = maxOf(1, (h * scale).toInt())
+                val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { continue }
+                try {
+                    page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    val pngFile = File(tmpDir, "pdf_ocr_${pdfFile.nameWithoutExtension}_p${i + 1}.png")
+                    FileOutputStream(pngFile).use { out ->
+                        bmp.compress(Bitmap.CompressFormat.PNG, 90, out)
+                    }
+                    pngs.add(pngFile)
+                } finally {
+                    bmp.recycle()
+                }
+            } finally {
+                page.close()
+            }
+        }
+        Log.d("WordCount", "renderPdfPagesToPngs: ${pdfFile.name} → ${pngs.size}/$limit 页")
+    } catch (e: Throwable) {
+        Log.w("WordCount", "renderPdfPagesToPngs 异常: ${e.message}")
+    } finally {
+        runCatching { renderer.close() }
+        runCatching { pfd.close() }
+    }
+    return pngs
 }
 
 /** 用 magic bytes 检测文件真实格式（用于 content URI 无扩展名时兜底）。 */
@@ -744,16 +829,14 @@ private fun addFiles(
                             val fr = toFileResult(resMap, f.absolutePath)
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                         } else {
-                            // ★ OCR 失败（ML Kit 在此设备不可用）→ 根据文本质量决定后续
-                            Log.w("WordCount", "PDF OCR失败: $dName (reliable=${res.reliable}, looksGarbage=$looksLikeGarbage, words=${stats.first}, chars=${stats.fourth})")
+                            // ★ ML Kit OCR 失败 → 多级后备策略
+                            Log.w("WordCount", "PDF ML Kit OCR失败: $dName (reliable=${res.reliable}, looksGarbage=$looksLikeGarbage, words=${stats.first}, chars=${stats.fourth})")
 
-                            // 当文本看起来像垃圾(无CJK且少字符) 或 文本标记为不可靠时 → 尝试Python后备
-                            val shouldTryPython = looksLikeGarbage || (needOcrPref && !res.reliable)
-                            var pyOk = false
+                            var finalOk = false
 
-                            if (shouldTryPython) {
+                            // ── 后备 1：Python 直接处理 PDF（pdfminer 文字提取，可能对文字型 PDF 有效）──
+                            if (!finalOk) {
                                 try {
-                                    Log.d("WordCount", "PDF 尝试Python后备: $dName")
                                     val pyResults = PythonEngine.countFiles(context, listOf(f.absolutePath))
                                     @Suppress("UNCHECKED_CAST")
                                     val pyList = pyResults as? List<Map<String, Any?>>
@@ -769,39 +852,99 @@ private fun addFiles(
                                                 val pyNc = (pyStats?.get("nc") as? Number)?.toInt() ?: 0
                                                 val pyChars = (pyStats?.get("chars") as? Number)?.toInt() ?: 0
                                                 val pyPages = (pyData["pages"] as? Number)?.toInt() ?: res.pages
-                                                val resMap = mapOf(
-                                                    "name" to dName, "ext" to ".pdf",
-                                                    "stats" to mapOf("words" to pyWords, "fe" to pyFe, "nc" to pyNc, "chars" to pyChars),
-                                                    "meta" to emptyMap<String, Any?>(),
-                                                    "pages" to pyPages
-                                                )
-                                                val fr = toFileResult(resMap, f.absolutePath)
-                                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_py", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-                                                pyOk = true
-                                                Log.d("WordCount", "PDF Python后备成功: $dName words=$pyWords chars=$pyChars pages=$pyPages")
+                                                // 只有当 Python 返回了实质内容（非零字数或比 Kotlin 提取更好）才采用
+                                                if (pyWords > 0 || pyFe > 0 || (pyChars > 0 && pyChars != stats.fourth)) {
+                                                    val resMap = mapOf(
+                                                        "name" to dName, "ext" to ".pdf",
+                                                        "stats" to mapOf("words" to pyWords, "fe" to pyFe, "nc" to pyNc, "chars" to pyChars),
+                                                        "meta" to emptyMap<String, Any?>(),
+                                                        "pages" to pyPages
+                                                    )
+                                                    val fr = toFileResult(resMap, f.absolutePath)
+                                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_py", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                                                    finalOk = true
+                                                    Log.d("WordCount", "PDF Python直接后备成功: $dName words=$pyWords chars=$pyChars")
+                                                }
                                             }
                                         }
                                     }
                                 } catch (e: Throwable) {
-                                    Log.w("WordCount", "PDF Python后备异常 $dName: ${e.javaClass.simpleName}: ${e.message}")
+                                    Log.w("WordCount", "PDF Python直接后备异常: ${e.javaClass.simpleName}: ${e.message}")
                                 }
                             }
 
-                            if (!pyOk) {
-                                // Python也失败(或未尝试) → 最终判断
+                            // ── 后备 2（v1.0.35 核心）：PdfRenderer 渲染页面为 PNG → Python RapidOCR 图片识别 ──
+                            // 适用场景：图片型 PDF / 扫描件（looksLikeGarbage=true）且 Python 直接处理无效
+                            // 原理：PdfRenderer(系统API)肯定能渲染 + RapidOCR(图片OCR)已验证可用 = 绕过 ML Kit 和 fitz
+                            if (!finalOk && looksLikeGarbage) {
+                                try {
+                                    Log.d("WordCount", "PDF 尝试 PdfRenderer+RapidOCR 后备: $dName")
+                                    val pngFiles = renderPdfPagesToPngs(f)
+                                    if (pngFiles.isNotEmpty()) {
+                                        val pngPaths = pngFiles.map { it.absolutePath }
+                                        val ocrResults = PythonEngine.countFiles(context, pngPaths)
+                                        @Suppress("UNCHECKED_CAST")
+                                        val ocrList = ocrResults as? List<Map<String, Any?>>
+                                        if (!ocrList.isNullOrEmpty()) {
+                                            // 累加所有页面的 OCR 字数
+                                            var totalWords = 0; var totalFe = 0; var totalNc = 0; var totalChars = 0
+                                            var ocrPageCount = 0
+                                            for (item in ocrList) {
+                                                val itemOk = item["ok"] as? Boolean ?: false
+                                                if (itemOk) {
+                                                    val itemData = item["result"] as? Map<String, Any?>
+                                                    if (itemData != null) {
+                                                        val itemStats = itemData["stats"] as? Map<String, Any?>
+                                                        totalWords += (itemStats?.get("words") as? Number)?.toInt() ?: 0
+                                                        totalFe += (itemStats?.get("fe") as? Number)?.toInt() ?: 0
+                                                        totalNc += (itemStats?.get("nc") as? Number)?.toInt() ?: 0
+                                                        totalChars += (itemStats?.get("chars") as? Number)?.toInt() ?: 0
+                                                        ocrPageCount++
+                                                    }
+                                                }
+                                            }
+                                            // 清理临时 PNG
+                                            for (png in pngFiles) { runCatching { png.delete() } }
+
+                                            if (totalWords > 0 || totalFe > 0 || totalChars > 0) {
+                                                val resMap = mapOf(
+                                                    "name" to dName, "ext" to ".pdf",
+                                                    "stats" to mapOf("words" to totalWords, "fe" to totalFe, "nc" to totalNc, "chars" to totalChars),
+                                                    "meta" to emptyMap<String, Any?>(),
+                                                    "pages" to pngFiles.size  // 实际渲染的页数
+                                                )
+                                                val fr = toFileResult(resMap, f.absolutePath)
+                                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_ocr", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                                                finalOk = true
+                                                Log.d("WordCount", "PDF PdfRenderer+RapidOCR 成功: $dName words=$totalWords fe=$totalFe chars=$totalChars (${pngFiles.size}页)")
+                                            } else {
+                                                Log.w("WordCount", "PDF PdfRenderer+RapidOCR 返回空结果: $dName (${pngFiles.size}页均未识别到文字)")
+                                            }
+                                        } else {
+                                            // 清理临时 PNG
+                                            for (png in pngFiles) { runCatching { png.delete() } }
+                                        }
+                                    }
+                                } catch (e: Throwable) {
+                                    Log.w("WordCount", "PDF PdfRenderer+RapidOCR 异常 $dName: ${e.javaClass.simpleName}: ${e.message}")
+                                }
+                            }
+
+                            // ── 最终判断 ──
+                            if (!finalOk) {
                                 if (looksLikeGarbage) {
-                                    // ★ 绝不显示垃圾数字！显示明确错误
-                                    Log.e("WordCount", "PDF 显示错误(垃圾文本被拦截): $dName extracted=${stats.first}w/${stats.fourth}c cjkRatio=%.2f".format(cjkRatio))
+                                    // 所有 OCR 路径都失败且文本是垃圾 → 明确错误（但不再提及 Play 服务，因为已用 RapidOCR 替代）
+                                    Log.e("WordCount", "PDF 全部OCR路径失败(垃圾拦截): $dName extracted=${stats.first}w/${stats.fourth}c cjkRatio=%.2f".format(cjkRatio))
                                     entries.add(FileEntry(
                                         id = "e${System.currentTimeMillis()}_${i}_pdf_err",
                                         displayName = dName,
                                         cachePath = f.absolutePath,
-                                        error = "此 PDF 为扫描件/图片型文件，OCR 引擎不可用（设备可能缺少 Google Play 服务支持）。无法准确统计字数。"
+                                        error = "此 PDF 为扫描件/图片型文件，OCR 引擎无法识别。"
                                     ))
                                 } else if (res.text.isBlank()) {
                                     entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = dName, cachePath = f.absolutePath, error = "无法从该 PDF 提取文字（可能为纯图片扫描件或加密文件）"))
                                 } else {
-                                    // 文本不像是垃圾 → 降级使用提取结果（至少不是乱码）
+                                    // 文本不像垃圾 → 降级使用 Kotlin 提取结果
                                     Log.w("WordCount", "PDF 降级使用提取文本: $dName (${stats.first}w/${stats.fourth}c)")
                                     val resMap = mapOf(
                                         "name" to dName, "ext" to ".pdf",
