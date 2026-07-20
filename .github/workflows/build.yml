@@ -62,8 +62,15 @@ jobs:
             echo "BUILD OK"
           else
             # 将构建错误摘要作为 GitHub annotation 输出（便于在 run 页面/摘要中直接看到失败原因）
-            ERR=$(tail -n 50 build.log | tr '\n' ' ' | head -c 4000)
+            ERR=$(tail -n 80 build.log | tr '\n' ' ' | head -c 6000)
             echo "::error::BUILD FAILED: $ERR"
+            # v1.0.36 诊断：将 build.log 尾部 POST 到 commit comment（匿名可读，无需 admin 权限）
+            LOG_TAIL=$(tail -n 120 build.log)
+            curl -s -X POST \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/18106322872/WordCountAndroid/commits/${{ github.sha }}/comments" \
+              -d "{\"body\": \"## 🧪 CI Build Diagnostics (v1.0.36)\\n\\`\`\`\\n${LOG_TAIL}\\n\`\`\`\"}" || true
             exit 1
           fi
 
