@@ -32,6 +32,9 @@ object PdfExtractor {
 
     data class PdfResult(val text: String, val pages: Int, val reliable: Boolean = true)
 
+    /** 标记文本是否来自路径B（原始字节扫描）—— 路径B内容永远不可靠 */
+    data class TextSource(val text: String, val fromRawScan: Boolean)
+
     /** 单个 PDF 文件大小上限（50MB） */
     private const val MAX_FILE_SIZE = 50 * 1024 * 1024
 
@@ -86,11 +89,13 @@ object PdfExtractor {
             val pages = countPagesSafe(bytes, deadline)
             if (System.currentTimeMillis() > deadline) return PdfResult("", max(1, pages), false)
 
-            val text = extractTextRobust(bytes, deadline)
-            // v1.0.27: 判断文本可靠性——如果走了路径B（原始字符串扫描）或
-            // 清洗后文本含大量 PDF 结构残留，标记为不可靠（应尝试 OCR）
-            val reliable = isTextReliable(text, bytes)
-            PdfResult(text.ifBlank { "" }, max(1, pages), reliable)
+            val source = extractTextRobust(bytes, deadline)
+            // v1.0.29: 判断文本可靠性——
+            //   1) 路径B(原始字节扫描) → 永远不可靠（PDF二进制中的ASCII片段不是真正的文字内容）
+            //   2) 走了路径A但含大量PDF结构残留 → 不可靠
+            //   3) 空文本 → 不可靠
+            val reliable = !source.fromRawScan && isTextReliable(source.text, bytes)
+            PdfResult(source.text.ifBlank { "" }, max(1, pages), reliable)
         } catch (_: Throwable) {
             // 任何异常都降级为空结果
             PdfResult("", 1, false)
@@ -125,23 +130,48 @@ object PdfExtractor {
     }
 
     // ───────────────────────── 页数（安全版） ─────────────────────────
+    /**
+     * v1.0.29 改进：多种策略依次尝试，兼容线性化PDF、压缩对象流等非常规结构。
+     *
+     * 策略优先级：
+     *   1) 直接计数 /Type/Page 叶节点（标准 PDF）
+     *   2) 从 /Type/Pages 父节点的 /Count 字段读取（线性化/交叉引用流）
+     *   3) 回退到 1
+     */
     private fun countPagesSafe(bytes: ByteArray, deadline: Long): Int {
         return try {
             if (System.currentTimeMillis() > deadline) return 1
             val scanLen = min(bytes.size, SCAN_CAP)
             val s = String(bytes, 0, scanLen, StandardCharsets.ISO_8859_1)
+
+            // 策略1：直接 /Type/Page（排除 /Pages）
             val leaf = """/Type\s*/\s*Page(?![sS])""".toRegex().findAll(s).count()
-            if (leaf > 0) leaf
-            else {
-                val any = """/Type\s*/\s*Page""".toRegex().findAll(s).count()
-                max(1, any / 2)
+            if (leaf > 0) return leaf
+
+            // 策略2：从 /Type/Pages 的 /Count N 提取
+            val pagesCountMatch = """/Type\s*/\s*Pages[^>]*?/Count\s+(\d+)""".toRegex(RegexOption.DOT_MATCHES_ALL).find(s)
+            if (pagesCountMatch != null) {
+                val c = pagesCountMatch.groupValues[1].toIntOrNull()
+                if (c != null && c > 0) return c
             }
+
+            // 策略3：宽松匹配 /Count（在任意 Pages 对象上下文中）
+            val countMatches = """/Count\s+(\d+)""".toRegex().findAll(s).mapNotNull { it.groupValues[1].toIntOrNull() }.filter { it > 0 }
+            if (countMatches.any()) return countMatches.max()
+
+            // 策略4：回退
+            1
         } catch (_: Throwable) { 1 }
     }
 
     // ───────────────────────── 文本提取（鲁棒版） ─────────────────────────
-    private fun extractTextRobust(bytes: ByteArray, deadline: Long): String {
+    /**
+     * @return TextSource(提取文本, 是否来自路径B原始扫描)
+     *         路径A=标准流解析(较可靠), 路径B=原始字节扫描(永远不可靠)
+     */
+    private fun extractTextRobust(bytes: ByteArray, deadline: Long): TextSource {
         val sb = StringBuilder()
+        var usedRawScan = false
 
         // 路径 A：标准流解析（带严格限制）
         try {
@@ -182,14 +212,15 @@ object PdfExtractor {
 
                 if (textCount > 0 && System.currentTimeMillis() <= deadline) {
                     val cleaned = cleanExtractedText(sb.toString())
-                    if (cleaned.isNotBlank()) return cleaned
+                    if (cleaned.isNotBlank()) return TextSource(cleaned, false)
                 }
             }
         } catch (_: Throwable) { }
 
         // 路径 B：备用——直接从原始字节扫描可读字符串
-        if (System.currentTimeMillis() > deadline) return sb.toString()
-        return extractRawReadableStrings(bytes, deadline)
+        if (System.currentTimeMillis() > deadline) return TextSource(sb.toString(), false)
+        usedRawScan = true
+        return TextSource(extractRawReadableStrings(bytes, deadline), true)
     }
 
     /**

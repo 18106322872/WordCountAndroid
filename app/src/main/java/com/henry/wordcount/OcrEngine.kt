@@ -59,15 +59,16 @@ object OcrEngine {
 
     /**
      * 识别 Bitmap 中的文字（供 PDF 渲染后逐页识别复用）。
+     * @param skipPostFilter 是否跳过后处理（PDF OCR 场景设为 true，保留全部识别结果包括中文）
      * @return 识别到的文字；失败或空图返回空串。
      */
-    fun recognizeBitmap(bitmap: android.graphics.Bitmap): String {
+    fun recognizeBitmap(bitmap: android.graphics.Bitmap, skipPostFilter: Boolean = false): String {
         if (!ocrEnabled) return ""
         return try {
             val image = InputImage.fromBitmap(bitmap, 0)
             val raw = tryRecognize(image, 20)
             if (raw.isBlank()) return ""
-            postFilter(raw)
+            if (skipPostFilter) raw else postFilter(raw)
         } catch (e: Throwable) {
             Log.w("WordCount", "OCR(Bitmap) 失败: ${e.javaClass.simpleName}: ${e.message}")
             ocrFailed = true

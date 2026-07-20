@@ -69,7 +69,7 @@ object PdfOcrEngine {
                     }
                     try {
                         page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                        val t = OcrEngine.recognizeBitmap(bmp)
+                        val t = OcrEngine.recognizeBitmap(bmp, skipPostFilter = true)
                         if (t.isNotBlank()) sb.append(t).append('\n')
                     } finally {
                         bmp.recycle()
