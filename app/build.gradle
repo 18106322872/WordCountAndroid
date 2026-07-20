@@ -13,8 +13,8 @@ android {
         // minSdk 26：Apache POI 5.x / log4j 用到 MethodHandle.invoke，D8 要求 Android O(26) 起
         minSdk 26
         targetSdk 34
-        versionCode 30
-        versionName '1.0.30'
+        versionCode 31
+        versionName '1.0.31'
 
         // 只编 arm64-v8a（华为等现代手机），缩小体积、功能零影响
         ndk {
@@ -106,8 +106,9 @@ dependencies {
     // Manifest 层主题(Theme.Material3.DayNight.NoActionBar / colorSurface attr) 由 MDC 提供；
     // Compose 内仍用 androidx.compose.material3 的 MaterialTheme。两者共存、互不冲突。
     implementation 'com.google.android.material:material:1.12.0'
-    // 图片 OCR：Google ML Kit Text Recognition（官方、稳定、支持中文、无 JNI 崩溃）
-    implementation 'com.google.mlkit:text-recognition:16.0.0'
+    // 图片 PDF OCR：Google ML Kit 中文识别器（独立版，自带模型，离线可用，无需 Play 服务动态下发）
+    // 注意：不要再加 com.google.mlkit:text-recognition:16.0.0（Latin 版），该版本已改为 Play Services
+    // 动态下发模型，会与中文版冲突，导致无 Play 服务的设备上模型取不到、OCR 静默返回空。
     implementation 'com.google.mlkit:text-recognition-chinese:16.0.0'
     // 老格式(.doc/.xls/.ppt)解析：Apache POI（Java，安卓原生运行，不依赖 Windows）
     // 仅用 poi + poi-scratchpad（HSSF/HWPF/HSLF），不引入 poi-ooxml，避免安卓缺 javax.xml.stream 的坑

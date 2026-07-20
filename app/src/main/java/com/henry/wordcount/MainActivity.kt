@@ -545,7 +545,7 @@ private fun resolveDisplayName(context: android.content.Context, uri: Uri): Stri
     }
 
     // 全部失败：用策略1的结果（即使不像真名），至少不会比原来更差
-    return fromDocFile.ifNullOrBlank { "file_${System.currentTimeMillis()}" }
+    return if (fromDocFile.isNullOrBlank()) "file_${System.currentTimeMillis()}" else fromDocFile
 }
 
 private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFile {
@@ -745,10 +745,12 @@ private fun addFiles(
                                     if (pyOkFlag) {
                                         val pyData = py0["result"] as? Map<String, Any?>
                                         if (pyData != null) {
-                                            val pyWords = (pyData["words"] as? Number)?.toInt() ?: 0
-                                            val pyFe = (pyData["fe"] as? Number)?.toInt() ?: 0
-                                            val pyNc = (pyData["nc"] as? Number)?.toInt() ?: 0
-                                            val pyChars = (pyData["chars"] as? Number)?.toInt() ?: 0
+                                            // count_file 返回的 words/fe/nc/chars 在 stats 子字典内，pages 在顶层
+                                            val pyStats = pyData["stats"] as? Map<String, Any?>
+                                            val pyWords = (pyStats?.get("words") as? Number)?.toInt() ?: 0
+                                            val pyFe = (pyStats?.get("fe") as? Number)?.toInt() ?: 0
+                                            val pyNc = (pyStats?.get("nc") as? Number)?.toInt() ?: 0
+                                            val pyChars = (pyStats?.get("chars") as? Number)?.toInt() ?: 0
                                             val pyPages = (pyData["pages"] as? Number)?.toInt() ?: res.pages
                                             val resMap = mapOf(
                                                 "name" to dName, "ext" to ".pdf",
