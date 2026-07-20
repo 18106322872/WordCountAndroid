@@ -84,7 +84,7 @@ object OoXmlEngine {
         val explicitBreaks = pageCounter[0]
 
         // 信号 C: 节分隔符（中间 sectPr，非末尾结束标记）
-        val bodyMatchResult = """<w:body>(.*?)</w:body>""".toRegex(RegexOption.DOTALL).find(bodyXml)
+        val bodyMatchResult = """<w:body>(.*?)</w:body>""".toRegex(RegexOption.DOT_MATCHES_ALL).find(bodyXml)
         var separatorSectPr = 0
         if (bodyMatchResult != null) {
             val bodyContent = bodyMatchResult.groupValues[1]
