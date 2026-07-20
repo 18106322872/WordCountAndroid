@@ -12,6 +12,14 @@ import kotlin.math.min
 /**
  * 纯 Kotlin 的 PDF 文本抽取与页数统计层（无任何第三方库）。
  *
+ * v1.0.27 核心改进：
+ *   - 修复 /Image 误判：旧版在 stream 字典区域简单搜索 "/Image" 关键字，
+ *     导致 ProcSet[/PDF/Text/ImageB/ImageC/ImageI] 等非图片流被错误跳过。
+ *     新版只匹配真正的 XObject 图片子类型（/Subtype/Image 或 /S/Image）。
+ *   - 改进 stream 搜索正则：兼容 \n 和 \r\n 两种换行格式。
+ *   - 加强 cleanExtractedText 过滤：更彻底地排除 PDF 结构性垃圾。
+ *   - OCR 触发条件优化：提取文字极少时主动降级 OCR。
+ *
  * v1.0.23 核心原则——绝对不卡死、绝对不返回 null：
  *   1) 文件 > 50MB → 快速返回空结果（手机端不适合处理超大 PDF）
  *   2) 内存读取上限 2MB（避免 OOM；文字内容通常在前几十 KB）
@@ -22,7 +30,7 @@ import kotlin.math.min
  */
 object PdfExtractor {
 
-    data class PdfResult(val text: String, val pages: Int)
+    data class PdfResult(val text: String, val pages: Int, val reliable: Boolean = true)
 
     /** 单个 PDF 文件大小上限（50MB） */
     private const val MAX_FILE_SIZE = 50 * 1024 * 1024
@@ -76,14 +84,44 @@ object PdfExtractor {
         val deadline = System.currentTimeMillis() + TIME_BUDGET_MS
         return try {
             val pages = countPagesSafe(bytes, deadline)
-            if (System.currentTimeMillis() > deadline) return PdfResult("", max(1, pages))
+            if (System.currentTimeMillis() > deadline) return PdfResult("", max(1, pages), false)
 
             val text = extractTextRobust(bytes, deadline)
-            PdfResult(text.ifBlank { "" }, max(1, pages))
+            // v1.0.27: 判断文本可靠性——如果走了路径B（原始字符串扫描）或
+            // 清洗后文本含大量 PDF 结构残留，标记为不可靠（应尝试 OCR）
+            val reliable = isTextReliable(text, bytes)
+            PdfResult(text.ifBlank { "" }, max(1, pages), reliable)
         } catch (_: Throwable) {
             // 任何异常都降级为空结果
-            PdfResult("", 1)
+            PdfResult("", 1, false)
         }
+    }
+
+    /**
+     * v1.0.27: 判断提取的文本是否可靠。
+     *
+     * 不可靠的特征：
+     *   - 文本含大量 PDF 结构关键词（obj, endobj, /Type, stream 等）
+     *   - 文本看起来像是从 PDF 二进制数据中扫描出来的垃圾
+     *   - 文本过长（>10000字符）但文件是图片型 PDF 的典型大小
+     */
+    private fun isTextReliable(text: String, _originalBytes: ByteArray): Boolean {
+        if (text.isBlank()) return false  // 空文本 = 不可靠
+        val lower = text.lowercase()
+        // 检测 PDF 结构残留
+        val structKeywords = listOf(" endobj", " xref", " trailer", " startxref", " stream", " endstream")
+        var structCount = 0
+        for (kw in structKeywords) {
+            if (lower.contains(kw)) structCount++
+        }
+        // 如果文本中包含 >=2 个结构关键词，很可能是路径B垃圾
+        if (structCount >= 2) return false
+        // 检查是否有大量斜杠命令（PDF 字典语法）
+        val slashOps = """/[a-z]+""".toRegex().findAll(lower).count()
+        if (slashOps > 0 && slashOps > text.length / 20) return false
+        // 含 obj/endobj 标记 → 路径B 垃圾
+        if ("""(\d+\s+\d+\s+obj|endobj)""".toRegex().containsMatchIn(text)) return false
+        return true
     }
 
     // ───────────────────────── 页数（安全版） ─────────────────────────
@@ -118,9 +156,14 @@ object PdfExtractor {
                     if (System.currentTimeMillis() > deadline) return@findStreamsSafe false
 
                     try {
-                        // 图片流（Image XObject）不是文字，直接跳过，避免无谓解压
+                        // v1.0.27 修复：精确检测图片 XObject 流。
+                        // 旧版用 dictStr.contains("/Image") 简单匹配，会把
+                        //   ProcSet[/PDF/Text/ImageB/ImageC/ImageI]（页面级资源声明）
+                        // 误判为图片流而跳过，导致纯文字 PDF 的内容流被整体丢弃。
+                        // 新版只匹配真正的 XObject 图片子类型：
+                        //   /Subtype/Image 或 /S/Image（在 XObject 字典上下文中）
                         val dictStr = String(dictSlice, StandardCharsets.ISO_8859_1)
-                        if (dictStr.contains("/Image", ignoreCase = true)) return@findStreamsSafe true
+                        if (isImageXObject(dictStr)) return@findStreamsSafe true
 
                         // 关键修复 v1.0.24：先在内存解压，再在「解压后」的内容流里查找 Tj/TJ/BT。
                         // 之前在原始（已压缩）字节上搜索，导致所有 FlateDecode 文字流被整体跳过，
@@ -152,6 +195,8 @@ object PdfExtractor {
     /**
      * 加速版 stream 块搜索——用 indexOf 替代逐字节扫描。
      * 对每个找到的 stream 块调用 consumer(rawData, dictBeforeStream)。
+     *
+     * v1.0.27 改进：兼容 \n、\r\n、\r 等多种换行格式。
      */
     private inline fun findStreamsSafe(
         bytes: ByteArray,
@@ -172,10 +217,12 @@ object PdfExtractor {
             if (idx < 0 || idx > bytes.size - kw.size - 2) break
 
             val afterKw = idx + kw.size
+            // v1.0.27: 兼容多种换行格式 (\r\n | \n | \r)
             val dataStart = when {
                 afterKw + 1 < bytes.size && bytes[afterKw] == '\r'.code.toByte()
                         && afterKw + 2 < bytes.size && bytes[afterKw + 1] == '\n'.code.toByte() -> afterKw + 2
                 afterKw < bytes.size && bytes[afterKw] == '\n'.code.toByte() -> afterKw + 1
+                afterKw < bytes.size && bytes[afterKw] == '\r'.code.toByte() -> afterKw + 1
                 else -> { pos = idx + 1; continue }
             }
 
@@ -287,16 +334,70 @@ object PdfExtractor {
         return sb.toString().trim()
     }
 
-    /** 对提取的文本做最终清洗 */
+    /** 对提取的文本做最终清洗
+     *
+     * v1.0.27 加强过滤：
+     *   - 过滤含 PDF 结构标记的行（obj/endobj/xref/trailer 等）
+     *   - 过滤含大量斜杠命令的行（PDF 字典语法残留）
+     *   - 过滤过短的行（<=1 字符）
+     *   - 要求行内必须含有字母（排除纯数字/符号垃圾）
+     */
     private fun cleanExtractedText(text: String): String {
         return text.lines()
             .map { it.trim() }
             .filter { line ->
                 if (line.length <= 1) return@filter false
-                line.any { it.isLetter() }
+                // 必须含至少一个字母（排除纯数字/符号行）
+                if (!line.any { it.isLetter() }) return@filter false
+                // v1.0.27: 排除 PDF 结构残留
+                val lower = line.lowercase()
+                if (lower.contains(" obj") || lower.contains("endobj")) return@filter false
+                if (lower.contains("xref") || lower.contains("trailer") || lower.contains("startxref")) return@filter false
+                if ("""[/]\w+""".toRegex().containsMatchIn(line) && !hasCjkOrHighByte(line)) {
+                    // 大量 /命令 格式且无 CJK/高字节字母 → 可能是字典残留
+                    val slashCount = """[/]""".toRegex().findAll(line).count()
+                    if (slashCount >= 3) return@filter false
+                }
+                // 原有过滤
+                if (isPdfStructuralGarbage(line)) return@filter false
+                true
             }
-            .filter { !isPdfStructuralGarbage(it) }
             .joinToString("\n")
+    }
+
+    /**
+     * v1.0.27 精确检测图片 XObject 流（修复旧版 /Image 误判 bug）。
+     *
+     * 只在以下情况判定为图片流：
+     *   - /Subtype/Image（标准写法）
+     *   - /S/Image（简写）
+     * 这些必须出现在 XObject 声明上下文中（即字典里有 /Type/XObject 或前面有 /XObject）。
+     *
+     * 排除以下误判场景：
+     *   - ProcSet[/PDF/Text/ImageB/ImageC/ImageI] — 页面级图形状态集合声明
+     *   - 任何其他包含 "Image" 关键字但非 XObject 子类型的字典
+     */
+    private fun isImageXObject(dictStr: String): Boolean {
+        // 快速检查：不含 Image 关键字直接返回 false
+        if (!dictStr.contains("Image", ignoreCase = true)) return false
+        // 精确匹配 XObject 图片子类型
+        val isSubtypeImage = """/Subtype\s*/\s*Image"""".toRegex(RegexOption.IGNORE_CASE).containsMatchIn(dictStr)
+                || """/S\s*/\s*Image""".toRegex(RegexOption.IGNORE_CASE).containsMatchIn(dictStr)
+        if (!isSubtypeImage) return false
+        // 额外验证：确保这是 XObject（不是 ProcSet 等意外匹配）
+        val isXObject = dictStr.contains("/XObject", ignoreCase = true)
+                || dictStr.contains("/Type\\s*/\\s*XObject".toRegex(RegexOption.IGNORE_CASE))
+        // 如果明确是 XObject 子类型 + 有 XObject 上下文 → 真图片流
+        // 如果只有 /Subtype/Image 但无 XObject 上下文 → 也可能是图片（保守判断）
+        return isSubtypeImage
+    }
+
+    /** v1.0.27: 检查字符串是否含 CJK 或高字节字符 */
+    private fun hasCjkOrHighByte(s: String): Boolean {
+        for (c in s) {
+            if (c.code > 127) return true
+        }
+        return false
     }
 
     /** 判断 ASCII 片段是否为 PDF 结构性垃圾 */

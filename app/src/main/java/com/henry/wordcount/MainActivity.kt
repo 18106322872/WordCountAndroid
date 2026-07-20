@@ -633,8 +633,14 @@ private fun addFiles(
                     try {
                         val res = PdfExtractor.extract(f)  // 永不返回 null
                         val stats = countTextKotlin(res.text)
-                        // v1.0.24：文字层不可读（扫描件 / 无 ToUnicode 的 CID 字体）→ 改用 PDF 渲染 + OCR
-                        val ocrRes = if (res.text.isBlank() || (stats.second == 0 && stats.first < 10)) {
+                        // v1.0.27: OCR 触发条件优化——
+                        //   1) 文本为空 → OCR
+                        //   2) 文本极少（<10字）且无中文 → 可能是乱码 → OCR
+                        //   3) PdfExtractor 标记文本不可靠（路径B垃圾/结构残留）→ OCR
+                        val ocrRes = if (res.text.isBlank()
+                            || (stats.second == 0 && stats.first < 10)
+                            || !res.reliable
+                        ) {
                             PdfOcrEngine.extractText(f)
                         } else null
                         if (ocrRes != null) {

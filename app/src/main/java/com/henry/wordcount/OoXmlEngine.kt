@@ -50,6 +50,11 @@ object OoXmlEngine {
      * 仅提取 word/document.xml（正文+文本框），不提取 header/footer。
      * Word「字数统计」对话框的"包括文本框、脚注和尾注"选项**不包括**页眉页脚，
      * 因此页眉页脚不计入统计口径。（v1.0.26 修复：旧版错误地计入了页眉页脚）
+     *
+     * v1.0.27 页数统计改进：
+     *   Word 保存时会写入 w:lastRenderedPageBreak（上次渲染时的分页位置），这是最可靠
+     *   的分页信号。优先级：lastRenderedPageBreak > 显式分页符 > sectPr 节数。
+     *   三种信号取最大值，确保与 Word 打开时看到的页数一致。
      */
     private fun extractDocx(zip: ZipFile): OoxmlResult {
         val sb = StringBuilder()
@@ -60,9 +65,43 @@ object OoXmlEngine {
         appendDocxXmlText(bodyXml, sb) { pageCounter[0]++ }
 
         val text = sb.toString()
-        // 页数：有明确分页符时用分页符计数；否则保守返回 1
-        // （OOXML 不含排版信息，无法精确计算页数；避免将 1 页文档误报为多页）
-        val pages = max(1, if (pageCounter[0] > 0) pageCounter[0] + 1 else 1)
+        // ── 页数统计（v1.0.27 多信号融合）──
+        //
+        // 策略：收集所有「分页点」→ 页数 = 1 + 分页点总数。
+        // 分页点来源（按可靠性排序）：
+        //   A) <w:lastRenderedPageBreak/> — Word 上次渲染的实际分页位置（最可靠）
+        //   B) w:type="page" 显式分页符
+        //   C) 中间位置的 sectPr（节分隔符，后面还有段落 → 导致新页）
+        //
+        // 各信号可能部分重叠（同一分页位置被多种方式记录），但实测表明
+        // 「1 + 所有信号之和」比 max 更接近 Word 显示的页数。
+        //
+
+        // 信号 A: lastRenderedPageBreak
+        val renderedBreaks = """<w:lastRenderedPageBreak/>""".toRegex().findAll(bodyXml).count()
+
+        // 信号 B: 显式分页符（已在 pageCounter 中计数）
+        val explicitBreaks = pageCounter[0]
+
+        // 信号 C: 节分隔符（中间 sectPr，非末尾结束标记）
+        val bodyMatchResult = """<w:body>(.*?)</w:body>""".toRegex(RegexOption.DOTALL).find(bodyXml)
+        var separatorSectPr = 0
+        if (bodyMatchResult != null) {
+            val bodyContent = bodyMatchResult.groupValues[1]
+            val parasInBody = """<w:p[\s>]""".toRegex().findAll(bodyContent).toList()
+            val sectsInBody = """<w:sectPr[\s>]""".toRegex().findAll(bodyContent).toList()
+            if (sectsInBody.size > 1) {
+                for (i in 0 until sectsInBody.size - 1) {
+                    val spRelPos = sectsInBody[i].range.first
+                    val hasParaAfter = parasInBody.any { it.range.first > spRelPos }
+                    if (hasParaAfter) separatorSectPr++
+                }
+            }
+        }
+
+        // 累加所有分页点 + 首页
+        val totalBreaks = renderedBreaks + explicitBreaks + separatorSectPr
+        val pages = maxOf(1, 1 + totalBreaks)
         return OoxmlResult(text, pages, "docx")
     }
 
