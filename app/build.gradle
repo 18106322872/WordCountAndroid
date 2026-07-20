@@ -33,13 +33,9 @@ android {
                     install 'python-pptx'
                     install 'ezdxf'
                     install 'olefile'
-                    // v1.0.36: 新增 rapidocr-onnxruntime，用于 PDF 渲染为 PNG 后的图片 OCR（绕过 ML Kit 在部分设备上静默失败的问题）
-                    // 依赖会自动拉取 onnxruntime + opencv-python-headless 的 arm64 wheel
-                    install 'rapidocr-onnxruntime==1.4.1'
                     // 注：pymupdf(fitz) 在 Chaquopy 无 Android wheel，故不引入；
-                    // 引擎已对 fitz 缺失做降级（PDF 文字层/图片OCR/.ai/导出PDF 相应降级）。
-                    // 注：图片 OCR 主路径仍在 Kotlin 层用 Google ML Kit（对直接选入的图片文件）；
-                    //      rapidocr 仅作为 PdfRenderer→PNG 后备链路使用。
+                    // 注：rapidocr-onnxruntime 依赖 onnxruntime（无 Android wheel），Chaquopy 无法安装；
+                    //      PDF 图片型 OCR 当前依赖设备端 ML Kit（PdfOcrEngine），若 ML Kit 不可用则降级报错。
                 }
             }
         }
