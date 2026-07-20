@@ -65,43 +65,45 @@ object OoXmlEngine {
         appendDocxXmlText(bodyXml, sb) { pageCounter[0]++ }
 
         val text = sb.toString()
-        // ── 页数统计（v1.0.27 多信号融合）──
+        // ── 页数统计（v1.0.32 保守化改进）──
         //
-        // 策略：收集所有「分页点」→ 页数 = 1 + 分页点总数。
-        // 分页点来源（按可靠性排序）：
-        //   A) <w:lastRenderedPageBreak/> — Word 上次渲染的实际分页位置（最可靠）
-        //   B) w:type="page" 显式分页符
-        //   C) 中间位置的 sectPr（节分隔符，后面还有段落 → 导致新页）
+        // 策略：优先信任 Word 自己写的分页记录，避免多信号累加导致虚高。
+        //   A) <w:lastRenderedPageBreak/> — Word 上次渲染的实际分页位置（**最可靠，优先使用**）
+        //   B+C) 显式分页符 + 中间 sectPr — 仅当 A=0 时作为 fallback
         //
-        // 各信号可能部分重叠（同一分页位置被多种方式记录），但实测表明
-        // 「1 + 所有信号之和」比 max 更接近 Word 显示的页数。
-        //
+        // v1.0.27~v1.0.31 问题：三种信号简单累加(A+B+C)，同一分页点被多种方式重复记录
+        // 导致页数偏多（如 Word 显示2页但APP算出3页）。
 
-        // 信号 A: lastRenderedPageBreak
+        // 信号 A: lastRenderedPageBreak（Word 自身渲染记录）
         val renderedBreaks = """<w:lastRenderedPageBreak/>""".toRegex().findAll(bodyXml).count()
 
-        // 信号 B: 显式分页符（已在 pageCounter 中计数）
-        val explicitBreaks = pageCounter[0]
+        var pages: Int
+        if (renderedBreaks > 0) {
+            // ★ v1.0.32: 有Word自身记录时只信它（最可靠），不叠加其他信号
+            pages = maxOf(1, 1 + renderedBreaks)
+        } else {
+            // Fallback: 无 lastRenderedPageBreak 时用旧逻辑（显式分页符 + 节分隔符）
+            val explicitBreaks = pageCounter[0]
 
-        // 信号 C: 节分隔符（中间 sectPr，非末尾结束标记）
-        val bodyMatchResult = """<w:body>(.*?)</w:body>""".toRegex(RegexOption.DOT_MATCHES_ALL).find(bodyXml)
-        var separatorSectPr = 0
-        if (bodyMatchResult != null) {
-            val bodyContent = bodyMatchResult.groupValues[1]
-            val parasInBody = """<w:p[\s>]""".toRegex().findAll(bodyContent).toList()
-            val sectsInBody = """<w:sectPr[\s>]""".toRegex().findAll(bodyContent).toList()
-            if (sectsInBody.size > 1) {
-                for (i in 0 until sectsInBody.size - 1) {
-                    val spRelPos = sectsInBody[i].range.first
-                    val hasParaAfter = parasInBody.any { it.range.first > spRelPos }
-                    if (hasParaAfter) separatorSectPr++
+            // 信号 C: 节分隔符（中间 sectPr，非末尾结束标记）
+            val bodyMatchResult = """<w:body>(.*?)</w:body>""".toRegex(RegexOption.DOT_MATCHES_ALL).find(bodyXml)
+            var separatorSectPr = 0
+            if (bodyMatchResult != null) {
+                val bodyContent = bodyMatchResult.groupValues[1]
+                val parasInBody = """<w:p[\s>]""".toRegex().findAll(bodyContent).toList()
+                val sectsInBody = """<w:sectPr[\s>]""".toRegex().findAll(bodyContent).toList()
+                if (sectsInBody.size > 1) {
+                    for (i in 0 until sectsInBody.size - 1) {
+                        val spRelPos = sectsInBody[i].range.first
+                        val hasParaAfter = parasInBody.any { it.range.first > spRelPos }
+                        if (hasParaAfter) separatorSectPr++
+                    }
                 }
             }
-        }
 
-        // 累加所有分页点 + 首页
-        val totalBreaks = renderedBreaks + explicitBreaks + separatorSectPr
-        val pages = maxOf(1, 1 + totalBreaks)
+            val totalBreaks = explicitBreaks + separatorSectPr
+            pages = maxOf(1, 1 + totalBreaks)
+        }
         return OoxmlResult(text, pages, "docx")
     }
 
