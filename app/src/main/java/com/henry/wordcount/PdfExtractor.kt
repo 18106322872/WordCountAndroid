@@ -294,7 +294,10 @@ object PdfExtractor {
         while (i < scanLen - 3) {
             if (System.currentTimeMillis() > deadline) break
             val ch = bytes[i].toInt() and 0xFF
-            if (ch in 0x20..0x7F) {
+            // v1.0.28: 可打印范围是 0x20..0x7E。旧版写成 0x20..0x7F，与内层
+            // 跳出条件 (c2 > 0x7E) 不一致：遇到 0x7F(DEL) 字节时外层进入可打印
+            // 分支、内层立刻跳出、i=j=i 不前进，导致在 5s deadline 内空转。
+            if (ch in 0x20..0x7E) {
                 var j = i
                 while (j < scanLen) {
                     val c2 = bytes[j].toInt() and 0xFF
