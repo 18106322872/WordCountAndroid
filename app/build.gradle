@@ -13,8 +13,8 @@ android {
         // minSdk 26：Apache POI 5.x / log4j 用到 MethodHandle.invoke，D8 要求 Android O(26) 起
         minSdk 26
         targetSdk 34
-        versionCode 35
-        versionName '1.0.35'
+        versionCode 36
+        versionName '1.0.36'
 
         // 只编 arm64-v8a（华为等现代手机），缩小体积、功能零影响
         ndk {
@@ -33,9 +33,13 @@ android {
                     install 'python-pptx'
                     install 'ezdxf'
                     install 'olefile'
+                    // v1.0.36: 新增 rapidocr-onnxruntime，用于 PDF 渲染为 PNG 后的图片 OCR（绕过 ML Kit 在部分设备上静默失败的问题）
+                    // 依赖会自动拉取 onnxruntime + opencv-python-headless 的 arm64 wheel
+                    install 'rapidocr-onnxruntime==1.4.1'
                     // 注：pymupdf(fitz) 在 Chaquopy 无 Android wheel，故不引入；
                     // 引擎已对 fitz 缺失做降级（PDF 文字层/图片OCR/.ai/导出PDF 相应降级）。
-                    // 注：图片 OCR 改在 Kotlin 层用 Google ML Kit 完成（稳定、支持中文、无 JNI 崩溃），无需 Python 端。
+                    // 注：图片 OCR 主路径仍在 Kotlin 层用 Google ML Kit（对直接选入的图片文件）；
+                    //      rapidocr 仅作为 PdfRenderer→PNG 后备链路使用。
                 }
             }
         }

@@ -516,6 +516,25 @@ private fun resolveDisplayName(context: android.content.Context, uri: Uri): Stri
         if (t.matches(Regex("^[a-fA-F0-9]{8}-([a-fA-F0-9]{4}-){3}[a-fA-F0-9]{12}$"))) return true
         // wc_ 或 file_ 前缀 + 长数字（临时文件名模式）
         if (t.matches(Regex("^(wc_|file_)[0-9a-f]{10,}"))) return true
+        // v1.0.36 新增：带扩展名的 hash（如 ContentResolver 返回的 "9e20f478899dc29eb1xxx.pdf"）
+        // 某些 ROM 的 SAF 用内部 ID+原始扩展名作为 DISPLAY_NAME
+        val dotIdx = t.lastIndexOf('.')
+        if (dotIdx > 0 && dotIdx < t.length - 1 && dotIdx <= 64) {
+            val base = t.substring(0, dotIdx)
+            val ext = t.substring(dotIdx + 1)
+            // 扩展名是已知文件类型 且 basename 像 hash/长ID
+            if (ext.lowercase() in setOf("pdf","doc","docx","xls","xlsx","ppt","pptx","txt","png","jpg","jpeg","bmp","gif","webp","tif","tiff","zip","rar","7z")
+                && base.length >= 10
+                && !base.any { it.code in 0x4E00..0x9FFF }
+                && base.count { it.isLetterOrDigit() } > base.length * 0.85) {
+                // 进一步确认 basename 不像有意义的文件名：
+                // 要么纯 hex，要么字母全是小写且无元音/语义，要么纯数字
+                val hasVowel = base.any { it.lowercaseChar() in 'a'..'z' && it.lowercaseChar() in setOf('a','e','i','o','u') }
+                val isPureHex = base.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }
+                val isMostlyDigits = base.count { it.isDigit() } > base.length * 0.6
+                if (isPureHex || (!hasVowel && isMostlyDigits) || base.length > 24) return true
+            }
+        }
         // 以数字和少量字母为主的长字符串（内部 ID 特征）：字母+数字混合，长度>20，无中文/无常见扩展名
         if (t.length > 20 && !t.contains(".") && !t.any { it.code in 0x4E00..0x9FFF } &&
             t.count { it.isLetterOrDigit() } > t.length * 0.9) return true
@@ -873,14 +892,30 @@ private fun addFiles(
                                 }
                             }
 
-                            // ── 后备 2（v1.0.35 核心）：PdfRenderer 渲染页面为 PNG → Python RapidOCR 图片识别 ──
+                            // ── 后备 2（v1.0.35 核心，v1.0.36 增强）：PdfRenderer 渲染页面为 PNG → Python RapidOCR 图片识别 ──
                             // 适用场景：图片型 PDF / 扫描件（looksLikeGarbage=true）且 Python 直接处理无效
-                            // 原理：PdfRenderer(系统API)肯定能渲染 + RapidOCR(图片OCR)已验证可用 = 绕过 ML Kit 和 fitz
+                            // 原理：PdfRenderer(系统API)肯定能渲染 + RapidOCR(Python图片OCR) = 绕过 ML Kit 和 fitz
+                            // v1.0.36: 新增 rapidocr-onnxruntime 依赖 + 环境变量配置确保模型路径可写
                             if (!finalOk && looksLikeGarbage) {
                                 try {
                                     Log.d("WordCount", "PDF 尝试 PdfRenderer+RapidOCR 后备: $dName")
                                     val pngFiles = renderPdfPagesToPngs(f)
-                                    if (pngFiles.isNotEmpty()) {
+                                    if (pngFiles.isEmpty()) {
+                                        Log.w("WordCount", "PDF PdfRenderer 渲染失败（返回0页 PNG）: $dName")
+                                    } else {
+                                        // 设置 RapidOCR 模型目录到应用内部存储（确保可写、持久化）
+                                        val ocrDir = File(context.filesDir, "rapidocr_models")
+                                        // 通过 Chaquopy 的 os.environ 传递给 Python 端 _get_ocr()
+                                        try {
+                                            val py = com.chaquo.python.Python.getInstance()
+                                            val osMod = py.getModule("os")
+                                            val environ = osMod.get("environ")
+                                            environ.put("WORDCOUNT_OCR_DIR", ocrDir.absolutePath)
+                                            Log.d("WordCount", "WORDCOUNT_OCR_DIR=${ocrDir.absolutePath}")
+                                        } catch (envErr: Throwable) {
+                                            Log.w("WordCount", "设置 OCR 环境变量失败（不影响后续）: ${envErr.message}")
+                                        }
+
                                         val pngPaths = pngFiles.map { it.absolutePath }
                                         val ocrResults = PythonEngine.countFiles(context, pngPaths)
                                         @Suppress("UNCHECKED_CAST")
@@ -921,6 +956,15 @@ private fun addFiles(
                                                 Log.w("WordCount", "PDF PdfRenderer+RapidOCR 返回空结果: $dName (${pngFiles.size}页均未识别到文字)")
                                             }
                                         } else {
+                                            // v1.0.36: 记录 Python 返回的具体错误（用于诊断 RapidOCR 为何失败）
+                                            for ((idx, item) in ocrList.withIndex()) {
+                                                val itemOk = item["ok"] as? Boolean ?: false
+                                                val itemErr = item["error"] as? String
+                                                if (!itemOk && !itemErr.isNullOrBlank()) {
+                                                    Log.w("WordCount", "PDF RapidOCR 页${idx+1} 错误: ${itemErr.take(200)}")
+                                                }
+                                            }
+                                            Log.w("WordCount", "PDF PdfRenderer+RapidOCR 返回空结果: $dName (${pngFiles.size}页均未识别到文字)")
                                             // 清理临时 PNG
                                             for (png in pngFiles) { runCatching { png.delete() } }
                                         }
