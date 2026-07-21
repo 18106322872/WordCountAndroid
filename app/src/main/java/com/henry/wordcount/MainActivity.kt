@@ -270,9 +270,9 @@ fun WordCountApp(initialUris: List<Uri>) {
                         TabToggle("文档比较", compareMode) { compareMode = true }
                         Spacer(Modifier.weight(1f))
                         Text("v${appVersionName}",
-                            style = MaterialTheme.typography.labelMedium,
+                            style = MaterialTheme.typography.labelLarge,
                             color = Color.Gray,
-                            modifier = Modifier.padding(end = 8.dp))
+                            modifier = Modifier.padding(end = 16.dp))
                     }
                 }
             })
@@ -1460,7 +1460,8 @@ fun CompareScreen(
                 }
             } catch (e: Throwable) {
                 withContext(Dispatchers.Main) {
-                    snackbar.showSnackbar("比较异常：${e.message}")
+                    val detail = e.message ?: e.javaClass.simpleName
+                    snackbar.showSnackbar("比较异常 [${e.javaClass.simpleName}]：${detail.take(300)}")
                     busy = false
                 }
             }
