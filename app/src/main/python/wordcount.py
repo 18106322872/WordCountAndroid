@@ -10442,6 +10442,9 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
        "replacements": N, "modified_sentence_chars": M}
     失败时: {"ok": false, "error": "..."}
     """
+    # ── 标准库 import 放在 try 外（不会触发 AssetFinder/lxml 崩溃）──
+    import json, re, datetime, difflib, sys, traceback
+
     # ── 诊断：_step 必须在任何操作之前初始化 ──
     _step = "?-entry"
 
@@ -10450,8 +10453,6 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
         _step = s
 
     try:
-        import json, re, datetime, difflib, sys
-        _set_step("imports-base")
         from docx import Document
         _set_step("imports-docx")
         from docx.oxml.ns import qn
@@ -10638,7 +10639,6 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
             "modified_sentence_chars": modified_chars,
         }, ensure_ascii=False)
     except Exception as e:
-        import traceback
         _step_val = _step if '_step' in dir() else '?-undefined'
         err_msg = f"[step={_step_val}] {type(e).__name__}: {str(e)[:350]}"
         tb_text = traceback.format_exc()[:1200]
