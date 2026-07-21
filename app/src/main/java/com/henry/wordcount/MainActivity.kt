@@ -1067,7 +1067,7 @@ private fun addFiles(
                                 // 全部失败 → 显示最佳可用结果或错误
                                 if (bestChars > 0) {
                                     // 有一些文本（虽然少）→ 降级使用
-                                    Log.w("WordCount", "PDF 降级(文本少+OCR失败): $dName best=$bestCharsch")
+                                    Log.w("WordCount", "PDF 降级(文本少+OCR失败): $dName best=${bestChars}ch")
                                     val resMap = mapOf(
                                         "name" to dName, "ext" to ".pdf",
                                         "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars),
@@ -1078,7 +1078,7 @@ private fun addFiles(
                                     entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_fallback", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                                 } else {
                                     // 完全没有文本 → 报错
-                                    var pdfPageCount = max(1, bestPages)
+                                    var pdfPageCount = if (bestPages > 1) bestPages else 1
                                     try {
                                         val pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
                                         val renderer = PdfRenderer(pfd)
