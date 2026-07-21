@@ -971,158 +971,139 @@ private fun addFiles(
                     }
                 }
 
-                // PDF → Kotlin 提取 + OCR(PdfRenderer/ML Kit) + Python 后备 + 智能降级
+                // ═══════════════════ v1.0.41 重构：PDF 三级提取 + 智能优选 ═══════════════════
+                //
+                // 核心问题（v1.0.40 暴露）：
+                //   • Kotlin PdfExtractor 对 ObjStm/现代 PDF 几乎完全失效（282KB的PDF只提取3字符）
+                //   • PyMuPDF(fitz) 在 Chaqopy 下报 FileNotFoundError: AssetFinder/scripts，不可用
+                //   · OCR 链路在文本提取失败后才触发，但 Python 后备排在 OCR 之后永远跑不到
+                //
+                // 新流程（三级提取 + 优选）：
+                //   Level 1: PdfExtractor (Kotlin 原生，快速但弱) → 基线结果A
+                //   Level 2: Python pdfminer (pdfminer.six，正确处理 ObjStm/ToUnicode/CMap) → 结果B
+                //   Level 3: ML Kit OCR (PdfRenderer→Bitmap→识别 / PdfiumAndroid 后备) → 结果C
+                //   最终: 选 chars 最多的有效结果；全失败则报错
+                //
                 pdfFiles.forEachIndexed { i, cf ->
                     val f = cf.file
                     val dName = cf.displayName
                     try {
-                        val res = PdfExtractor.extract(f)  // 永不返回 null
-                        val stats = countTextKotlin(res.text)
-                        // 判定提取文本是否为"垃圾"（二进制残渣/编码噪音）
-                        // v1.0.36 修复：区分「真正的垃圾」和「短但合法的文本（如 "12345"）」
-                        val totalChars = stats.fourth
-                        val cjkCount = stats.second
-                        val cjkRatio = if (totalChars > 0) cjkCount.toDouble() / totalChars else 0.0
+                        // ── Level 1: Kotlin PdfExtractor（快速预筛）──
+                        val ktRes = PdfExtractor.extract(f)
+                        val ktStats = countTextKotlin(ktRes.text)
 
-                        // 垃圾检测条件（必须同时满足）：
-                        // 1. 文本非空
-                        // 2. CJK 极少（<30字且占比<15%）—— 排除正常中文内容
-                        // 3. 文本很长（>200字符）或者含不可打印控制字符 —— 区别于 "12345" 这种短但合法的内容
-                        val hasControlChars = res.text.any { it.code in 0..31 && it != '\n' && it != '\r' && it != '\t' }
-                        val looksLikeGarbage = res.text.isNotBlank()
-                            && cjkCount < 30 && cjkRatio < 0.15
-                            && (totalChars > 200 || hasControlChars)
-
-                        // 需要尝试OCR的情况：文本为空 / 无中文且很少词 / 提取结果不可靠 / 明显是垃圾
-                        val needOcrPref = res.text.isBlank()
-                            || !res.reliable
-                            || looksLikeGarbage
-
-                        Log.d("WordCount", "PDF $dName: ${stats.first}w/${stats.second}fe/${stats.third}nc/${stats.fourth}ch reliable=${res.reliable} cjkRatio=%.2f looksGarbage=$looksLikeGarbage needOcr=$needOcrPref".format(cjkRatio))
-
-                        // ★ 尝试 ML Kit OCR（系统 PdfRenderer 渲染 + 中文识别器；扫描件 JPX/JBIG2 自动回退 PdfiumAndroid）
-                        val ocrRes = if (needOcrPref) PdfOcrEngine.extractText(context, f) else null
-
-                        if (ocrRes != null) {
-                            // PDF OCR 成功 → 用OCR结果
-                            val ocrStats = countTextKotlin(ocrRes.text)
-                            val resMap = mapOf(
-                                "name" to dName, "ext" to ".pdf",
-                                "stats" to mapOf("words" to ocrStats.first, "fe" to ocrStats.second, "nc" to ocrStats.third, "chars" to ocrStats.fourth),
-                                "meta" to emptyMap<String, Any?>(),
-                                "pages" to ocrRes.pages
-                            )
-                            val fr = toFileResult(resMap, f.absolutePath)
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-                        } else {
-                            // ★ ML Kit OCR 失败或未触发 → 后备策略
-                            if (ocrRes == null && needOcrPref) {
-                                Log.w("WordCount", "PDF ML Kit OCR失败/跳过: $dName")
-                            }
-
-                            var finalOk = false
-
-                            // ── 后备 1：Python pdfminer 文字提取（对文字型 PDF 可能比 Kotlin PdfExtractor 更好）──
-                            if (!finalOk) {
-                                try {
-                                    val pyResults = PythonEngine.countFiles(context, listOf(f.absolutePath))
-                                    @Suppress("UNCHECKED_CAST")
-                                    val pyList = pyResults as? List<Map<String, Any?>>
-                                    if (!pyList.isNullOrEmpty()) {
-                                        val py0 = pyList[0]
-                                        val pyOkFlag = py0["ok"] as? Boolean ?: false
-                                        if (pyOkFlag) {
-                                            val pyData = py0["result"] as? Map<String, Any?>
-                                            if (pyData != null) {
-                                                val pyStats = pyData["stats"] as? Map<String, Any?>
-                                                val pyWords = (pyStats?.get("words") as? Number)?.toInt() ?: 0
-                                                val pyFe = (pyStats?.get("fe") as? Number)?.toInt() ?: 0
-                                                val pyNc = (pyStats?.get("nc") as? Number)?.toInt() ?: 0
-                                                val pyChars = (pyStats?.get("chars") as? Number)?.toInt() ?: 0
-                                                val pyPages = (pyData["pages"] as? Number)?.toInt() ?: res.pages
-                                                if (pyWords > 0 || pyFe > 0 || (pyChars > 0 && pyChars != stats.fourth)) {
-                                                    val resMap = mapOf(
-                                                        "name" to dName, "ext" to ".pdf",
-                                                        "stats" to mapOf("words" to pyWords, "fe" to pyFe, "nc" to pyNc, "chars" to pyChars),
-                                                        "meta" to emptyMap<String, Any?>(),
-                                                        "pages" to pyPages
-                                                    )
-                                                    val fr = toFileResult(resMap, f.absolutePath)
-                                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_py", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-                                                    finalOk = true
-                                                    Log.d("WordCount", "PDF Python直接后备成功: $dName words=$pyWords chars=$pyChars")
-                                                }
-                                            }
-                                        }
+                        // ── Level 2: Python pdfminer（文字型 PDF 的主力）──
+                        var pyWords = 0; var pyFe = 0; var pyNc = 0; var pyChars = 0; var pyPages = 0
+                        var pyOk = false
+                        try {
+                            val pyResults = PythonEngine.countFiles(context, listOf(f.absolutePath))
+                            @Suppress("UNCHECKED_CAST")
+                            val pyList = pyResults as? List<Map<String, Any?>>
+                            if (!pyList.isNullOrEmpty()) {
+                                val py0 = pyList[0]
+                                if (py0["ok"] == true) {
+                                    val pyData = py0["result"] as? Map<String, Any?>
+                                    if (pyData != null) {
+                                        val pyS = pyData["stats"] as? Map<String, Any?>
+                                        pyWords = (pyS?.get("words") as? Number)?.toInt() ?: 0
+                                        pyFe = (pyS?.get("fe") as? Number)?.toInt() ?: 0
+                                        pyNc = (pyS?.get("nc") as? Number)?.toInt() ?: 0
+                                        pyChars = (pyS?.get("chars") as? Number)?.toInt() ?: 0
+                                        pyPages = (pyData["pages"] as? Number)?.toInt() ?: ktRes.pages
+                                        pyOk = true
                                     }
-                                } catch (e: Throwable) {
-                                    Log.w("WordCount", "PDF Python直接后备异常: ${e.javaClass.simpleName}: ${e.message}")
                                 }
                             }
+                        } catch (e: Throwable) {
+                            Log.w("WordCount", "PDF Python pdfminer 异常: $dName - ${e.javaClass.simpleName}: ${e.message}")
+                        }
 
-                            // ── 最终判断 ──
-                            if (!finalOk) {
-                                if (looksLikeGarbage) {
-                                    // 图片型/扫描件 PDF，所有 OCR 路径失败 → 用 PdfRenderer 获取准确页数
-                                    var pdfPageCount = res.pages
+                        Log.d("WordCount", "PDF $dName → KT:${ktStats.fourth}ch PY:${pyChars}ch KT_rel=${ktRes.reliable}")
+
+                        // ── 决策：选 Kolt 或 Python 的较好结果 ──
+                        //   pdfminer 通常更准确（处理了 ToUnicode CMap / ObjStm 等）
+                        //   但如果两者都很少字符，说明可能是图片型 PDF → 需要 OCR
+                        val usePython = pyOk && pyChars > ktStats.fourth
+
+                        val bestWords = if (usePython) pyWords else ktStats.first
+                        val bestFe = if (usePython) pyFe else ktStats.second
+                        val bestNc = if (usePython) pyNc else ktStats.third
+                        val bestChars = if (usePython) pyChars else ktStats.fourth
+                        val bestPages = if (usePython && pyPages > 0) pyPages else ktRes.pages
+                        val bestTextReliable = if (usePython) true else ktRes.reliable
+
+                        // 判定是否还需要尝试 OCR
+                        val bestCjkRatio = if (bestChars > 0) bestFe.toDouble() / bestChars else 0.0
+                        val hasControlChars = false // 已由 Python/Kotlin 内部处理
+                        val looksLikeGarbage = bestChars > 200 && bestFe < 30 && bestCjkRatio < 0.15
+                        val needOcr = bestChars < 10 || (!bestTextReliable && bestChars < 50) || looksLikeGarbage
+
+                        if (!needOcr) {
+                            // ★ 文本提取足够好 → 直接使用
+                            val resMap = mapOf(
+                                "name" to dName, "ext" to ".pdf",
+                                "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars),
+                                "meta" to emptyMap<String, Any?>(),
+                                "pages" to bestPages
+                            )
+                            val fr = toFileResult(resMap, f.absolutePath)
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_ok", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                        } else {
+                            // ★ 文本太少 → 尝试 OCR
+                            val ocrRes = PdfOcrEngine.extractText(context, f)
+
+                            if (ocrRes != null) {
+                                // OCR 成功
+                                val ocrStats = countTextKotlin(ocrRes.text)
+                                val resMap = mapOf(
+                                    "name" to dName, "ext" to ".pdf",
+                                    "stats" to mapOf("words" to ocrStats.first, "fe" to ocrStats.second, "nc" to ocrStats.third, "chars" to ocrStats.fourth),
+                                    "meta" to emptyMap<String, Any?>(),
+                                    "pages" to ocrRes.pages
+                                )
+                                val fr = toFileResult(resMap, f.absolutePath)
+                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_ocr", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                            } else {
+                                // 全部失败 → 显示最佳可用结果或错误
+                                if (bestChars > 0) {
+                                    // 有一些文本（虽然少）→ 降级使用
+                                    Log.w("WordCount", "PDF 降级(文本少+OCR失败): $dName best=$bestCharsch")
+                                    val resMap = mapOf(
+                                        "name" to dName, "ext" to ".pdf",
+                                        "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars),
+                                        "meta" to emptyMap<String, Any?>(),
+                                        "pages" to bestPages
+                                    )
+                                    val fr = toFileResult(resMap, f.absolutePath)
+                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_fallback", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                                } else {
+                                    // 完全没有文本 → 报错
+                                    var pdfPageCount = max(1, bestPages)
                                     try {
                                         val pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
                                         val renderer = PdfRenderer(pfd)
                                         pdfPageCount = renderer.pageCount
-                                        renderer.close()
-                                        pfd.close()
-                                        Log.d("WordCount", "PDF PdfRenderer 页数: $dName → ${pdfPageCount}页")
-                                    } catch (pfde: Throwable) {
-                                        Log.w("WordCount", "PDF PdfRenderer 页数获取失败: $dName - ${pfde.message}")
-                                    }
-                                    Log.e("WordCount", "PDF 全部OCR路径失败(扫描件): $dName extracted=${stats.first}w/${stats.fourth}c pages=$pdfPageCount reason=${PdfOcrEngine.lastFailReason} detail=${PdfOcrEngine.lastFailDetail}")
-                                    val pdfErrMsg = when (PdfOcrEngine.lastFailReason) {
+                                        renderer.close(); pfd.close()
+                                    } catch (_: Throwable) {}
+                                    val reason = PdfOcrEngine.lastFailReason
+                                    val detail = PdfOcrEngine.lastFailDetail
+                                    val errMsg = when (reason) {
                                         PdfOcrEngine.FailReason.OCR_DISABLED ->
-                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），OCR 引擎未就绪（ML Kit 模型不可用）。"
-                                        PdfOcrEngine.FailReason.RENDER_FAILED ->
-                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），系统渲染器无法打开此文件。"
-                                        PdfOcrEngine.FailReason.RENDER_PARTIAL ->
-                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），部分页面渲染异常，OCR 未能提取文字。"
-                                        PdfOcrEngine.FailReason.PDFIUM_UNAVAILABLE ->
-                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），备用渲染引擎不可用（设备不支持），且系统渲染未获有效结果。"
-                                        PdfOcrEngine.FailReason.PDFIUM_FAILED ->
-                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），备用渲染引擎处理失败。${if (PdfOcrEngine.lastFailDetail.isNotBlank()) "(${PdfOcrEngine.lastFailDetail})" else ""}"
-                                        PdfOcrEngine.FailReason.OCR_EMPTY ->
-                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），页面已渲染但 OCR 未识别到文字（可能为纯图/手写/模糊不清）。"
+                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），OCR 引擎未就绪。"
+                                        PdfOcrEngine.FailReason.RENDER_FAILED,
+                                        PdfOcrEngine.FailReason.PDFIUM_FAILED,
+                                        PdfOcrEngine.FailReason.PDFIUM_UNAVAILABLE,
+                                        PdfOcrEngine.FailReason.RENDER_BLANK,
                                         PdfOcrEngine.FailReason.PDFIUM_BLANK ->
-                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），系统及备用渲染引擎均渲染为空白页（常见于 JPEG2000/JBIG2 压缩扫描图）。建议用文字版 PDF 或在电脑端处理。"
-                                        PdfOcrEngine.FailReason.RENDER_BLANK ->
-                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），系统渲染出空白页（疑似 JPEG2000/JBIG2 压缩扫描图，系统 Pdfium 不支持）。已尝试备用渲染引擎。"
+                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），渲染引擎无法处理（可能为 JPEG2000/JBIG2 编码）。${if(detail.isNotBlank()) "($detail)" else ""}"
+                                        PdfOcrEngine.FailReason.OCR_EMPTY,
                                         PdfOcrEngine.FailReason.NO_EMBEDDED_IMAGES ->
-                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），所有渲染引擎均失败且未找到可提取的内嵌图片。正在尝试 PyMuPDF 渲染..."
-                                        PdfOcrEngine.FailReason.PYMUPDF_UNAVAILABLE ->
-                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），PyMuPDF 不可用或无法打开此文件。"
-                                        PdfOcrEngine.FailReason.PYMUPDF_FAILED ->
-                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），PyMuPDF 渲染失败。${if (PdfOcrEngine.lastFailDetail.isNotBlank()) "(${PdfOcrEngine.lastFailDetail})" else ""}"
-                                        PdfOcrEngine.FailReason.PYMUPDF_NO_IMAGES ->
-                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），PyMuPDF 渲染成功但无有效页面输出。"
-                                        else -> // OK（不应到达）
-                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），未能提取文字。"
+                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），OCR 未识别到有效文字。"
+                                        PdfOcrEngine.FailReason.RENDER_PARTIAL ->
+                                            "此 PDF 部分页面渲染异常（$pdfPageCount 页），OCR 结果不完整。"
+                                        else -> "无法从该 PDF 提取文字（$pdfPageCount 页，可能为纯图片、加密或损坏文件）。${if(detail.isNotBlank()) "\n原因: $detail" else ""}"
                                     }
-                                    entries.add(FileEntry(
-                                        id = "e${System.currentTimeMillis()}_${i}_pdf_err",
-                                        displayName = dName,
-                                        cachePath = f.absolutePath,
-                                        error = pdfErrMsg
-                                    ))
-                                } else if (res.text.isBlank()) {
-                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = dName, cachePath = f.absolutePath, error = "无法从该 PDF 提取文字（可能为纯图片扫描件或加密文件）"))
-                                } else {
-                                    // 文本不像垃圾 → 降级使用 Kotlin 提取结果
-                                    Log.w("WordCount", "PDF 降级使用提取文本: $dName (${stats.first}w/${stats.fourth}c)")
-                                    val resMap = mapOf(
-                                        "name" to dName, "ext" to ".pdf",
-                                        "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
-                                        "meta" to emptyMap<String, Any?>(),
-                                        "pages" to res.pages
-                                    )
-                                    val fr = toFileResult(resMap, f.absolutePath)
-                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_fallback", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_err", displayName = dName, cachePath = f.absolutePath, error = errMsg))
                                 }
                             }
                         }

@@ -143,38 +143,4 @@ object PythonEngine {
             if (s == "None") null else s
         }
     }
-
-    /**
-     * 用 PyMuPDF(fitz) 渲染 PDF 每页为 PNG（base64）。
-     * 返回 Triple(ok: Boolean, pages: Int, images: List<String>) —— images 为 base64 列表
-     */
-    fun renderPdfPages(context: Context, filePath: String): Triple<Boolean, Int, List<String>> {
-        return withRetry(context) {
-            val py = Python.getInstance()
-            val mod = py.getModule("wordcount")
-            val jsonStr = mod.callAttr("_render_pdf_pages_base64", filePath).toString()
-            // 手动解析 JSON（避免 JSONObject 的转义问题）
-            val ok = jsonStr.contains("\"ok\": true") || jsonStr.contains("\"ok\":true")
-            val pagesMatch = """"pages":\s*(\d+)""".toRegex().find(jsonStr)
-            val pages = pagesMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
-            // 提取所有 base64 图片字符串
-            val images = mutableListOf<String>()
-            var idx = 0
-            while (true) {
-                val start = jsonStr.indexOf("\"", idx)
-                if (start < 0) break
-                val end = jsonStr.indexOf("\"", start + 1)
-                if (end < 0) break
-                val candidate = jsonStr.substring(start + 1, end)
-                // base64 字符串通常很长且只含 [A-Za-z0-9+/=]
-                if (candidate.length > 500 && candidate.all { it.isLetterOrDigit() || it == '+' || it == '/' || it == '=' }) {
-                    images.add(candidate)
-                    idx = end + 1
-                } else {
-                    idx = start + 1
-                }
-            }
-            Triple(ok, pages, images)
-        }
-    }
 }
