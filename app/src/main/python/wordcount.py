@@ -10449,6 +10449,8 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
     from docx.text.paragraph import Paragraph
     from docx.table import Table
 
+    # ── 诊断：每步标记，定位 Android Chaquopy AssetFinder 崩溃点 ──
+    _step = "init"
     try:
         try:
             opts = json.loads(opts_json) if opts_json else {}
@@ -10466,11 +10468,16 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
         author = "WordCount"
         date = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
 
+        _step = "open_orig"
         doc_o = Document(orig_path)
+        _step = "open_rev"
         doc_r = Document(rev_path)
+        _step = "create_out"
         out = Document()
+        _step = "track_revisions"
         _enable_track_revisions(out)
 
+        _step = "prepare_body"
         body = out.element.body
         # 清掉新建文档默认留下的空段落
         for p in list(body.findall(qn("w:p"))):
@@ -10495,8 +10502,11 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
         rep_count = 0
 
         # ── 正文块（段落 + 表格）级 diff ──
+        _step = "get_blocks_orig"
         blocks_o = _get_blocks(doc_o)
+        _step = "get_blocks_rev"
         blocks_r = _get_blocks(doc_r)
+        _step = "difflib_opcodes"
         sm = difflib.SequenceMatcher(a=[b[2] for b in blocks_o], b=[b[2] for b in blocks_r])
         opcodes = sm.get_opcodes()
         # 合并相邻的 delete+insert 为 replace：单段仅改几个字 → 字符级红线（而非整段删除+插入）
@@ -10519,7 +10529,8 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
             merged.append((tag, i1, i2, j1, j2))
             ki += 1
 
-        for tag, i1, i2, j1, j2 in merged:
+        _step = "diff_loop"
+        for idx, (tag, i1, i2, j1, j2) in enumerate(merged):
             if tag == "equal":
                 for k in range(i1, i2):
                     el = blocks_o[k]
@@ -10587,6 +10598,7 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
                     ins_count += 1
 
         # ── 附加区域：页眉页脚 / 脚注尾注 / 文本框 / 域 ──
+        _step = "extra_sections"
         extra_kinds = []
         if use_hf:
             extra_kinds.append(("header_footer", "【页眉/页脚变更】"))
@@ -10605,6 +10617,7 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
                                              rid_counter, case_sensitive, ignore_ws)
                 _append(p)
 
+        _step = "save"
         out.save(out_path)
         return json.dumps({
             "ok": True,
@@ -10616,7 +10629,7 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
         }, ensure_ascii=False)
     except Exception as e:
         import traceback
-        return json.dumps({"ok": False, "error": str(e)[:500],
+        return json.dumps({"ok": False, "error": f"[step={_step}] {str(e)[:400]}",
                            "trace": traceback.format_exc()[:1500]}, ensure_ascii=False)
 
 

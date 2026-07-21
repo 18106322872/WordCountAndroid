@@ -270,8 +270,9 @@ fun WordCountApp(initialUris: List<Uri>) {
                         TabToggle("文档比较", compareMode) { compareMode = true }
                         Spacer(Modifier.weight(1f))
                         Text("v${appVersionName}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color.Gray)
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color.Gray,
+                            modifier = Modifier.padding(end = 8.dp))
                     }
                 }
             })
