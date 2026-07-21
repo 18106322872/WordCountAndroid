@@ -198,8 +198,6 @@ object PdfOcrEngine {
                     } finally {
                         bmp.recycle()
                     }
-                } finally {
-                    runCatching { core.closePage(doc, i) }
                 }
             }
             val text = sb.toString().trim()

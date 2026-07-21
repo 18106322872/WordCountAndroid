@@ -112,7 +112,10 @@ dependencies {
     implementation 'com.google.mlkit:text-recognition-chinese:16.0.0'
     // PDF 扫描件渲染后备：PdfiumAndroid（内置 Pdfium 编译启用 OpenJPEG，可渲染 JPEG2000/JBIG2 压缩的扫描图；
     //   系统 PdfRenderer/Pdfium 不支持这两种格式，会导致扫描件页面渲染为空白、OCR 认不出字）。
-    implementation 'com.github.barteksc:pdfium-android:1.9.0'
+    // 注：该库传递依赖旧版 com.android.support:support-compat，与 AndroidX 冲突，需 exclude 掉（其运行时不依赖它）。
+    implementation('com.github.barteksc:pdfium-android:1.9.0') {
+        exclude group: 'com.android.support', module: 'support-compat'
+    }
     // 老格式(.doc/.xls/.ppt)解析：Apache POI（Java，安卓原生运行，不依赖 Windows）
     // 仅用 poi + poi-scratchpad（HSSF/HWPF/HSLF），不引入 poi-ooxml，避免安卓缺 javax.xml.stream 的坑
     implementation 'org.apache.poi:poi:5.2.5'
