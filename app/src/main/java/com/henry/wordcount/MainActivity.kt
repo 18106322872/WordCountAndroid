@@ -505,6 +505,8 @@ private fun looksLikeRealFilename(s: String): Boolean {
  * v1.0.35 重写：所有策略结果必须通过 looksLikeHash() 检测，
  * 某些 ROM 的 ContentResolver / DocumentFile 返回内部 ID（如 9e20f478899dc29...），
  * 必须拦截并降级为友好名称。
+ * v1.0.38 增强：新增策略4(PDF元数据/Title)、策略5(URI path更宽松匹配)；
+ * 兜底名从时间戳改为基于文件类型的友好名称（不再显示数字ID）。
  */
 private fun resolveDisplayName(context: android.content.Context, uri: Uri): String {
     // 辅助函数：检测字符串是否像 hash/UUID/内部 ID
@@ -586,11 +588,117 @@ private fun resolveDisplayName(context: android.content.Context, uri: Uri): Stri
         } catch (_: Throwable) {}
     }
 
-    // 兜底：基于时间戳的友好名称（绝不显示 hash）
-    val ext = guessExt(context, uri).let { if (it.isNotBlank()) ".$it" else "" }
-    val friendly = "文件${System.currentTimeMillis()}$ext"
-    Log.w("WordCount", "resolveDisplayName 全部策略失败/被hash拦截 → 兜底: '$friendly' (uri=$uri)")
+    // 策略4（v1.0.38 新增）: 对 PDF 文件，尝试从 PDF 元数据提取 /Title
+    val ext = guessExt(context, uri)
+    if (ext.lowercase() == "pdf") {
+        try {
+            // 先用 ContentResolver 拿到 InputStream 读取前 64KB（够覆盖大部分 PDF 的 trailer/Info 字典）
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                val header = ByteArray(minOf(65536, input.available().coerceAtLeast(8192)))
+                val totalRead = input.read(header)
+                if (totalRead > 0) {
+                    val title = extractPdfTitleFromBytes(header, totalRead)
+                    if (!title.isNullOrBlank() && !looksLikeHash(title) && title.length <= 150) {
+                        val clean = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
+                        if (clean.isNotBlank()) {
+                            Log.d("WordCount", "resolveDisplayName s4(PDF /Title): '$clean'")
+                            return "$clean.pdf"
+                        }
+                    }
+                }
+            }
+        } catch (_: Throwable) {}
+    }
+
+    // 策略5（v1.0.38 新增）: URI path 更宽松匹配——有些 ROM 的 lastPathSegment
+    // 包含 document ID 前缀但尾部有真实文件名（如 "primary:Documents/我的文件.pdf"）
+    uri.lastPathSegment?.let { seg ->
+        try {
+            val decoded = java.net.URLDecoder.decode(seg, "UTF-8")
+            // 从 decoded 路径中取最后一个路径段（去掉所有已知名前缀）
+            var candidate = decoded.substringAfterLast('/')
+                .substringAfterLast('\\')
+                .substringAfterLast(':')
+                .removePrefix("primary:")
+                .removePrefix("home:")
+                .removePrefix("document:")
+                .removePrefix("msf:")
+                .removePrefix("raw:")
+            // 如果候选名包含 CJK 字符或明显不是纯数字ID，直接采用（跳过 looksLikeHash）
+            if (candidate.isNotBlank() && candidate.length <= 200 &&
+                (candidate.any { it.code in 0x4E00..0x9FFF } || looksLikeRealFilename(candidate))) {
+                Log.d("WordCount", "resolveDisplayName s5(宽松路径): '$candidate'")
+                return candidate.trim()
+            }
+        } catch (_: Throwable) {}
+    }
+
+    // 兜底：基于文件类型的友好名称（v1.0.38: 不再使用时间戳数字ID）
+    val friendlyExt = if (ext.isNotBlank()) ".$ext" else ""
+    val typeLabel = when (ext.lowercase()) {
+        "pdf" -> "PDF文档"
+        "doc", "docx" -> "Word文档"
+        "xls", "xlsx" -> "Excel表格"
+        "ppt", "pptx" -> "PPT演示"
+        "txt" -> "文本文件"
+        "png", "jpg", "jpeg", "bmp", "gif", "webp" -> "图片"
+        "zip", "rar", "7z" -> "压缩包"
+        "dwg", "dxf" -> "CAD图纸"
+        else -> "文件"
+    }
+    val friendly = "$typeLabel${if (cachedFileCounter > 0) "_$cachedFileCounter" else ""}$friendlyExt"
+    cachedFileCounter++
+    Log.w("WordCount", "resolveDisplayName 全部策略失败 → 兜底: '$friendly' (uri=$uri)")
     return friendly
+}
+
+/** v1.0.38: 兜底命名计数器（避免同名冲突） */
+private var cachedFileCounter = 0
+
+/**
+ * v1.0.38 新增：从原始 PDF 字节中提取 /Title 元数据。
+ * 用轻量正则扫描，不依赖完整 PDF 解析库。
+ * 支持 PDF 字符串格式：(literal text) 和 <hex-encoded>。
+ * @return 标题文本；未找到或解析失败返回 null
+ */
+private fun extractPdfTitleFromBytes(data: ByteArray, length: Int): String? {
+    try {
+        val str = String(data, 0, length, Charsets.ISO_8859_1)
+        // 匹配 /Title 后跟字符串值：(text) 或 <hex>
+        // PDF 规范允许 /Title 出现在 Info dict 中，可能在文件后半部分（trailer 附近）
+        val patterns = listOf(
+            Regex("""/Title\s*\(([^)]*)\)"""),           // (literal text)
+            Regex("""/Title\s*<([0-9a-fA-F]+)>""")       // <hex encoded>
+        )
+        for (pattern in patterns) {
+            val match = pattern.find(str) ?: continue
+            val value = match.groupValues[1]
+            if (value.isEmpty()) continue
+            // 判断是 hex 还是 literal
+            if (match.value.contains('<') && match.value.contains('>')) {
+                // Hex 编码：两字节一组 → UTF-8 或 Latin-1 解码
+                return try {
+                    val bytes = ByteArray(value.length / 2)
+                    for (i in value.indices step 2) {
+                        bytes[i / 2] = value.substring(i, i + 2).toInt(16).toByte()
+                    }
+                    String(bytes, Charsets.UTF_8).also { decoded ->
+                        // 验证解码结果不含控制字符
+                        if (decoded.any { it.code < 32 && it != '\n' && it != '\r' && it != '\t' }) null
+                        else decoded.trim()
+                    }
+                } catch (_: Throwable) { null }
+            } else {
+                // Literal string：可能有 PDF 转义序列 \n \t \( \) \\
+                val unescaped = value
+                    .replace("\\n", "\n").replace("\\t", "\t")
+                    .replace("\\(", "(").replace("\\)", ")")
+                    .replace("\\\\", "\\")
+                return unescaped.trim().takeIf { it.isNotEmpty() }
+            }
+        }
+    } catch (_: Throwable) {}
+    return null
 }
 
 private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFile {
@@ -719,6 +827,7 @@ private fun addFiles(
     if (busyRef()) return
         scope.launch(Dispatchers.Main) {
             busySet(true)
+            cachedFileCounter = 0  // 重置兜底命名计数器
             try {
                 runCatching { PythonEngine.start(context) }
                 val cachedFiles = uris.map { copyUriToCache(context, it) }
@@ -918,14 +1027,22 @@ private fun addFiles(
                                     val pdfErrMsg = when (PdfOcrEngine.lastFailReason) {
                                         PdfOcrEngine.FailReason.OCR_DISABLED ->
                                             "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），OCR 引擎未就绪（ML Kit 模型不可用）。"
-                                        PdfOcrEngine.FailReason.RENDER_FAILED, PdfOcrEngine.FailReason.PDFIUM_FAILED ->
-                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），PDF 渲染失败（文件可能损坏或被加密）。"
+                                        PdfOcrEngine.FailReason.RENDER_FAILED ->
+                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），系统渲染器无法打开此文件。"
+                                        PdfOcrEngine.FailReason.RENDER_PARTIAL ->
+                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），部分页面渲染异常，OCR 未能提取文字。"
+                                        PdfOcrEngine.FailReason.PDFIUM_UNAVAILABLE ->
+                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），备用渲染引擎不可用（设备不支持），且系统渲染未获有效结果。"
+                                        PdfOcrEngine.FailReason.PDFIUM_FAILED ->
+                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），备用渲染引擎处理失败。"
                                         PdfOcrEngine.FailReason.OCR_EMPTY ->
                                             "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），页面已渲染但 OCR 未识别到文字（可能为纯图/手写/模糊不清）。"
                                         PdfOcrEngine.FailReason.PDFIUM_BLANK ->
                                             "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），系统及备用渲染引擎均渲染为空白页（常见于 JPEG2000/JBIG2 压缩扫描图）。建议用文字版 PDF 或在电脑端处理。"
-                                        else -> // RENDER_BLANK 或 OK
+                                        PdfOcrEngine.FailReason.RENDER_BLANK ->
                                             "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），系统渲染出空白页（疑似 JPEG2000/JBIG2 压缩扫描图，系统 Pdfium 不支持）。已尝试备用渲染引擎。"
+                                        else -> // OK（不应到达）
+                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），未能提取文字。"
                                     }
                                     entries.add(FileEntry(
                                         id = "e${System.currentTimeMillis()}_${i}_pdf_err",
