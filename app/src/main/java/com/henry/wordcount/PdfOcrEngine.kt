@@ -198,6 +198,8 @@ object PdfOcrEngine {
                     } finally {
                         bmp.recycle()
                     }
+                } finally {
+                    // 页面随 closeDocument(doc) 统一释放（PdfiumAndroid 1.9.0 无独立 closePage 可用签名）
                 }
             }
             val text = sb.toString().trim()
