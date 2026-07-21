@@ -168,7 +168,7 @@ object PdfOcrEngine {
             }
 
             val text = sb.toString().trim()
-            Log.d("WordCount", "PdfOcr(系统) ${file.name} 完成: $limit页, 渲染内容=$anyRenderedContent, OCR文字=$anyOcrText, 异常页=$pageErrors, 总文字=${text.length}")
+            Log.d("WordCount", "PdfOcr(系统) ${file.name} 完成: ${limit}页, 渲染内容=$anyRenderedContent, OCR文字=$anyOcrText, 异常页=$pageErrors, 总文字=${text.length}")
 
             // v1.0.38: 即使有部分页异常，只要有结果就返回（部分结果 > 无结果）
             return if (text.isNotBlank()) {
