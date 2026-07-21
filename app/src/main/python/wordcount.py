@@ -10413,6 +10413,17 @@ def main():
 # 输出：带 w:ins/w:del 修订标记的 .docx + 修改句字数统计
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _clone_oxml_element(el):
+    """安全克隆 oxml/lxml 元素（Android Chaquopy 兼容）。
+
+    Android Chaquopy 上 copy.deepcopy 对 lxml C 扩展对象会触发：
+      FileNotFoundError: .../chaquopy/AssetFinder/scripts
+    改用 lxml 自身的序列化/反序列化来克隆，完全绕过 Python copy 模块。
+    """
+    from lxml.etree import fromstring, tostring
+    return fromstring(tostring(el))
+
+
 def compare_docx(orig_path, rev_path, out_path, opts_json):
     """比较两份 DOCX，生成修订标记 .docx 并统计修改句字数。
 
@@ -10421,7 +10432,7 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
        "replacements": N, "modified_sentence_chars": M}
     失败时: {"ok": false, "error": "..."}
     """
-    import json, re, datetime, difflib, copy
+    import json, re, datetime, difflib
     from docx import Document
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
@@ -10501,7 +10512,7 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
         for tag, i1, i2, j1, j2 in merged:
             if tag == "equal":
                 for k in range(i1, i2):
-                    _append(copy.deepcopy(blocks_o[k][1]))
+                    _append(_clone_oxml_element(blocks_o[k][1]))
             elif tag == "delete":
                 for k in range(i1, i2):
                     el = blocks_o[k]
@@ -10509,7 +10520,7 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
                         _append(_build_deleted_paragraph(el[2], author, date, rid_counter))
                         modified_chars += _count_modified_sentences(el[2], [(0, len(el[2]))])
                     else:
-                        _append(copy.deepcopy(el[1]))
+                        _append(_clone_oxml_element(el[1]))
                         modified_chars += _count_text(el[2])
                     del_count += 1
             elif tag == "insert":
@@ -10518,7 +10529,7 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
                     if el[0] == "p":
                         _append(_build_inserted_paragraph(el[2], author, date, rid_counter))
                     else:
-                        _append(copy.deepcopy(el[1]))
+                        _append(_clone_oxml_element(el[1]))
                     ins_count += 1
             elif tag == "replace":
                 single = (i2 - i1 == 1 and j2 - j1 == 1)
@@ -10538,8 +10549,8 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
                         if new_el is not None:
                             _append(new_el)
                         else:
-                            _append(copy.deepcopy(bo[1]))
-                            _append(copy.deepcopy(br[1]))
+                            _append(_clone_oxml_element(bo[1]))
+                            _append(_clone_oxml_element(br[1]))
                         modified_chars += _count_text(bo[2])
                         rep_count += 1
                         continue
@@ -10550,7 +10561,7 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
                         _append(_build_deleted_paragraph(el[2], author, date, rid_counter))
                         modified_chars += _count_modified_sentences(el[2], [(0, len(el[2]))])
                     else:
-                        _append(copy.deepcopy(el[1]))
+                        _append(_clone_oxml_element(el[1]))
                         modified_chars += _count_text(el[2])
                     del_count += 1
                 for k in range(j1, j2):
@@ -10558,7 +10569,7 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
                     if el[0] == "p":
                         _append(_build_inserted_paragraph(el[2], author, date, rid_counter))
                     else:
-                        _append(copy.deepcopy(el[1]))
+                        _append(_clone_oxml_element(el[1]))
                     ins_count += 1
 
         # ── 附加区域：页眉页脚 / 脚注尾注 / 文本框 / 域 ──
@@ -10789,7 +10800,6 @@ def _diff_table_block(doc_o, doc_r, tbl_el_o, tbl_el_r, level, author, date,
                       rid_counter, case_sensitive, ignore_ws):
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
-    import copy
     try:
         t_o = Table(tbl_el_o, doc_o)
         t_r = Table(tbl_el_r, doc_r)
@@ -10799,7 +10809,7 @@ def _diff_table_block(doc_o, doc_r, tbl_el_o, tbl_el_r, level, author, date,
         cols_r = len(t_r.columns)
         if rows_o != rows_r or cols_o != cols_r:
             return None  # 结构不同 → 调用方复制两份
-        new_el = copy.deepcopy(tbl_el_o)
+        new_el = _clone_oxml_element(tbl_el_o)
         new_tbl = Table(new_el, doc_o)
         for ri in range(rows_o):
             for ci in range(cols_o):

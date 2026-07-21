@@ -44,6 +44,10 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -310,6 +314,7 @@ fun WordCountApp(initialUris: List<Uri>) {
                 context = context,
                 scope = scope,
                 snackbar = snackbar,
+                availableFiles = entries.toList(),
                 modifier = Modifier.padding(padding)
             )
         } else {
@@ -1365,6 +1370,7 @@ fun CompareScreen(
     context: android.content.Context,
     scope: CoroutineScope = rememberCoroutineScope(),
     snackbar: SnackbarHostState,
+    availableFiles: List<FileEntry> = emptyList(),   // v1.1.2: 字数统计列表中的文件（供直接选用）
     modifier: Modifier = Modifier
 ) {
     var origCf by remember { mutableStateOf<CachedFile?>(null) }
@@ -1384,6 +1390,14 @@ fun CompareScreen(
     var optField by remember { mutableStateOf(true) }   // 域
 
     var pickSlot by remember { mutableStateOf(0) } // 0=原文档 1=修订文档
+    var showListPicker by remember { mutableStateOf(0) } // 0=不显示 1=选原文档 2=选修订文档
+    // v1.1.2: 从字数统计列表中过滤出 DOCX 文件供选用
+    val docxFiles = remember(availableFiles) {
+        availableFiles.filter { fe ->
+            val p = fe.cachePath.lowercase()
+            p.endsWith(".docx") || p.endsWith(".doc")
+        }
+    }
     val docPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             try {
@@ -1454,9 +1468,11 @@ fun CompareScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         // 原文档
-        CompareFileCard("原文档", origCf?.displayName, "选择原文档") { pick(0) }
+        CompareFileCard("原文档", origCf?.displayName, "选择原文档", docxFiles.isNotEmpty(),
+            onPick = { pick(0) }, onPickFromList = { showListPicker = 1 })
         // 修订文档
-        CompareFileCard("修订文档", revCf?.displayName, "选择修订文档") { pick(1) }
+        CompareFileCard("修订文档", revCf?.displayName, "选择修订文档", docxFiles.isNotEmpty(),
+            onPick = { pick(1) }, onPickFromList = { showListPicker = 2 })
 
         // 比较设置
         Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
@@ -1516,10 +1532,35 @@ fun CompareScreen(
             }
         }
     }
+
+    // v1.1.2: 从字数统计列表选择文档的对话框
+    if (showListPicker > 0 && docxFiles.isNotEmpty()) {
+        val slotLabel = if (showListPicker == 1) "原文档" else "修订文档"
+        AlertDialog(
+            onDismissRequest = { showListPicker = 0 },
+            title = { Text("从字数统计列表选择$slotLabel") },
+            text = {
+                LazyColumn(modifier = Modifier.heightIn(max = 300.dp)) {
+                    items(docxFiles) { fe ->
+                        TextButton(
+                            onClick = {
+                                val cf = CachedFile(File(fe.cachePath), fe.displayName)
+                                if (showListPicker == 1) origCf = cf else revCf = cf
+                                showListPicker = 0
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text(fe.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showListPicker = 0 }) { Text("取消") } }
+        )
+    }
 }
 
 @Composable
-private fun CompareFileCard(label: String, name: String?, btnText: String, onPick: () -> Unit) {
+private fun CompareFileCard(label: String, name: String?, btnText: String,
+    hasListFiles: Boolean = false, onPick: () -> Unit, onPickFromList: () -> Unit = {}) {
     Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
         Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -1528,7 +1569,14 @@ private fun CompareFileCard(label: String, name: String?, btnText: String, onPic
                 Text(name ?: "未选择", fontWeight = FontWeight.Medium,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            OutlinedButton(onClick = onPick) { Text(btnText) }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (hasListFiles) {
+                    TextButton(onClick = onPickFromList, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                        Text("从列表", fontSize = 12.sp)
+                    }
+                }
+                OutlinedButton(onClick = onPick) { Text(btnText) }
+            }
         }
     }
 }
