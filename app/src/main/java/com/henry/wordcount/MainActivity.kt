@@ -839,8 +839,8 @@ private fun addFiles(
 
                         Log.d("WordCount", "PDF $dName: ${stats.first}w/${stats.second}fe/${stats.third}nc/${stats.fourth}ch reliable=${res.reliable} cjkRatio=%.2f looksGarbage=$looksLikeGarbage needOcr=$needOcrPref".format(cjkRatio))
 
-                        // ★ 尝试 ML Kit OCR（PdfRenderer 渲染 + 中文识别器）
-                        val ocrRes = if (needOcrPref) PdfOcrEngine.extractText(f) else null
+                        // ★ 尝试 ML Kit OCR（系统 PdfRenderer 渲染 + 中文识别器；扫描件 JPX/JBIG2 自动回退 PdfiumAndroid）
+                        val ocrRes = if (needOcrPref) PdfOcrEngine.extractText(context, f) else null
 
                         if (ocrRes != null) {
                             // PDF OCR 成功 → 用OCR结果
@@ -914,12 +914,24 @@ private fun addFiles(
                                     } catch (pfde: Throwable) {
                                         Log.w("WordCount", "PDF PdfRenderer 页数获取失败: $dName - ${pfde.message}")
                                     }
-                                    Log.e("WordCount", "PDF 全部OCR路径失败(扫描件): $dName extracted=${stats.first}w/${stats.fourth}c pages=$pdfPageCount")
+                                    Log.e("WordCount", "PDF 全部OCR路径失败(扫描件): $dName extracted=${stats.first}w/${stats.fourth}c pages=$pdfPageCount reason=${PdfOcrEngine.lastFailReason}")
+                                    val pdfErrMsg = when (PdfOcrEngine.lastFailReason) {
+                                        PdfOcrEngine.FailReason.OCR_DISABLED ->
+                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），OCR 引擎未就绪（ML Kit 模型不可用）。"
+                                        PdfOcrEngine.FailReason.RENDER_FAILED, PdfOcrEngine.FailReason.PDFIUM_FAILED ->
+                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），PDF 渲染失败（文件可能损坏或被加密）。"
+                                        PdfOcrEngine.FailReason.OCR_EMPTY ->
+                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），页面已渲染但 OCR 未识别到文字（可能为纯图/手写/模糊不清）。"
+                                        PdfOcrEngine.FailReason.PDFIUM_BLANK ->
+                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），系统及备用渲染引擎均渲染为空白页（常见于 JPEG2000/JBIG2 压缩扫描图）。建议用文字版 PDF 或在电脑端处理。"
+                                        else -> // RENDER_BLANK 或 OK
+                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），系统渲染出空白页（疑似 JPEG2000/JBIG2 压缩扫描图，系统 Pdfium 不支持）。已尝试备用渲染引擎。"
+                                    }
                                     entries.add(FileEntry(
                                         id = "e${System.currentTimeMillis()}_${i}_pdf_err",
                                         displayName = dName,
                                         cachePath = f.absolutePath,
-                                        error = "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），当前设备 OCR 引擎无法识别。建议使用文字版 PDF（非扫描/截图）。"
+                                        error = pdfErrMsg
                                     ))
                                 } else if (res.text.isBlank()) {
                                     entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = dName, cachePath = f.absolutePath, error = "无法从该 PDF 提取文字（可能为纯图片扫描件或加密文件）"))

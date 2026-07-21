@@ -12,6 +12,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // PdfiumAndroid（com.github.barteksc）托管在 jitpack
+        maven("https://jitpack.io")
     }
 }
 
