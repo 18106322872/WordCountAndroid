@@ -263,10 +263,16 @@ fun WordCountApp(initialUris: List<Uri>) {
     Scaffold(
         topBar = {
             TopAppBar(title = {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    TabToggle("字数统计", !compareMode) { compareMode = false }
-                    Spacer(Modifier.width(6.dp))
-                    TabToggle("文档比较", compareMode) { compareMode = true }
+                Column {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        TabToggle("字数统计", !compareMode) { compareMode = false }
+                        Spacer(Modifier.width(6.dp))
+                        TabToggle("文档比较", compareMode) { compareMode = true }
+                        Spacer(Modifier.weight(1f))
+                        Text("v${appVersionName}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.Gray)
+                    }
                 }
             })
         },

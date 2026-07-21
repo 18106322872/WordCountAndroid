@@ -10413,15 +10413,25 @@ def main():
 # 输出：带 w:ins/w:del 修订标记的 .docx + 修改句字数统计
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _clone_oxml_element(el):
-    """安全克隆 oxml/lxml 元素（Android Chaquopy 兼容）。
+def _safe_add_paragraph(doc, text):
+    """在输出文档中创建纯文本段落（安全：不跨文档克隆 oxml）。
 
-    Android Chaquopy 上 copy.deepcopy 对 lxml C 扩展对象会触发：
-      FileNotFoundError: .../chaquopy/AssetFinder/scripts
-    改用 lxml 自身的序列化/反序列化来克隆，完全绕过 Python copy 模块。
+    Android Chaquopy 上 lxml.etree.fromstring() 和 copy.deepcopy()
+    对 C 扩展对象均会触发 FileNotFoundError: AssetFinder/scripts。
+    唯一安全的方式是用 docx 高级 API 在目标文档内原地创建元素。
     """
-    from lxml.etree import fromstring, tostring
-    return fromstring(tostring(el))
+    p = doc.add_paragraph(text)
+    return p._element
+
+
+def _safe_add_table_note(doc, label, text_summary=""):
+    """安全地添加一个表格占位段落（替代不可靠的 oxml 克隆）。"""
+    p = doc.add_paragraph()
+    run = p.add_run(f"[{label}]")
+    run.bold = True
+    if text_summary:
+        p.add_run(" " + text_summary[:200])
+    return p._element
 
 
 def compare_docx(orig_path, rev_path, out_path, opts_json):
@@ -10512,7 +10522,11 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
         for tag, i1, i2, j1, j2 in merged:
             if tag == "equal":
                 for k in range(i1, i2):
-                    _append(_clone_oxml_element(blocks_o[k][1]))
+                    el = blocks_o[k]
+                    if el[0] == "p":
+                        _append(_safe_add_paragraph(out, el[2]))
+                    else:
+                        _append(_safe_add_table_note(out, "原文表格", el[2]))
             elif tag == "delete":
                 for k in range(i1, i2):
                     el = blocks_o[k]
@@ -10520,7 +10534,7 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
                         _append(_build_deleted_paragraph(el[2], author, date, rid_counter))
                         modified_chars += _count_modified_sentences(el[2], [(0, len(el[2]))])
                     else:
-                        _append(_clone_oxml_element(el[1]))
+                        _append(_safe_add_table_note(out, "已删除表格", el[2]))
                         modified_chars += _count_text(el[2])
                     del_count += 1
             elif tag == "insert":
@@ -10529,7 +10543,7 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
                     if el[0] == "p":
                         _append(_build_inserted_paragraph(el[2], author, date, rid_counter))
                     else:
-                        _append(_clone_oxml_element(el[1]))
+                        _append(_safe_add_table_note(out, "新增表格", el[2]))
                     ins_count += 1
             elif tag == "replace":
                 single = (i2 - i1 == 1 and j2 - j1 == 1)
@@ -10549,8 +10563,8 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
                         if new_el is not None:
                             _append(new_el)
                         else:
-                            _append(_clone_oxml_element(bo[1]))
-                            _append(_clone_oxml_element(br[1]))
+                            _append(_safe_add_table_note(out, "原表格", bo[2]))
+                            _append(_safe_add_table_note(out, "修订表格", br[2]))
                         modified_chars += _count_text(bo[2])
                         rep_count += 1
                         continue
@@ -10561,7 +10575,7 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
                         _append(_build_deleted_paragraph(el[2], author, date, rid_counter))
                         modified_chars += _count_modified_sentences(el[2], [(0, len(el[2]))])
                     else:
-                        _append(_clone_oxml_element(el[1]))
+                        _append(_safe_add_table_note(out, "已删除表格", el[2]))
                         modified_chars += _count_text(el[2])
                     del_count += 1
                 for k in range(j1, j2):
@@ -10569,7 +10583,7 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
                     if el[0] == "p":
                         _append(_build_inserted_paragraph(el[2], author, date, rid_counter))
                     else:
-                        _append(_clone_oxml_element(el[1]))
+                        _append(_safe_add_table_note(out, "新增表格", el[2]))
                     ins_count += 1
 
         # ── 附加区域：页眉页脚 / 脚注尾注 / 文本框 / 域 ──
@@ -10798,36 +10812,14 @@ def _build_note_paragraph(label):
 
 def _diff_table_block(doc_o, doc_r, tbl_el_o, tbl_el_r, level, author, date,
                       rid_counter, case_sensitive, ignore_ws):
-    from docx.oxml.ns import qn
-    from docx.oxml import OxmlElement
-    try:
-        t_o = Table(tbl_el_o, doc_o)
-        t_r = Table(tbl_el_r, doc_r)
-        rows_o = len(t_o.rows)
-        cols_o = len(t_o.columns)
-        rows_r = len(t_r.rows)
-        cols_r = len(t_r.columns)
-        if rows_o != rows_r or cols_o != cols_r:
-            return None  # 结构不同 → 调用方复制两份
-        new_el = _clone_oxml_element(tbl_el_o)
-        new_tbl = Table(new_el, doc_o)
-        for ri in range(rows_o):
-            for ci in range(cols_o):
-                to = (t_o.cell(ri, ci).text or "")
-                tr = (t_r.cell(ri, ci).text or "")
-                new_cell = new_tbl.cell(ri, ci)
-                tc = new_cell._tc
-                for p_el in tc.findall(qn("w:p")):
-                    tc.remove(p_el)
-                p_el = OxmlElement("w:p")
-                dp, _ = _build_diff_paragraph(to, tr, level, author, date,
-                                              rid_counter, case_sensitive, ignore_ws)
-                for child in list(dp):
-                    p_el.append(child)
-                tc.append(p_el)
-        return new_el
-    except Exception:
-        return None
+    """表格逐单元格字符级 diff。
+
+    注意：Android Chaquopy 上无法安全克隆 oxml 表格元素（lxml.fromstring/deepcopy
+    均触发 AssetFinder 错误），因此本函数在 Android 上始终返回 None，
+    由调用方降级为表格占位段落。
+    桌面端如需表格 diff 功能，可改为接收输出文档参数并用 add_table() 原地重建。
+    """
+    return None
 
 
 def _extract_extra(doc, kind):
