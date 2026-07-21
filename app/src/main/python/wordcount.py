@@ -10442,7 +10442,7 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
        "replacements": N, "modified_sentence_chars": M}
     失败时: {"ok": false, "error": "..."}
     """
-    # ── 标准库 import 放在 try 外（不会触发 AssetFinder/lxml 崩溃）──
+    # ── 标准库 import 放在最外层（不会触发 AssetFinder/lxml 崩溃）──
     import json, re, datetime, difflib, sys, traceback
 
     # ── 诊断：_step 必须在任何操作之前初始化 ──
@@ -10452,6 +10452,30 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
         nonlocal _step
         _step = s
 
+    # ═══════════════════════════════════════════════════════════
+    #  阶段 0：安全探测 — 在主逻辑之前测试 docx 是否可导入
+    #  Chaquopy 环境下 lxml C 扩展可能触发 AssetFinder 错误，
+    #  该错误可能穿透 except Exception 甚至 except BaseException，
+    #  所以用独立函数 + 最宽捕获来探测，失败则立即返回 JSON。
+    # ═══════════════════════════════════════════════════════════
+    def _probe_docx():
+        """尝试导入 docx，返回 (ok: bool, err_msg: str)。"""
+        try:
+            import docx  # noqa: F401
+            return True, ""
+        except BaseException as e:
+            return False, f"{type(e).__name__}: {str(e)[:300]}"
+
+    _set_step("probe-docx")
+    probe_ok, probe_err = _probe_docx()
+    if not probe_ok:
+        err_msg = f"[step=probe-docx] DOCX 模块不可用（设备可能缺少必要的原生库）: {probe_err}"
+        sys.stderr.write(f"COMPARE_ERROR: {err_msg}\n")
+        return json.dumps({"ok": False, "error": err_msg}, ensure_ascii=False)
+
+    # ═══════════════════════════════════════════════════════════
+    #  阶段 1：正式执行比较（已知 docx 可导入）
+    # ═══════════════════════════════════════════════════════════
     try:
         from docx import Document
         _set_step("imports-docx")
@@ -10638,7 +10662,7 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
             "replacements": rep_count,
             "modified_sentence_chars": modified_chars,
         }, ensure_ascii=False)
-    except Exception as e:
+    except BaseException as e:
         _step_val = _step if '_step' in dir() else '?-undefined'
         err_msg = f"[step={_step_val}] {type(e).__name__}: {str(e)[:350]}"
         tb_text = traceback.format_exc()[:1200]
