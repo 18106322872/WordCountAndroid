@@ -8,7 +8,6 @@ import android.util.Log
 import com.shockwave.pdfium.PdfiumCore
 import com.shockwave.pdfium.util.Size
 import java.io.File
-import java.io.RandomAccessFile
 import kotlin.math.max
 import kotlin.math.min
 
@@ -18,12 +17,7 @@ import kotlin.math.min
  * 渲染链路（按优先级）：
  *  1) 系统 PdfRenderer（轻量）→ ML Kit OCR
  *  2) PdfiumAndroid（支持 JPX/JBIG2 扫描图）→ ML Kit OCR
- *  3) PDF 内嵌图片直接提取（v1.0.39 新增，完全绕过渲染器）
- *
- * v1.0.39 改进：
- *  - Pdfium 新增文件路径字符串打开模式（部分版本 PFD 有兼容问题）
- *  - 新增 extractEmbeddedImages 路径：从 PDF 二进制找 Image XObject → 解码 → OCR
- *  - 每步详细日志 + 失败原因精确分类
+ *  3) PDF 内嵌图片直接提取（v1.0.39，完全绕过渲染器）
  */
 object PdfOcrEngine {
 
@@ -42,7 +36,7 @@ object PdfOcrEngine {
         PDFIUM_BLANK,
         PDFIUM_FAILED,
         OCR_EMPTY,
-        NO_EMBEDDED_IMAGES   // v1.0.39: PDF 中未找到可提取的内嵌图片
+        NO_EMBEDDED_IMAGES
     }
 
     @Volatile var lastFailReason: FailReason = FailReason.OK
@@ -55,17 +49,17 @@ object PdfOcrEngine {
             lastFailReason = FailReason.OCR_DISABLED
             return null
         }
-        Log.d("WordCount", "PdfOcr 开始: ${file.name} (${file.length()} bytes, path=${file.absolutePath})")
+        Log.d("WordCount", "PdfOcr 开始: ${file.name} (${file.length()} bytes)")
 
         // 1) 系统 PdfRenderer
         val sys = renderWithSystem(file)
         if (sys != null) return sys
 
-        // 2) PdfiumAndroid（先尝试 PFD 模式，再尝试文件路径模式）
+        // 2) PdfiumAndroid（PFD + ByteArray 双模式）
         val pdfium = renderWithPdfium(context, file)
         if (pdfium != null) return pdfium
 
-        // 3) v1.0.39: 内嵌图片提取（完全绕过渲染器，对扫描件最可靠）
+        // 3) v1.0.39: 内嵌图片提取
         Log.d("WordCount", "PdfOcr 尝试路径3(内嵌图片提取): ${file.name}")
         val images = extractEmbeddedImages(file)
         if (images.isNotEmpty()) {
@@ -80,7 +74,7 @@ object PdfOcrEngine {
                 finally { bmp.recycle() }
             }
             if (anyText) {
-                Log.d("WordCount", "PdfOcr(内嵌图片) 成功: ${images.size}张图, 总文字=${sb.length}")
+                Log.d("WordCount", "PdfOcr(内嵌图片) 成功: ${images.size}张图")
                 return PdfOcrResult(sb.toString().trim(), images.size)
             }
             lastFailReason = FailReason.OCR_EMPTY
@@ -92,23 +86,18 @@ object PdfOcrEngine {
         return null
     }
 
-    // ───────────────────── 系统 PdfRenderer ─────────────────────
+    // ══════════════════ 系统 PdfRenderer ══════════════════
 
     private fun renderWithSystem(file: File): PdfOcrResult? {
         val pfd = try {
             ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
         } catch (e: Throwable) {
-            Log.w("WordCount", "PdfOcr(sys) PFD失败 ${file.name}: ${e.javaClass.simpleName}: ${e.message}")
-            lastFailReason = FailReason.RENDER_FAILED
-            return null
+            lastFailReason = FailReason.RENDER_FAILED; return null
         }
         val renderer = try { PdfRenderer(pfd) } catch (e: Throwable) {
-            Log.w("WordCount", "PdfOcr(sys) Renderer失败 ${file.name}: ${e.message}")
             runCatching { pfd.close() }
-            lastFailReason = FailReason.RENDER_FAILED
-            return null
+            lastFailReason = FailReason.RENDER_FAILED; return null
         }
-
         var result: PdfOcrResult? = null
         try {
             val pageCount = renderer.pageCount
@@ -137,14 +126,11 @@ object PdfOcrEngine {
             }
 
             val text = sb.toString().trim()
-            Log.d("WordCount", "PdfOcr(sys) 完成: ${limit}页, 内容=$anyRenderedContent, OCR=$anyOcrText, 错误=$pageErrors")
-
             if (text.isNotBlank()) result = PdfOcrResult(text, pageCount)
             else if (anyRenderedContent) lastFailReason = FailReason.OCR_EMPTY
             else if (pageErrors > 0) lastFailReason = FailReason.RENDER_PARTIAL
             else lastFailReason = FailReason.RENDER_BLANK
         } catch (e: Throwable) {
-            Log.w("WordCount", "PdfOcr(sys) 异常: ${e.javaClass.simpleName}: ${e.message}")
             lastFailReason = FailReason.RENDER_FAILED
         } finally {
             runCatching { renderer.close() }; runCatching { pfd.close() }
@@ -152,58 +138,60 @@ object PdfOcrEngine {
         return result
     }
 
-    // ───────────────────── PdfiumAndroid（双模式） ─────────────────────
+    // ══════════════════ PdfiumAndroid ══════════════════
 
     private fun renderWithPdfium(context: Context, file: File): PdfOcrResult? {
         val core = try { PdfiumCore(context) } catch (e: Throwable) {
-            Log.w("WordCount", "PdfOcr(pdfium) 初始化失败: ${e.javaClass.simpleName}: ${e.message}")
-            lastFailReason = FailReason.PDFIUM_UNAVAILABLE
-            return null
+            Log.w("WordCount", "PdfOcr(pdfium) 初始化失败: ${e.javaClass.simpleName}")
+            lastFailReason = FailReason.PDFIUM_UNAVAILABLE; return null
         }
 
-        // 尝试模式A：ParcelFileDescriptor
+        // 模式A：PFD
         val pfdResult = tryRenderWithPfd(core, file)
         if (pfdResult != null) return pfdResult
 
-        // 尝试模式B：文件路径字符串（某些 Pdfium 版本 PFD 有 bug，路径模式更稳定）
+        // 模式B：ByteArray（读取文件内容，绕过 PFD 问题）
         if (lastFailReason == FailReason.PDFIUM_FAILED) {
-            Log.d("WordCount", "PdfOcr(pdfium) PFD失败，尝试文件路径模式...")
-            val pathResult = tryRenderWithPath(core, file)
-            if (pathResult != null) return pathResult
+            Log.d("WordCount", "PdfOcr(pdfium) PFD失败，尝试ByteArray模式...")
+            val bytesResult = tryRenderWithBytes(core, file)
+            if (bytesResult != null) return bytesResult
         }
-
         return null
     }
 
-    /** Pdfium 模式A：用 ParcelFileDescriptor 打开 */
+    /** Pdfium 模式A：ParcelFileDescriptor */
+    @Suppress("UNCHECKED_CAST")
     private fun tryRenderWithPfd(core: PdfiumCore, file: File): PdfOcrResult? {
-        val pfd = try { ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY) } catch (e: Throwable) {
-            Log.w("WordCount", "PdfOcr(pdfium-PDF) PFD打开失败: ${e.message}")
+        val pfd = try { ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY) } catch (_: Throwable) {
             lastFailReason = FailReason.PDFIUM_FAILED; return null
         }
         return try {
+            // newDocument 返回 PdfDocument 类型（非 Int）
             val doc = core.newDocument(pfd)
-            doRenderPages(core, doc, file, pfd)
+            renderPdfiumPages(core, doc, file, pfd)
         } catch (e: Throwable) {
-            Log.w("WordCount", "PdfOcr(pdfium-PDF) newDocument失败: ${e.javaClass.simpleName}: ${e.message}")
+            Log.w("WordCount", "PdfOcr(PDF) 失败: ${e.javaClass.simpleName}: ${e.message}")
             runCatching { pfd.close() }
             lastFailReason = FailReason.PDFIUM_FAILED; null
         }
     }
 
-    /** Pdfium 模式B：用文件路径字符串打开（绕过 PFD 兼容性问题） */
-    private fun tryRenderWithPath(core: PdfiumCore, file: File): PdfOcrResult? {
+    /** Pdfium 模式B：文件内容为 ByteArray */
+    @Suppress("UNCHECKED_CAST")
+    private fun tryRenderWithBytes(core: PdfiumCore, file: File): PdfOcrResult? {
         return try {
-            val doc = core.newDocument(file.absolutePath)
-            doRenderPages(core, doc, file, null)
+            val bytes = file.readBytes()
+            val doc = core.newDocument(bytes)
+            renderPdfiumPages(core, doc, file, null)
         } catch (e: Throwable) {
-            Log.w("WordCount", "PdfOcr(pdfium-PATH) newDocument失败: ${e.javaClass.simpleName}: ${e.message}")
+            Log.w("WordCount", "PdfOcr(BYTES) 失败: ${e.javaClass.simpleName}: ${e.message}")
             lastFailReason = FailReason.PDFIUM_FAILED; null
         }
     }
 
-    /** Pdfium 共享的页面渲染逻辑 */
-    private fun doRenderPages(core: PdfiumCore, doc: Int, file: File, pfd: ParcelFileDescriptor?): PdfOcrResult? {
+    /** Pdfium 共享页面渲染（doc 用 Any 类型适配不同版本 API） */
+    @Suppress("UNCHECKED_CAST")
+    private fun renderPdfiumPages(core: PdfiumCore, doc: Any, file: File, pfd: ParcelFileDescriptor?): PdfOcrResult? {
         return try {
             val pageCount = core.getPageCount(doc)
             val limit = min(pageCount, MAX_PAGES)
@@ -226,15 +214,15 @@ object PdfOcrEngine {
                         val t = OcrEngine.recognizeBitmap(bmp, skipPostFilter = true)
                         if (t.isNotBlank()) { sb.append(t).append('\n'); anyOcr = true }
                     } catch (_: Throwable) { errors++ } finally { bmp.recycle() }
-                } finally { /* page 随 closeDocument 统一释放 */ }
+                } finally { /* 页面随 closeDocument 统一释放 */ }
             }
 
             val text = sb.toString().trim()
-            Log.d("WordCount", "PdfOcr(pdfium) 完成: ${limit}页, 内容=$anyContent, OCR=$anyOcr, 错误=$errors")
+            Log.d("WordCount", "PdfOcr(pdfium) 完成: 内容=$anyContent, OCR=$anyOcr, 错误=$errors")
             if (text.isNotBlank()) PdfOcrResult(text, pageCount)
             else { lastFailReason = if (anyContent) FailReason.OCR_EMPTY else FailReason.PDFIUM_BLANK; null }
         } catch (e: Throwable) {
-            Log.w("WordCount", "PdfOcr(pdfium) 渲染异常: ${e.javaClass.simpleName}: ${e.message}")
+            Log.w("WordCount", "PdfOcr(pdfium) 异常: ${e.javaClass.simpleName}: ${e.message}")
             lastFailReason = FailReason.PDFIUM_FAILED; null
         } finally {
             runCatching { core.closeDocument(doc) }
@@ -242,23 +230,13 @@ object PdfOcrEngine {
         }
     }
 
-    // ══════════════════ v1.0.39: PDF 内嵌图片提取（最终后备） ══════════════════
+    // ══════════════════ v1.0.39: PDF 内嵌图片提取 ══════════════════
 
-    /**
-     * 从 PDF 二进制中提取内嵌图片（Image XObject），用于扫描件 PDF 的 OCR。
-     *
-     * 原理：大多数扫描件 PDF 的每页内容就是一个或多个 Image XObject（JPEG/JPEG2000）。
-     * 直接提取这些原始字节、解码为 Bitmap、交给 ML Kit OCR —— 完全不依赖任何 PDF 渲染器。
-     *
-     * @return 解码后的 Bitmap 列表（可能为空）；调用方负责 recycle
-     */
     private fun extractEmbeddedImages(file: File): List<Bitmap> {
         val results = mutableListOf<Bitmap>()
         try {
             val data = file.readBytes()
             val str = String(data, 0, data.size, Charsets.ISO_8859_1)
-            // 找所有 /Subtype /Image 对象（在 stream 前面声明）
-            // PDF 格式: ... /Type /XObject /Subtype /Image ... /Length N >> stream ... endstream
             val imgPattern = Regex("""/Type\s*/XObject\s*/Subtype\s*/Image[^>]*?/Length\s+(\d+)""")
             val matches = imgPattern.findAll(str)
 
@@ -266,53 +244,36 @@ object PdfOcrEngine {
                 if (results.size >= MAX_PAGES) break
                 try {
                     val length = match.groupValues[1].trim().toIntOrNull() ?: continue
-                    if (length < 100 || length > 50_000_000) continue  // 合理范围: 100B ~ 50MB
-
-                    // 从 dict 结束位置找 stream 关键字
+                    if (length < 100 || length > 50_000_000) continue
                     val dictEnd = match.range.last
                     val streamStart = str.indexOf("stream", dictEnd)
                     if (streamStart < 0 || streamStart > dictEnd + 500) continue
-
-                    // stream 关键字后面可能有 \r\n 或 \n（PDF 规范要求）
-                    val dataStart = streamStart + 7 + when {
-                        data.getOrNull(streamStart + 6)?.code == 0x0D -> 1  // \r\n
-                        data.getOrNull(streamStart + 6)?.code == 0x0A -> 1  // \n
+                    // stream 后跟 \r\n 或 \n（PDF 规范）
+                    val b1 = data.getOrNull(streamStart + 6)?.toInt() ?: 0
+                    val offset = when {
+                        b1 == 0x0D -> 2  // \r\n
+                        b1 == 0x0A -> 1  // \n
                         else -> 0
                     }.coerceAtMost(2)
-
-                    // 确保不越界
+                    val dataStart = streamStart + 7 + offset
                     if (dataStart + length > data.size) continue
-
-                    // 提取原始图像数据
                     val imgBytes = data.sliceArray(dataStart until dataStart + length)
-
-                    // 尝试解码为 Bitmap（支持 JPEG/PNG/GIF/WebP 等 Android 原生格式）
-                    val bmp = tryDecodeImage(imgBytes) ?: continue
-                    if (bmp.width > 10 && bmp.height > 10) {
-                        results.add(bmp)
-                        Log.d("WordCount", "PdfOcr(内嵌图${idx+1}) 提取成功: ${bmp.width}x${bmp.height}, 格式推断=猜, 大小=${imgBytes.size}bytes")
-                    } else {
-                        bmp.recycle()
-                    }
+                    val bmp = BitmapFactoryDecode(imgBytes) ?: continue
+                    if (bmp.width > 10 && bmp.height > 10) results.add(bmp) else bmp.recycle()
                 } catch (_: Throwable) {}
             }
-
-            Log.d("WordCount", "PdfOcr(内嵌图片) 共提取 ${results.size} 张图片")
+            Log.d("WordCount", "PdfOcr(内嵌图片) 提取 ${results.size} 张")
         } catch (e: Throwable) {
-            Log.w("WordCount", "PdfOcr(内嵌图片) 提取异常: ${e.javaClass.simpleName}: ${e.message}")
+            Log.w("WordCount", "PdfOcr(内嵌图片) 异常: ${e.javaClass.simpleName}")
         }
         return results
     }
 
-    /** 尝试用 Android BitmapFactory 解码图像字节（支持 JPEG/PNG/GIF/WebP/BMP） */
-    private fun tryDecodeImage(bytes: ByteArray): Bitmap? {
-        return try {
-            val opts = android.graphics.BitmapFactory.Options()
-            opts.inSampleSize = 1  // 不缩放，保持原尺寸以便 OCR
-            val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-            if (bmp == null) null else bmp
-        } catch (_: Throwable) { null }
-    }
+    private fun BitmapFactoryDecode(bytes: ByteArray): Bitmap? = try {
+        val opts = android.graphics.BitmapFactory.Options()
+        opts.inSampleSize = 1
+        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+    } catch (_: Throwable) { null }
 
     // ───────────────────── 工具函数 ─────────────────────
 
@@ -332,6 +293,8 @@ object PdfOcrEngine {
         if (s == 0) true else (nw.toDouble() / s) < 0.005
     } catch (_: Throwable) { false }
 
-    private fun computeScale(w: Int, h: Int): Float =
-        if (max(w, h) <= MAX_DIM) 1f else MAX_DIM.toFloat() / max(w, h)
+    private fun computeScale(w: Int, h: Int): Float {
+        val maxSide = max(w, h)
+        return if (maxSide <= MAX_DIM) 1f else MAX_DIM.toFloat() / maxSide
+    }
 }
