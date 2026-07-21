@@ -286,7 +286,7 @@ object PdfOcrEngine {
                 return null
             }
 
-            Log.d("WordCount", "PdfOcr(PyMuPDF) 渲染成功: ${file.name} → ${b64Images.size}张图, $pages页")
+            Log.d("WordCount", "PdfOcr(PyMuPDF) 渲染成功: ${file.name} → ${b64Images.size}张图, ${pages}页")
             val sb = StringBuilder()
             var anyText = false
             for ((idx, b64) in b64Images.withIndex()) {
@@ -441,7 +441,7 @@ object PdfOcrEngine {
 
         while (pos <= data.size - kw.size - 2 && attempts < maxAttempts && out.size < MAX_PAGES) {
             attempts++
-            val idx = indexOf(data, kw, pos)
+            val idx = indexOfBytes(data, kw, pos)
             if (idx < 0) break
 
             val afterKw = idx + kw.size
@@ -453,7 +453,7 @@ object PdfOcrEngine {
                 else -> { pos = idx + 1; continue }
             }
 
-            val endPos = indexOf(data, endKw, dataStart)
+            val endPos = indexOfBytes(data, endKw, dataStart)
             // stream 数据长度限制: 1KB ~ 10MB
             val dataLen = if (endPos >= 0) endPos - dataStart else min(10 * 1024 * 1024, data.size - dataStart)
             if (dataLen > 1024 && dataLen < 10 * 1024 * 1024 && !seen.contains(dataStart)) {
@@ -500,5 +500,16 @@ object PdfOcrEngine {
     private fun computeScale(w: Int, h: Int): Float {
         val maxSide = max(w, h)
         return if (maxSide <= MAX_DIM) 1f else MAX_DIM.toFloat() / maxSide
+    }
+
+    /** 在 byte 数组中查找子数组位置（类似 String.indexOf） */
+    private fun indexOfBytes(haystack: ByteArray, needle: ByteArray, fromIndex: Int): Int {
+        outer@ for (i in fromIndex..haystack.size - needle.size) {
+            for (j in needle.indices) {
+                if (haystack[i + j] != needle[j]) continue@outer
+            }
+            return i
+        }
+        return -1
     }
 }
