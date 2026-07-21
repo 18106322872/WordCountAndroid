@@ -701,9 +701,61 @@ private fun extractPdfTitleFromBytes(data: ByteArray, length: Int): String? {
     return null
 }
 
+/** v1.0.39: 独立 hash 检测函数（copyUriToCache 安全网用，不依赖 resolveDisplayName 内嵌版本） */
+private fun looksLikeHashString(s: String): Boolean {
+    val t = s.trim()
+    if (t.length < 8) return false
+    // 纯 hex（>=16字符）
+    if (t.matches(Regex("^[a-fA-F0-9]{16,}$"))) return true
+    // UUID 格式
+    if (t.matches(Regex("^[a-fA-F0-9]{8}-([a-fA-F0-9]{4}-){3}[a-fA-F0-9]{12}$"))) return true
+    // wc_/file_ 前缀
+    if (t.matches(Regex("^(wc_|file_)[0-9a-f]{10,}"))) return true
+    // 带扩展名的 hash（如 "9e20f478899dc29eb1xxx.pdf"）
+    val dotIdx = t.lastIndexOf('.')
+    if (dotIdx > 0 && dotIdx < t.length - 1 && dotIdx <= 64) {
+        val base = t.substring(0, dotIdx)
+        val ext = t.substring(dotIdx + 1)
+        if (ext.lowercase() in setOf("pdf","doc","docx","xls","xlsx","ppt","pptx","txt","png","jpg","jpeg","bmp","gif","webp")
+            && base.length >= 10 && !base.any { it.code in 0x4E00..0x9FFF }
+            && base.count { it.isLetterOrDigit() } > base.length * 0.85) {
+            val hasVowel = base.any { it.lowercaseChar() in 'a'..'z' && it.lowercaseChar() in setOf('a','e','i','o','u') }
+            val isPureHex = base.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }
+            val isMostlyDigits = base.count { it.isDigit() } > base.length * 0.6
+            if (isPureHex || (!hasVowel && isMostlyDigits) || base.length > 24) return true
+        }
+    }
+    // 长数字字母混合无中文
+    if (t.length > 20 && !t.contains(".") && !t.any { it.code in 0x4E00..0x9FFF }
+        && t.count { it.isLetterOrDigit() } > t.length * 0.9) return true
+    return false
+}
+
 private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFile {
     val originalName = resolveDisplayName(context, uri)
-    val safe = originalName.replace(Regex("[^\\w.\\-]"), "_")
+
+    // v1.0.39 最终安全网：即使 resolveDisplayName 返回了 hash 类名称，强制覆盖
+    // （某些 ROM 的 ContentResolver 返回的值能绕过 looksLikeHash 所有策略）
+    val displayName = if (looksLikeHashString(originalName)) {
+        val ext = guessExt(context, uri)
+        val typeLabel = when (ext.lowercase()) {
+            "pdf" -> "PDF文档"
+            "doc", "docx" -> "Word文档"
+            "xls", "xlsx" -> "Excel表格"
+            "ppt", "pptx" -> "PPT演示"
+            "txt" -> "文本文件"
+            "png", "jpg", "jpeg", "bmp", "gif", "webp" -> "图片"
+            else -> "文档"
+        }
+        val safeExt = if (ext.isNotBlank()) ".$ext" else ""
+        val result = "$typeLabel$safeExt"
+        Log.w("WordCount", "copyUriToCache 安全网触发: '$originalName' → '$result'")
+        result
+    } else {
+        originalName
+    }
+
+    val safe = displayName.replace(Regex("[^\\w.\\-]"), "_")
     // 保留原始扩展名用于路由判断；如果 filename 没有扩展名则从 MIME type 推断后缀
     var outName = "wc_${System.currentTimeMillis()}_$safe"
     val extFromName = safe.substringAfterLast('.', "").lowercase()
@@ -720,10 +772,10 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFi
         val magicExt = detectExtFromMagicBytes(out)
         if (magicExt.isNotBlank()) {
             val renamed = File(out.parentFile, "${out.name}.$magicExt")
-            if (out.renameTo(renamed)) return CachedFile(renamed, originalName)
+            if (out.renameTo(renamed)) return CachedFile(renamed, displayName)
         }
     }
-    return CachedFile(out, originalName)
+    return CachedFile(out, displayName)
 }
 
 /**
@@ -1041,6 +1093,8 @@ private fun addFiles(
                                             "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），系统及备用渲染引擎均渲染为空白页（常见于 JPEG2000/JBIG2 压缩扫描图）。建议用文字版 PDF 或在电脑端处理。"
                                         PdfOcrEngine.FailReason.RENDER_BLANK ->
                                             "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），系统渲染出空白页（疑似 JPEG2000/JBIG2 压缩扫描图，系统 Pdfium 不支持）。已尝试备用渲染引擎。"
+                                        PdfOcrEngine.FailReason.NO_EMBEDDED_IMAGES ->
+                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），所有渲染引擎均失败且未找到可提取的内嵌图片（可能为加密或特殊编码）。建议在电脑端处理。"
                                         else -> // OK（不应到达）
                                             "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），未能提取文字。"
                                     }
