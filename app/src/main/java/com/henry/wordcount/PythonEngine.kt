@@ -143,4 +143,23 @@ object PythonEngine {
             if (s == "None") null else s
         }
     }
+
+    /**
+     * 比较两份 DOCX，生成带修订标记的 .docx 并统计修改句字数。
+     *
+     * @param origPath 原文档缓存路径
+     * @param revPath  修订文档缓存路径
+     * @param outPath  比对结果输出路径
+     * @param optsJson 选项 JSON（level/case/whitespace/table/header_footer/footnote/textbox/field）
+     * @return Python 端返回的 JSON 字符串 {"ok":bool,"out_path":str,"insertions":N,
+     *         "deletions":N,"replacements":N,"modified_sentence_chars":M,"error":str?}
+     */
+    fun compareDocx(context: Context, origPath: String, revPath: String, outPath: String, optsJson: String): String? {
+        return withRetry(context) {
+            val py = Python.getInstance()
+            val mod = py.getModule("wordcount")
+            val result = mod.callAttr("compare_docx", origPath, revPath, outPath, optsJson)
+            result.toString()
+        }
+    }
 }

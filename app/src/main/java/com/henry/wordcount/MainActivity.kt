@@ -32,6 +32,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -211,6 +212,8 @@ fun WordCountApp(initialUris: List<Uri>) {
 
     val entries = remember { mutableStateListOf<FileEntry>() }
     var busy by remember { mutableStateOf(false) }
+    // v1.1.1: 文档比较模式开关
+    var compareMode by remember { mutableStateOf(false) }
 
     // SAF 文件选择器（不需要任何存储权限——OpenMultipleDocuments 在所有 Android 版本上均无需授权即可使用）
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
@@ -253,93 +256,124 @@ fun WordCountApp(initialUris: List<Uri>) {
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("字数统计  v$appVersionName") }) },
+        topBar = {
+            TopAppBar(title = {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    TabToggle("字数统计", !compareMode) { compareMode = false }
+                    Spacer(Modifier.width(6.dp))
+                    TabToggle("文档比较", compareMode) { compareMode = true }
+                }
+            })
+        },
         snackbarHost = { SnackbarHost(snackbar) },
-        bottomBar = {
-            Surface(shadowElevation = 4.dp) {
-                Column(Modifier.padding(12.dp)) {
-                    // 全选/取消全选 + 合计行
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (entries.isNotEmpty()) {
-                            OutlinedButton(onClick = {
-                                val idx = entries.indices
-                                for (i in idx) entries[i] = entries[i].copy(selected = true)
-                            }, modifier = Modifier.padding(end = 4.dp)) { Text("全选", style = MaterialTheme.typography.labelLarge) }
-                            OutlinedButton(onClick = {
-                                val idx = entries.indices
-                                for (i in idx) entries[i] = entries[i].copy(selected = false)
-                            }) { Text("取消全选", style = MaterialTheme.typography.labelLarge) }
-                            OutlinedButton(onClick = {
-                                entries.clear()
-                            }) { Text("清空", style = MaterialTheme.typography.labelLarge) }
+        bottomBar = if (!compareMode) {
+            {
+                Surface(shadowElevation = 4.dp) {
+                    Column(Modifier.padding(12.dp)) {
+                        // 全选/取消全选 + 合计行
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (entries.isNotEmpty()) {
+                                OutlinedButton(onClick = {
+                                    val idx = entries.indices
+                                    for (i in idx) entries[i] = entries[i].copy(selected = true)
+                                }, modifier = Modifier.padding(end = 4.dp)) { Text("全选", style = MaterialTheme.typography.labelLarge) }
+                                OutlinedButton(onClick = {
+                                    val idx = entries.indices
+                                    for (i in idx) entries[i] = entries[i].copy(selected = false)
+                                }) { Text("取消全选", style = MaterialTheme.typography.labelLarge) }
+                                OutlinedButton(onClick = {
+                                    entries.clear()
+                                }) { Text("清空", style = MaterialTheme.typography.labelLarge) }
+                            }
+                            Spacer(Modifier.weight(1f))
+                            Text("合计（已选 ${entries.count { it.selected }} 项）", fontWeight = FontWeight.Bold)
                         }
-                        Spacer(Modifier.weight(1f))
-                        Text("合计（已选 ${entries.count { it.selected }} 项）", fontWeight = FontWeight.Bold)
-                    }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        Text("字数 ${totals["words"]} ｜ 中文 ${totals["fe"]} ｜ 非中文 ${totals["nc"]} ｜ 页数 ${totals["pages"]}")
-                    }
-                    Spacer(Modifier.padding(4.dp))
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { pickWithPermission() }, modifier = Modifier.weight(1f)) { Text("选择文件") }
-                        OutlinedButton(
-                            onClick = { exportUnreliable(context, scope, snackbar, entries) },
-                            modifier = Modifier.weight(1f),
-                            enabled = entries.any { it.selected && it.result?.hasUnreliable == true }
-                        ) { Text("导出不可识别内容") }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            Text("字数 ${totals["words"]} ｜ 中文 ${totals["fe"]} ｜ 非中文 ${totals["nc"]} ｜ 页数 ${totals["pages"]}")
+                        }
+                        Spacer(Modifier.padding(4.dp))
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = { pickWithPermission() }, modifier = Modifier.weight(1f)) { Text("选择文件") }
+                            OutlinedButton(
+                                onClick = { exportUnreliable(context, scope, snackbar, entries) },
+                                modifier = Modifier.weight(1f),
+                                enabled = entries.any { it.selected && it.result?.hasUnreliable == true }
+                            ) { Text("导出不可识别内容") }
+                        }
                     }
                 }
             }
-        }
+        } else { {} }
     ) { padding ->
-        Box(Modifier.padding(padding).fillMaxSize()) {
-            if (entries.isEmpty() && !busy) {
-                Column(
-                    Modifier
-                        .fillMaxSize()
-                        .verticalScroll(rememberScrollState())
-                        .padding(horizontal = 28.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
+        if (compareMode) {
+            CompareScreen(
+                context = context,
+                scope = scope,
+                snackbar = snackbar,
+                modifier = Modifier.padding(padding)
+            )
+        } else {
+            Box(Modifier.padding(padding).fillMaxSize()) {
+                if (entries.isEmpty() && !busy) {
+                    Column(
+                        Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 28.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Description,
+                            contentDescription = null,
+                            modifier = Modifier.size(64.dp),
+                            tint = Color(0xFFBDBDBD)
+                        )
+                        Spacer(Modifier.padding(12.dp))
+                        Text("从千牛/微信 → 长按文件 → 用其他应用打开 → 选「字数统计」",
+                            color = Color.Gray, modifier = Modifier.padding(horizontal = 8.dp))
+                        Text("或点下方「选择文件」从本机选取",
+                            color = Color.Gray, modifier = Modifier.padding(horizontal = 8.dp))
+                    }
+                }
+                LazyColumn(
+                    Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Description,
-                        contentDescription = null,
-                        modifier = Modifier.size(64.dp),
-                        tint = Color(0xFFBDBDBD)
-                    )
-                    Spacer(Modifier.padding(12.dp))
-                    Text("从千牛/微信 → 长按文件 → 用其他应用打开 → 选「字数统计」",
-                        color = Color.Gray, modifier = Modifier.padding(horizontal = 8.dp))
-                    Text("或点下方「选择文件」从本机选取",
-                        color = Color.Gray, modifier = Modifier.padding(horizontal = 8.dp))
-                }
-            }
-            LazyColumn(
-                Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(entries, key = { it.id }) { entry ->
-                    FileCard(entry,
-                        onToggle = { e ->
-                            val i = entries.indexOf(e)
-                            if (i >= 0) entries[i] = e.copy(selected = !e.selected)
-                        },
-                        onDelete = { e ->
-                            val i = entries.indexOf(e)
-                            if (i >= 0) entries.removeAt(i)
-                        },
-                        onOpen = { e -> openWithOtherApp(context, e) }
-                    )
-                }
-                if (busy) item {
-                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator()
+                    items(entries, key = { it.id }) { entry ->
+                        FileCard(entry,
+                            onToggle = { e ->
+                                val i = entries.indexOf(e)
+                                if (i >= 0) entries[i] = e.copy(selected = !e.selected)
+                            },
+                            onDelete = { e ->
+                                val i = entries.indexOf(e)
+                                if (i >= 0) entries.removeAt(i)
+                            },
+                            onOpen = { e -> openWithOtherApp(context, e) }
+                        )
+                    }
+                    if (busy) item {
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator()
+                        }
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun TabToggle(label: String, selected: Boolean, onClick: () -> Unit) {
+    val color = if (selected) MaterialTheme.colorScheme.primary else Color.Gray
+    Text(
+        label,
+        color = color,
+        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+        style = MaterialTheme.typography.titleMedium,
+        modifier = Modifier.clickable { onClick() }
+    )
 }
 
 @Composable
@@ -1315,8 +1349,225 @@ private fun exportUnreliable(
             } else {
                 snackbar.showSnackbar("无可导出内容（需 fitz；当前构建未含 pymupdf）")
             }
-        } catch (e: Exception) {
+            } catch (e: Exception) {
             snackbar.showSnackbar("导出失败：${e.message}")
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v1.1.1: 文档比较界面（仿 Word「审阅 → 比较」）
+// ═══════════════════════════════════════════════════════════════════════════
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CompareScreen(
+    context: android.content.Context,
+    scope: CoroutineScope = rememberCoroutineScope(),
+    snackbar: SnackbarHostState,
+    modifier: Modifier = Modifier
+) {
+    var origCf by remember { mutableStateOf<CachedFile?>(null) }
+    var revCf by remember { mutableStateOf<CachedFile?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var resultJson by remember { mutableStateOf<String?>(null) }
+    var outPath by remember { mutableStateOf<String?>(null) }
+
+    // 比较设置（对应 Word 比较对话框）
+    var level by remember { mutableStateOf("word") }   // 'char' 字符级别 | 'word' 字词级别
+    var optCase by remember { mutableStateOf(true) }   // 大小写更改
+    var optWs by remember { mutableStateOf(false) }     // 空格
+    var optTable by remember { mutableStateOf(true) }   // 表格
+    var optHf by remember { mutableStateOf(true) }      // 页眉和页脚
+    var optFn by remember { mutableStateOf(true) }      // 脚注和尾注
+    var optTb by remember { mutableStateOf(true) }      // 文本框
+    var optField by remember { mutableStateOf(true) }   // 域
+
+    var pickSlot by remember { mutableStateOf(0) } // 0=原文档 1=修订文档
+    val docPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            try {
+                val cf = copyUriToCache(context, uri)
+                if (pickSlot == 0) origCf = cf else revCf = cf
+            } catch (e: Throwable) {
+                scope.launch { snackbar.showSnackbar("选择文件失败：${e.message}") }
+            }
+        }
+    }
+    fun pick(slot: Int) {
+        pickSlot = slot
+        docPicker.launch(arrayOf(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/msword"
+        ))
+    }
+
+    fun doCompare() {
+        val o = origCf ?: return
+        val r = revCf ?: return
+        busy = true
+        resultJson = null
+        outPath = null
+        scope.launch(Dispatchers.IO) {
+            try {
+                val out = File(context.cacheDir, "compare_result_${System.currentTimeMillis()}.docx")
+                val opts = org.json.JSONObject().apply {
+                    put("level", level)
+                    put("case", optCase)
+                    put("whitespace", optWs)
+                    put("table", optTable)
+                    put("header_footer", optHf)
+                    put("footnote", optFn)
+                    put("textbox", optTb)
+                    put("field", optField)
+                }.toString()
+                val res = PythonEngine.compareDocx(context, o.file.absolutePath, r.file.absolutePath, out.absolutePath, opts)
+                withContext(Dispatchers.Main) {
+                    if (res != null) {
+                        val j = org.json.JSONObject(res)
+                        if (j.optBoolean("ok", false)) {
+                            resultJson = res
+                            outPath = out.absolutePath
+                        } else {
+                            snackbar.showSnackbar("比较失败：${j.optString("error", "未知错误")}")
+                        }
+                    } else {
+                        snackbar.showSnackbar("比较失败：Python 无返回")
+                    }
+                    busy = false
+                }
+            } catch (e: Throwable) {
+                withContext(Dispatchers.Main) {
+                    snackbar.showSnackbar("比较异常：${e.message}")
+                    busy = false
+                }
+            }
+        }
+    }
+
+    val docxMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    Column(
+        modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        // 原文档
+        CompareFileCard("原文档", origCf?.displayName, "选择原文档") { pick(0) }
+        // 修订文档
+        CompareFileCard("修订文档", revCf?.displayName, "选择修订文档") { pick(1) }
+
+        // 比较设置
+        Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("比较设置", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                // 修订显示级别
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("修订显示级别：", modifier = Modifier.weight(1f))
+                    OutlinedButton(onClick = { level = "char" }, modifier = Modifier.padding(end = 6.dp),
+                        enabled = level != "char") { Text("字符级别") }
+                    OutlinedButton(onClick = { level = "word" }, enabled = level != "word") { Text("字词级别") }
+                }
+                HorizontalDivider()
+                CompareCheck("大小写更改", optCase) { optCase = it }
+                CompareCheck("空格", optWs) { optWs = it }
+                CompareCheck("表格", optTable) { optTable = it }
+                CompareCheck("页眉和页脚", optHf) { optHf = it }
+                CompareCheck("脚注和尾注", optFn) { optFn = it }
+                CompareCheck("文本框", optTb) { optTb = it }
+                CompareCheck("域", optField) { optField = it }
+            }
+        }
+
+        // 开始比较
+        Button(
+            onClick = { doCompare() },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = origCf != null && revCf != null && !busy
+        ) { Text(if (busy) "比较中…" else "开始比较") }
+
+        if (busy) {
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+        }
+
+        // 结果
+        resultJson?.let { rj ->
+            val j = org.json.JSONObject(rj)
+            val modChars = j.optInt("modified_sentence_chars", 0)
+            val ins = j.optInt("insertions", 0)
+            val del = j.optInt("deletions", 0)
+            val rep = j.optInt("replacements", 0)
+            Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("比较完成", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                    Text("修改涉及的句子总字数：$modChars 字", fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer, style = MaterialTheme.typography.titleLarge)
+                    Text("插入 $ins 处 ｜ 删除 $del 处 ｜ 修改 $rep 处", color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = {
+                            outPath?.let { openDocxFile(context, it, docxMime) }
+                        }, modifier = Modifier.weight(1f)) { Text("打开结果") }
+                        OutlinedButton(onClick = {
+                            outPath?.let { shareDocxFile(context, it, docxMime) }
+                        }, modifier = Modifier.weight(1f)) { Text("分享") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CompareFileCard(label: String, name: String?, btnText: String, onPick: () -> Unit) {
+    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(label, style = MaterialTheme.typography.labelMedium, color = Color.Gray)
+                Spacer(Modifier.padding(2.dp))
+                Text(name ?: "未选择", fontWeight = FontWeight.Medium,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            OutlinedButton(onClick = onPick) { Text(btnText) }
+        }
+    }
+}
+
+@Composable
+private fun CompareCheck(label: String, checked: Boolean, onToggle: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Checkbox(checked = checked, onCheckedChange = onToggle)
+        Text(label, modifier = Modifier.padding(start = 4.dp))
+    }
+}
+
+private fun openDocxFile(context: android.content.Context, path: String, mime: String) {
+    try {
+        val file = File(path)
+        if (!file.exists()) return
+        val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mime)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(intent, "打开比对结果"))
+    } catch (e: Throwable) {
+        Log.w("WordCount", "打开比对结果失败: ${e.message}")
+    }
+}
+
+private fun shareDocxFile(context: android.content.Context, path: String, mime: String) {
+    try {
+        val file = File(path)
+        if (!file.exists()) return
+        val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = mime
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(intent, "分享比对结果"))
+    } catch (e: Throwable) {
+        Log.w("WordCount", "分享比对结果失败: ${e.message}")
     }
 }
