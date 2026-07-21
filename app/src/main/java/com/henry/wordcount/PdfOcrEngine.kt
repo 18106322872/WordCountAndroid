@@ -104,16 +104,16 @@ object PdfOcrEngine {
         }
 
         // PdfRenderer 创建成功 → 至少能读取页数（截图已证实页数正确）
-        val pageCount: Int
-        val sb = StringBuilder()
-        var anyRenderedContent = false
-        var anyOcrText = false
-        var pageErrors = 0
+        var result: PdfOcrResult? = null
 
         try {
-            pageCount = renderer.pageCount
+            val pageCount = renderer.pageCount
             Log.d("WordCount", "PdfOcr(系统) ${file.name}: pageCount=$pageCount, 开始逐页渲染")
             val limit = min(pageCount, MAX_PAGES)
+            val sb = StringBuilder()
+            var anyRenderedContent = false
+            var anyOcrText = false
+            var pageErrors = 0
 
             for (i in 0 until limit) {
                 try {
@@ -171,27 +171,24 @@ object PdfOcrEngine {
             Log.d("WordCount", "PdfOcr(系统) ${file.name} 完成: ${limit}页, 渲染内容=$anyRenderedContent, OCR文字=$anyOcrText, 异常页=$pageErrors, 总文字=${text.length}")
 
             // v1.0.38: 即使有部分页异常，只要有结果就返回（部分结果 > 无结果）
-            return if (text.isNotBlank()) {
-                PdfOcrResult(text, pageCount)
+            if (text.isNotBlank()) {
+                result = PdfOcrResult(text, pageCount)
             } else if (anyRenderedContent) {
                 lastFailReason = FailReason.OCR_EMPTY
-                null
             } else if (pageErrors > 0 && !anyRenderedContent) {
-                // 所有尝试的页都出错且无任何渲染内容
                 lastFailReason = FailReason.RENDER_PARTIAL
-                null
             } else {
                 lastFailReason = FailReason.RENDER_BLANK
-                null
             }
         } catch (e: Throwable) {
             Log.w("WordCount", "PdfOcr(系统) ${file.name} 整体异常: ${e.javaClass.simpleName}: ${e.message}")
             lastFailReason = FailReason.RENDER_FAILED
-            null
         } finally {
             runCatching { renderer.close() }
             runCatching { pfd.close() }
         }
+
+        return result
     }
 
     // ───────────────────────── 备用 PdfiumAndroid ─────────────────────────
