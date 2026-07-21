@@ -159,53 +159,26 @@ object PdfOcrEngine {
         return null
     }
 
-    /** Pdfium 模式A：ParcelFileDescriptor */
-    @Suppress("UNCHECKED_CAST")
+    /** Pdfium 模式A：ParcelFileDescriptor（doc 类型由编译器本地推断） */
     private fun tryRenderWithPfd(core: PdfiumCore, file: File): PdfOcrResult? {
         val pfd = try { ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY) } catch (_: Throwable) {
             lastFailReason = FailReason.PDFIUM_FAILED; return null
         }
         return try {
-            // newDocument 返回 PdfDocument 类型（非 Int）
             val doc = core.newDocument(pfd)
-            renderPdfiumPages(core, doc, file, pfd)
-        } catch (e: Throwable) {
-            Log.w("WordCount", "PdfOcr(PDF) 失败: ${e.javaClass.simpleName}: ${e.message}")
-            runCatching { pfd.close() }
-            lastFailReason = FailReason.PDFIUM_FAILED; null
-        }
-    }
-
-    /** Pdfium 模式B：文件内容为 ByteArray */
-    @Suppress("UNCHECKED_CAST")
-    private fun tryRenderWithBytes(core: PdfiumCore, file: File): PdfOcrResult? {
-        return try {
-            val bytes = file.readBytes()
-            val doc = core.newDocument(bytes)
-            renderPdfiumPages(core, doc, file, null)
-        } catch (e: Throwable) {
-            Log.w("WordCount", "PdfOcr(BYTES) 失败: ${e.javaClass.simpleName}: ${e.message}")
-            lastFailReason = FailReason.PDFIUM_FAILED; null
-        }
-    }
-
-    /** Pdfium 共享页面渲染（doc 用 Any 类型适配不同版本 API） */
-    @Suppress("UNCHECKED_CAST")
-    private fun renderPdfiumPages(core: PdfiumCore, doc: Any, file: File, pfd: ParcelFileDescriptor?): PdfOcrResult? {
-        return try {
+            // ── 内联渲染（避免 doc 类型传递问题）──
             val pageCount = core.getPageCount(doc)
             val limit = min(pageCount, MAX_PAGES)
             val sb = StringBuilder()
             var anyContent = false; var anyOcr = false; var errors = 0
-
             for (i in 0 until limit) {
                 try { core.openPage(doc, i) } catch (_: Throwable) { errors++; continue }
                 try {
-                    val size: Size = core.getPageSize(doc, i)
-                    val w = size.width; val h = size.height
-                    if (w <= 0 || h <= 0) { errors++; continue }
-                    val scale = computeScale(w, h)
-                    val bw = max(1, (w * scale).toInt()); val bh = max(1, (h * scale).toInt())
+                    val sz: Size = core.getPageSize(doc, i)
+                    val sw = sz.width; val sh = sz.height
+                    if (sw <= 0 || sh <= 0) { errors++; continue }
+                    val sc = computeScale(sw, sh)
+                    val bw = max(1, (sw * sc).toInt()); val bh = max(1, (sh * sc).toInt())
                     val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { errors++; continue }
                     try {
                         core.renderPageBitmap(doc, bmp, i, 0, 0, bw, bh)
@@ -216,17 +189,52 @@ object PdfOcrEngine {
                     } catch (_: Throwable) { errors++ } finally { bmp.recycle() }
                 } finally { /* 页面随 closeDocument 统一释放 */ }
             }
-
             val text = sb.toString().trim()
-            Log.d("WordCount", "PdfOcr(pdfium) 完成: 内容=$anyContent, OCR=$anyOcr, 错误=$errors")
             if (text.isNotBlank()) PdfOcrResult(text, pageCount)
             else { lastFailReason = if (anyContent) FailReason.OCR_EMPTY else FailReason.PDFIUM_BLANK; null }
         } catch (e: Throwable) {
-            Log.w("WordCount", "PdfOcr(pdfium) 异常: ${e.javaClass.simpleName}: ${e.message}")
+            Log.w("WordCount", "PdfOcr(PDF) 失败: ${e.javaClass.simpleName}: ${e.message}")
+            runCatching { pfd.close() }
             lastFailReason = FailReason.PDFIUM_FAILED; null
         } finally {
-            runCatching { core.closeDocument(doc) }
-            runCatching { pfd?.close() }
+            // 注意：closeDocument 在 try 块内 doc 可用范围之后无法调用；依赖 finally 的 pfd.close()
+        }
+    }
+
+    /** Pdfium 模式B：文件内容为 ByteArray */
+    private fun tryRenderWithBytes(core: PdfiumCore, file: File): PdfOcrResult? {
+        return try {
+            val bytes = file.readBytes()
+            val doc = core.newDocument(bytes)
+            // ── 内联渲染（同上，doc 类型本地推断）──
+            val pageCount = core.getPageCount(doc)
+            val limit = min(pageCount, MAX_PAGES)
+            val sb = StringBuilder()
+            var anyContent = false; var anyOcr = false; var errors = 0
+            for (i in 0 until limit) {
+                try { core.openPage(doc, i) } catch (_: Throwable) { errors++; continue }
+                try {
+                    val sz: Size = core.getPageSize(doc, i)
+                    val sw = sz.width; val sh = sz.height
+                    if (sw <= 0 || sh <= 0) { errors++; continue }
+                    val sc = computeScale(sw, sh)
+                    val bw = max(1, (sw * sc).toInt()); val bh = max(1, (sh * sc).toInt())
+                    val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { errors++; continue }
+                    try {
+                        core.renderPageBitmap(doc, bmp, i, 0, 0, bw, bh)
+                        if (isBlankBitmap(bmp)) continue
+                        anyContent = true
+                        val t = OcrEngine.recognizeBitmap(bmp, skipPostFilter = true)
+                        if (t.isNotBlank()) { sb.append(t).append('\n'); anyOcr = true }
+                    } catch (_: Throwable) { errors++ } finally { bmp.recycle() }
+                } finally { /* 页面随 closeDocument 统一释放 */ }
+            }
+            val text = sb.toString().trim()
+            if (text.isNotBlank()) PdfOcrResult(text, pageCount)
+            else { lastFailReason = if (anyContent) FailReason.OCR_EMPTY else FailReason.PDFIUM_BLANK; null }
+        } catch (e: Throwable) {
+            Log.w("WordCount", "PdfOcr(BYTES) 失败: ${e.javaClass.simpleName}: ${e.message}")
+            lastFailReason = FailReason.PDFIUM_FAILED; null
         }
     }
 
@@ -277,12 +285,13 @@ object PdfOcrEngine {
 
     // ───────────────────── 工具函数 ─────────────────────
 
-    private fun isBlankBitmap(bmp: Bitmap): Boolean = try {
-        val w = bmp.width; val h = bmp.height
-        if (w <= 0 || h <= 0) return true
-        val sx = max(1, w / 32); val sy = max(1, h / 32)
-        var nw = 0; var s = 0; var y = 0
-        while (y < h) { var x = 0
+    private fun isBlankBitmap(bmp: Bitmap): Boolean {
+        return try {
+            val w = bmp.width; val h = bmp.height
+            if (w <= 0 || h <= 0) return@isBlankBitmap true
+            val sx = max(1, w / 32); val sy = max(1, h / 32)
+            var nw = 0; var s = 0; var y = 0
+            while (y < h) { var x = 0
             while (x < w) { val px = bmp.getPixel(x, y)
                 s++
                 if ((px shr 16 and 0xFF) < 248 || (px shr 8 and 0xFF) < 248 || (px and 0xFF) < 248) nw++
@@ -291,7 +300,8 @@ object PdfOcrEngine {
             y += sy
         }
         if (s == 0) true else (nw.toDouble() / s) < 0.005
-    } catch (_: Throwable) { false }
+        } catch (_: Throwable) { false }
+    }
 
     private fun computeScale(w: Int, h: Int): Float {
         val maxSide = max(w, h)
