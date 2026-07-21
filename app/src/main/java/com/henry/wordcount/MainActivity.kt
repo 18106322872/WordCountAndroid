@@ -1075,7 +1075,7 @@ private fun addFiles(
                                     } catch (pfde: Throwable) {
                                         Log.w("WordCount", "PDF PdfRenderer 页数获取失败: $dName - ${pfde.message}")
                                     }
-                                    Log.e("WordCount", "PDF 全部OCR路径失败(扫描件): $dName extracted=${stats.first}w/${stats.fourth}c pages=$pdfPageCount reason=${PdfOcrEngine.lastFailReason}")
+                                    Log.e("WordCount", "PDF 全部OCR路径失败(扫描件): $dName extracted=${stats.first}w/${stats.fourth}c pages=$pdfPageCount reason=${PdfOcrEngine.lastFailReason} detail=${PdfOcrEngine.lastFailDetail}")
                                     val pdfErrMsg = when (PdfOcrEngine.lastFailReason) {
                                         PdfOcrEngine.FailReason.OCR_DISABLED ->
                                             "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），OCR 引擎未就绪（ML Kit 模型不可用）。"
@@ -1086,7 +1086,7 @@ private fun addFiles(
                                         PdfOcrEngine.FailReason.PDFIUM_UNAVAILABLE ->
                                             "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），备用渲染引擎不可用（设备不支持），且系统渲染未获有效结果。"
                                         PdfOcrEngine.FailReason.PDFIUM_FAILED ->
-                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），备用渲染引擎处理失败。"
+                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），备用渲染引擎处理失败。${if (PdfOcrEngine.lastFailDetail.isNotBlank()) "(${PdfOcrEngine.lastFailDetail})" else ""}"
                                         PdfOcrEngine.FailReason.OCR_EMPTY ->
                                             "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），页面已渲染但 OCR 未识别到文字（可能为纯图/手写/模糊不清）。"
                                         PdfOcrEngine.FailReason.PDFIUM_BLANK ->
@@ -1094,7 +1094,13 @@ private fun addFiles(
                                         PdfOcrEngine.FailReason.RENDER_BLANK ->
                                             "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），系统渲染出空白页（疑似 JPEG2000/JBIG2 压缩扫描图，系统 Pdfium 不支持）。已尝试备用渲染引擎。"
                                         PdfOcrEngine.FailReason.NO_EMBEDDED_IMAGES ->
-                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），所有渲染引擎均失败且未找到可提取的内嵌图片（可能为加密或特殊编码）。建议在电脑端处理。"
+                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），所有渲染引擎均失败且未找到可提取的内嵌图片。正在尝试 PyMuPDF 渲染..."
+                                        PdfOcrEngine.FailReason.PYMUPDF_UNAVAILABLE ->
+                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），PyMuPDF 不可用或无法打开此文件。"
+                                        PdfOcrEngine.FailReason.PYMUPDF_FAILED ->
+                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），PyMuPDF 渲染失败。${if (PdfOcrEngine.lastFailDetail.isNotBlank()) "(${PdfOcrEngine.lastFailDetail})" else ""}"
+                                        PdfOcrEngine.FailReason.PYMUPDF_NO_IMAGES ->
+                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），PyMuPDF 渲染成功但无有效页面输出。"
                                         else -> // OK（不应到达）
                                             "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），未能提取文字。"
                                     }

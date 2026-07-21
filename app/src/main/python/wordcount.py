@@ -1583,6 +1583,60 @@ def _format_page_ranges(pages):
 
 
 
+def _render_pdf_pages_base64(path):
+    """用 PyMuPDF(fitz) 将 PDF 每页渲染为 PNG 图，返回 base64 编码列表。
+
+    专供 Android Kotlin 端调用（PdfOcrEngine 路径4）：
+      Kotlin 无法用系统 PdfRenderer / PdfiumAndroid 渲染时
+      → 调此函数获取页面图 → ML Kit OCR 识别文字
+
+    返回 JSON 字符串: {"ok": bool, "pages": int, "images": ["base64...", ...], "error": str|None}
+    若 fitz 不可用或打开失败 → ok=false + error 原因
+    """
+    import base64, json
+    result = {"ok": False, "pages": 0, "images": [], "error": None}
+    try:
+        import fitz
+    except ImportError:
+        result["error"] = "pymupdf_not_installed"
+        return json.dumps(result)
+
+    try:
+        doc = fitz.open(path)
+    except Exception as e:
+        result["error"] = "fitz_open_failed: " + str(e)[:200]
+        return json.dumps(result)
+
+    try:
+        page_count = doc.page_count
+        result["pages"] = page_count
+        mat = fitz.Matrix(2.0, 2.0)  # 2x 缩放足够 OCR 识别
+        images = []
+        for i in range(page_count):
+            try:
+                page = doc[i]
+                pix = page.get_pixmap(matrix=mat)
+                png_bytes = pix.tobytes(output="png")
+                if len(png_bytes) > 1000:  # 太小的可能是空白页
+                    b64 = base64.b64encode(png_bytes).decode("ascii")
+                    images.append(b64)
+            except Exception:
+                continue
+        result["images"] = images
+        if images:
+            result["ok"] = True
+        else:
+            result["error"] = "no_pages_rendered"
+    except Exception as e:
+        result["error"] = "render_error: " + str(e)[:200]
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
+    return json.dumps(result)
+
+
 def _pdf_image_ocr(path):
 
 
