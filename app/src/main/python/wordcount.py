@@ -10449,18 +10449,19 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
         nonlocal _step
         _step = s
 
-    import json, re, datetime, difflib, sys
-    _set_step("?-imports-base")
-    from docx import Document
-    _set_step("?-imports-docx")
-    from docx.oxml.ns import qn
-    from docx.oxml import OxmlElement
-    _set_step("?-imports-oxml")
-    from docx.text.paragraph import Paragraph
-    from docx.table import Table
-    _set_step("?-imports-all-ok")
-
     try:
+        import json, re, datetime, difflib, sys
+        _set_step("imports-base")
+        from docx import Document
+        _set_step("imports-docx")
+        from docx.oxml.ns import qn
+        _set_step("imports-qn")
+        from docx.oxml import OxmlElement
+        _set_step("imports-oxml")
+        from docx.text.paragraph import Paragraph
+        from docx.table import Table
+        _set_step("imports-all-ok")
+
         try:
             opts = json.loads(opts_json) if opts_json else {}
         except Exception:
