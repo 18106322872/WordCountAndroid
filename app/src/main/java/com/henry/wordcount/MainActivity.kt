@@ -707,6 +707,8 @@ private fun resolveDisplayName(context: android.content.Context, uri: Uri): Stri
 
 /** v1.0.38: 兜底命名计数器（避免同名冲突） */
 private var cachedFileCounter = 0
+/** v1.1.13: 安全网替换名计数器（确保每个被替换的文件有唯一序号） */
+private var friendlyNameCounter = 0
 
 /**
  * v1.0.38 新增：从原始 PDF 字节中提取 /Title 元数据。
@@ -833,7 +835,7 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFi
     val originalName = resolveDisplayName(context, uri)
     Log.d("WordCount", "copyUriToCache originalName='$originalName'")
 
-    // v1.12 终极安全网：多层检测，确保任何形式的内部 ID/hash 都被替换
+    // v1.1.13 终极安全网：多层检测 + 带序号替换名（确保每个文件有唯一可辨识名称）
     val displayName = if (looksLikeHashString(originalName) || isSuspiciousFilename(originalName)) {
         val ext = guessExt(context, uri)
         val typeLabel = when (ext.lowercase()) {
@@ -846,7 +848,9 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFi
             else -> "文档"
         }
         val safeExt = if (ext.isNotBlank()) ".$ext" else ""
-        val result = "$typeLabel$safeExt"
+        // ★ v1.1.13: 全局递增序号，确保同名文件有区分度（不再出现三个"文档.docx"）
+        friendlyNameCounter++
+        val result = "${typeLabel}_${friendlyNameCounter}$safeExt"
         Log.w("WordCount", "copyUriToCache 安全网触发: '$originalName' → '$result' (hash=${looksLikeHashString(originalName)}, suspicious=${isSuspiciousFilename(originalName)})")
         result
     } else {
@@ -873,7 +877,65 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFi
             if (out.renameTo(renamed)) return CachedFile(renamed, displayName)
         }
     }
-    return CachedFile(out, displayName)
+
+    // v1.1.13: 如果 displayName 是通用名（安全网替换的），尝试从文件内部元数据获取真实标题
+    val finalDisplayName = tryExtractInternalTitle(out, displayName)
+
+    return CachedFile(out, finalDisplayName)
+}
+
+/**
+ * v1.1.13: 从已缓存的文件中提取内部元数据标题，用于替换通用显示名。
+ * 支持 DOCX (docProps/core.xml <dc:title>) 和 PDF (/Title)。
+ * @param file 已缓存到本地的文件
+ * @param currentName 当前显示名
+ * @return 如果提取到有意义的标题则返回标题+扩展名，否则返回原名称
+ */
+private fun tryExtractInternalTitle(file: File, currentName: String): String {
+    // 只在当前名称是通用名时才尝试（避免覆盖真实文件名）
+    val isGenericName = currentName.startsWith("Word文档") ||
+        currentName.startsWith("PDF文档") || currentName.startsWith("Excel表格") ||
+        currentName.startsWith("PPT演示") || currentName.startsWith("文本文件") ||
+        currentName.startsWith("图片") || currentName.startsWith("文档") ||
+        currentName.startsWith("压缩包") || currentName.startsWith("CAD图纸")
+    if (!isGenericName) return currentName
+
+    val ext = file.extension.lowercase()
+    return try {
+        when (ext) {
+            "docx" -> {
+                // 从 docProps/core.xml 提取 dc:title
+                val zip = java.util.zip.ZipFile(file)
+                try {
+                    val entry = zip.getEntry("docProps/core.xml")
+                    if (entry != null) {
+                        val xml = zip.getInputStream(entry).bufferedReader().readText()
+                        // 匹配 <dc:title>...</dc:title>
+                        val titleRe = """<dc:title[^>]*>(.*?)</dc:title>""".toRegex()
+                        titleRe.find(xml)?.groupValues?.get(1)?.trim()?.let { title ->
+                            if (title.isNotBlank() && title.length <= 150 &&
+                                !title.any { it.code < 0x20 } /* 无控制字符 */) {
+                                val clean = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
+                                Log.d("WordCount", "DOCX内部标题: '$clean' (原: '$currentName')")
+                                "$clean.docx"
+                            } else currentName
+                        } ?: currentName
+                    } else currentName
+                } finally { zip.close() }
+            }
+            "pdf" -> {
+                // PDF /Title 元数据（从文件头扫描）
+                val bytes = file.readBytes(minOf(65536, file.length().toInt()))
+                extractPdfTitleFromBytes(bytes, bytes.size)?.let { title ->
+                    val clean = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
+                    if (clean.isNotBlank()) "$clean.pdf" else currentName
+                } ?: currentName
+            }
+            else -> currentName
+        }
+    } catch (_: Throwable) {
+        currentName
+    }
 }
 
 /**

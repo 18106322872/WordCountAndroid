@@ -66,31 +66,35 @@ object OoXmlEngine {
         appendDocxXmlText(bodyXml, sb) { pageCounter[0]++ }
 
         val text = sb.toString()
-        // ── 页数统计（v1.1.10 改进：内容估算兜底）──
+        // ── 页数统计（v1.1.13 重写：彻底校准）──
         //
-        // 策略优先级：
-        //   A) <w:lastRenderedPageBreak/> — Word 上次渲染的实际分页位置（**最可靠**）
-        //   B+C) 显式分页符 + 中间 sectPr — 仅当 A=0 时作为 fallback
-        //   D) 内容估算兜底 — 当 A=B=C=0 时（文档无任何分页标记），基于字符数+段落数估算
+        // v1.1.12 问题分析（用户实测反馈）：
+        //   文件A: 2649去空白字,136段 → 算出12页(实际~4页) → estByParas=136/12=11.3严重偏高
+        //   文件B: 13821去空白字,142段 → 算出19页(实际~12页) → estByChars=13821/750=18.4偏高
         //
-        // v1.0.27~v1.0.31 问题：三种信号简单累加(A+B+C)，同一分页点被多种方式重复记录
-        // 导致页数偏多（如 Word 显示2页但APP算出3页）。
-        // v1.0.32~v1.1.9 问题：矫枉过正——无分页标记时恒返回 1，导致 12 页文档显示 1 页。
+        // 根因：
+        //   a) 段落数估算对含大量短段落(表格/列表项)的文档完全失效——136个段落≠136行文本
+        //   b) 750字/页系数偏小——中文Word(五号字/标准行距)实际约1000-1500字/页
+        //
+        // v1.1.13 方案：
+        //   - 只用字符数估算（去掉段落数估算）
+        //   - CHAR_PER_PAGE = 1050（保守估计，介于用户两个数据点之间）
+        //   - lastRenderedPageBreak 仍为最可靠信号（优先级最高）
 
-        // 信号 A: lastRenderedPageBreak（Word 自身渲染记录）
+        val CHAR_PER_PAGE = 1050
+
+        // 信号 A: lastRenderedPageBreak（Word 自身渲染记录，最可靠）
         val renderedBreaks = """<w:lastRenderedPageBreak/>""".toRegex().findAll(bodyXml).count()
 
         var pages: Int
         var pagesReason = ""
         if (renderedBreaks > 0) {
-            // 有 Word 自身记录时只信它（最可靠）
             pages = maxOf(1, 1 + renderedBreaks)
             pagesReason = "word_rendered_breaks"
         } else {
-            // Fallback: 无 lastRenderedPageBreak 时用旧逻辑（显式分页符 + 节分隔符）
+            // Fallback: 显式分页符 + 节分隔符
             val explicitBreaks = pageCounter[0]
 
-            // 信号 C: 节分隔符（中间 sectPr，非末尾结束标记）
             val bodyMatchResult = """<w:body>(.*?)</w:body>""".toRegex(RegexOption.DOT_MATCHES_ALL).find(bodyXml)
             var separatorSectPr = 0
             if (bodyMatchResult != null) {
@@ -111,28 +115,19 @@ object OoXmlEngine {
                 pages = maxOf(1, 1 + totalBreaks)
                 pagesReason = "explicit_breaks"
             } else {
-                // ★ v1.1.10 新增：无任何分页标记时，基于内容估算页数
-                // v1.1.11 改进：用去空白字符数（text.length 含大量换行符会虚高）
-                val paraCount = """<w:p[\s>]""".toRegex().findAll(bodyXml).count()
+                // 无任何分页标记：纯内容估算（v1.1.13: 只用字符数，不用段落数）
                 val cleanCharCount = text.replace(Regex("\\s"), "").length
-                val estByChars = if (cleanCharCount > 0) maxOf(1, (cleanCharCount + 749) / 750) else 1
-                val estByParas = if (paraCount > 0) maxOf(1, (paraCount + 11) / 12) else 1
-                pages = maxOf(estByChars, estByParas)
-                pagesReason = "content_estimate(c=$cleanCharCount,p=$paraCount)"
+                pages = if (cleanCharCount > 0) maxOf(1, (cleanCharCount + CHAR_PER_PAGE - 1) / CHAR_PER_PAGE) else 1
+                pagesReason = "content_estimate(c=$cleanCharCount)"
             }
 
-            // ★ v1.1.11 新增：即使有分页标记，也与内容估算取 max（防止分页标记少导致页数偏低）
-            // 例如：文档只有 1 个显式分页符 → break-based=2 页，但实际内容够 4 页
+            // 有分页标记时也与内容估算取 max（防止分页标记少导致偏低）
             if (pagesReason != "content_estimate") {
-                val paraCount2 = """<w:p[\s>]""".toRegex().findAll(bodyXml).count()
-                // v1.1.11: 用去空白字符数估算（text.length 含大量换行符会虚高）
-                val cleanCharCount = text.replace(Regex("\\s"), "").length
-                val estByChars = if (cleanCharCount > 0) maxOf(1, (cleanCharCount + 749) / 750) else 1
-                val estByParas = if (paraCount2 > 0) maxOf(1, (paraCount2 + 11) / 12) else 1
-                val estimated = maxOf(estByChars, estByParas)
+                val cleanCharCount2 = text.replace(Regex("\\s"), "").length
+                val estimated = if (cleanCharCount2 > 0) maxOf(1, (cleanCharCount2 + CHAR_PER_PAGE - 1) / CHAR_PER_PAGE) else 1
                 if (estimated > pages) {
                     pages = estimated
-                    pagesReason = "${pagesReason}_capped_by_content(c=$cleanCharCount,p=$paraCount2)"
+                    pagesReason = "${pagesReason}_capped_by_content(c=$cleanCharCount2)"
                 }
             }
         }
