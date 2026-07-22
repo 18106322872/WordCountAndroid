@@ -49,15 +49,8 @@ object OldOfficeEngine {
         val doc = HWPFDocument(fis)
         val extractor = WordExtractor(doc)
         try {
-            // v1.1.10: 尝试获取更完整的文本（包括页眉页脚等）
-            val mainText = extractor.text ?: ""
-            // 用 getRange().getText() 作为补充（可能包含更多内容）
-            val rangeText = try {
-                doc.range.text ?: ""
-            } catch (_: Throwable) { "" }
-            // 合并去重：rangeText 通常包含 mainText，取较长的
-            val result = if (rangeText.length > mainText.length) rangeText else mainText
-            return result
+            // WordExtractor.text() 是 HWPF 最可靠的文本提取方式
+            return extractor.text ?: ""
         } finally {
             runCatching { extractor.close() }
             runCatching { doc.close() }
@@ -73,9 +66,7 @@ object OldOfficeEngine {
         val doc = HWPFDocument(fis)
         try {
             val extractor = WordExtractor(doc)
-            val mainText = extractor.text ?: ""
-            val rangeText = try { doc.range.text ?: "" } catch (_: Throwable) { "" }
-            val text = if (rangeText.length > mainText.length) rangeText else mainText
+            val text = extractor.text ?: ""
 
             // 尝试从文档属性获取页数（Word 保存时写入，不一定准确但比没有好）
             var pages = 0
