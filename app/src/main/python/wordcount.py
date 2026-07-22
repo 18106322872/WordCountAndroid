@@ -187,33 +187,58 @@ import sys
 
 
 # ═════════════════════════════════════════════════════
-# v1.1.15: Android lxml 崩溃拦截器
+# v1.1.19: Android lxml 崩溃拦截器（PEP 451 + PEP 302 双协议）
 # ═════════════════════════════════════════════════════
 # 根因：Chaquopy 打包了 lxml（通过 openpyxl 的间接依赖），
 # 但其 C 扩展(.so)在 Android 上触发 fatal 级 FileNotFoundError(AssetFinder/scripts)，
 # 该错误无法被 Python except 捕获，直接导致进程崩溃。
 #
-# 解决方案：用 sys.meta_path 导入拦截器，在任何代码尝试 import lxml 时，
-# 提前返回一个可控的 ImportError（可被正常 except 捕获），
-# 阻止 lxml C 扩展被加载。
+# v1.1.15~v1.1.18 只实现 PEP 302 的 find_module/load_module，
+# 但 Python 3.10 (Chaquopy) 主要使用 PEP 451 的 find_spec 协议，
+# 导致旧 API 拦截器被完全跳过 → 文档比较等功能仍然崩溃。
+#
+# 修复方案（三层防护）：
+#   1. 实现 find_spec (PEP 451) — Python 3.4+ 主路径
+#   2. 保留 find_module/load_module (PEP 302) — 向后兼容
+#   3. 预填充 sys.modules['lxml'] — 兜底，即使 finder 被绕过也拦截
 # ═════════════════════════════════════════════════════
 class _LxmlBlocker:
     """拦截所有 lxml 相关导入，防止 Android 上的 fatal AssetFinder 崩溃。"""
-    _BLOCKED_PREFIXES = ('lxml', 'lxml.etree', 'lxml.html', 'lxml.sax',
-                        'lxml.isoschematron', 'lxml.ElementInclude')
+
+    def find_spec(self, fullname, path, target=None):
+        """PEP 451: Python 3.4+ 的 import 查找主路径。"""
+        if fullname == 'lxml' or fullname.startswith('lxml.') or fullname.startswith('lxml_'):
+            raise ImportError(
+                "lxml is blocked on Android to prevent AssetFinder crash. "
+                "Use xml.etree.ElementTree instead."
+            )
+        return None
 
     def find_module(self, fullname, path=None):
-        if fullname.startswith('lxml') or fullname == 'lxml':
+        """PEP 302: 向后兼容旧版 Python 的 fallback 路径。"""
+        if fullname == 'lxml' or fullname.startswith('lxml.') or fullname.startswith('lxml_'):
             return self
         return None
 
     def load_module(self, fullname):
         raise ImportError(
             "lxml is blocked on Android to prevent AssetFinder crash. "
-            "Use xml.etree.ElementTree (standard library) instead."
+            "Use xml.etree.ElementTree instead."
         )
 
 sys.meta_path.insert(0, _LxmlBlocker())
+
+# 第三层防护：预填充 sys.modules，防止任何绕过 finder 的导入尝试
+import types as _types
+_dummy_lxml = _types.ModuleType('lxml')
+_dummy_lxml.__path__ = []
+_dummy_lxml.__loader__ = None
+_sys_modules = sys.modules  # 引用，避免后续 del sys.modules 出问题
+_sys_modules['lxml'] = _dummy_lxml
+for _sub in ('lxml.etree', 'lxml.html', 'lxml.sax', 'lxml.isoschematron',
+             'lxml.ElementInclude', 'lxml.cssselect', 'lxml.builder'):
+    _sys_modules[_sub] = _types.ModuleType(_sub)
+del _types, _dummy_lxml, _sys_modules, _sub
 # ═════════════════════════════════════════════════════
 
 

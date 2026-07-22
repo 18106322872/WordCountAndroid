@@ -921,8 +921,7 @@ private fun tryExtractInternalTitle(file: File, currentName: String): String {
                     }
                 }
                 // 策略2: DOCX 内容中有意义的文本（扫描所有 w:t，找第一个像标题的）
-                // v1.1.17 修复：不再取第一个 w:t（可能是"No."/"To:"等无意义标签），
-                // 而是找第一个含 CJK 字符或长度>=4 且不像英文标签的文本
+                // v1.1.19 修复：两轮扫描——优先选CJK标题(第一轮)，跳过编号/代码/标签(第二轮)
                 val bodyEntry = zip.getEntry("word/document.xml")
                 if (bodyEntry != null) {
                     val bodyXml = zip.getInputStream(bodyEntry).bufferedReader().readText()
@@ -930,34 +929,46 @@ private fun tryExtractInternalTitle(file: File, currentName: String): String {
                     // 常见英文标签模式（跳过这些）
                     val labelPattern = Regex("""^(?i)(no|to|from|date|name|subject|cc|bcc|ref|re|page|tel|fax|email|address|id|code|type|copy|total|amount|note|dear|sir|mr|ms|mrs|dr|prof)\s*[:.]?\s*$""")
                     val labelPattern2 = Regex("""^[A-Z][a-z]?[\.:]\s*$""")  // 单/双字母+冒号/点
+                    // 编号/代码/ID模式（统一社会信用代码、身份证号、注册号等）
+                    val codePattern = Regex("""^[A-Za-z]*[0-9]{6,}.*$""")   // 含6位以上连续数字
+                    val codePattern2 = Regex("""^\w{10,}[\)\]】]?$""")       // 长字母数字串+可选右括号
+                    var cjkCandidate: String? = null
+                    var fallbackCandidate: String? = null
                     tRe.findAll(bodyXml).forEach { tMatch ->
                         val raw = tMatch.groupValues?.get(1)?.trim()
                             ?.replace(Regex("<[^>]+>"), "")?.trim() ?: return@forEach
                         if (raw.isBlank() || raw.length < 2) return@forEach
                         // 跳过纯英文标签
                         if (labelPattern.matches(raw) || labelPattern2.matches(raw)) return@forEach
-                        // 含 CJK → 直接采用（大概率是中文标题）
+                        // 跳过编号/代码类文本（身份证号、统一社会信用代码等）
+                        if (codePattern.matches(raw) || codePattern2.matches(raw)) return@forEach
+                        // 跳过纯数字或以数字开头的长串（页码、日期数字等）
+                        if (raw.matches(Regex("""^\d{2,}.*$""")) && raw.length <= 20) return@forEach
+                        // 含 CJK → 最佳候选（大概率是中文标题），继续扫描看有没有更长的
                         if (raw.any { it.code in 0x4E00..0x9FFF || it.code in 0x3400..0x4DBF ||
                                              it.code in 0xA960..0xA97C || it.code in 0xF900..0xFAFF ||
                                              it.code in 0x3000..0x303F }) {
                             val short = if (raw.length > 25) raw.substring(0, 25) + "…" else raw
                             val clean = short.replace(Regex("[\\\\/:*?\"<>|\n\r\t]"), "_").trim()
-                            if (clean.isNotBlank()) {
-                                Log.d("WordCount", "DOCX有意义的文本(CJK): '$clean'")
-                                return "$clean.docx"
+                            if (clean.isNotBlank() && (cjkCandidate == null || raw.length > cjkCandidate.length)) {
+                                cjkCandidate = clean
                             }
-                        }
-                        // 纯英文但够长（>=4字符且不含标点结尾的标签式写法）
-                        if (raw.length >= 4 && !raw.endsWith(":") && !raw.endsWith(".")) {
-                            val short = if (raw.length > 25) raw.substring(0, 25) + "…" else raw
-                            val clean = short.replace(Regex("[\\\\/:*?\"<>|\n\r\t]"), "_").trim()
-                            if (clean.isNotBlank()) {
-                                Log.d("WordCount", "DOCX有意义的文本(长英文): '$clean'")
-                                return "$clean.docx"
+                        } else if (fallbackCandidate == null) {
+                            // 纯英文但够长（>=4字符且不含标点结尾的标签式写法）→ 兜底候选
+                            if (raw.length >= 4 && !raw.endsWith(":") && !raw.endsWith(".")) {
+                                val short = if (raw.length > 25) raw.substring(0, 25) + "…" else raw
+                                val clean = short.replace(Regex("[\\\\/:*?\"<>|\n\r\t]"), "_").trim()
+                                if (clean.isNotBlank()) fallbackCandidate = clean
                             }
                         }
                     }
-                    // 所有 w:t 都不像标题 → 不用策略2，保留通用名
+                    // 优先用 CJK 标题，其次兜底
+                    val chosen = cjkCandidate ?: fallbackCandidate
+                    if (chosen != null) {
+                        Log.d("WordCount", "DOCX有意义的标题文本: '$chosen' (CJK=${
+                            cjkCandidate != null}, fallback=${fallbackCandidate != null})")
+                        return "$chosen.docx"
+                    }
                     Log.d("WordCount", "DOCX未找到有意义的标题文本，保留通用名")
                 }
             } finally { zip.close() }
