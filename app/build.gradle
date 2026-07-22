@@ -34,9 +34,6 @@ android {
                         install 'python-pptx'
                         install 'ezdxf'
                         install 'olefile'
-                        // v1.1.14: 排除 lxml（Chaquopy 自带 libxml2/libxslt 时会顺带打包 lxml，
-                        // 其 C 扩展 .so 在 Android 上触发 fatal 级 AssetFinder/scripts 崩溃）
-                        options '-c', '../constraints.txt'
                         // 注：pymupdf(fitz) 在 Chaquopy 无 Android wheel，故不引入；
                         // 注：rapidocr-onnxruntime 依赖 onnxruntime（无 Android wheel），Chaquopy 无法安装；
                         //      PDF 图片型 OCR 当前依赖设备端 ML Kit（PdfOcrEngine），若 ML Kit 不可用则降级报错。

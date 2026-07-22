@@ -9430,7 +9430,40 @@ def prepare_unreliable_entries(files_info, work_dir, converter=None):
     仅包含确有不可靠内容的文件。"""
 
 
-    import os as _os
+# ═════════════════════════════════════════════════════
+# v1.1.15: Android lxml 崩溃拦截器
+# ═════════════════════════════════════════════════════
+# 根因：Chaquopy 打包了 lxml（通过 openpyxl/ezdxf 的间接依赖或 Chaquopy 自带），
+# 但其 C 扩展(.so)在 Android 上触发 fatal 级 FileNotFoundError(AssetFinder/scripts)，
+# 该错误无法被 Python except 捕获，直接导致进程崩溃。
+#
+# 解决方案：用 sys.meta_path 导入拦截器，在任何代码尝试 import lxml 时，
+# 提前返回一个可控的 ImportError（可被正常 except 捕获），
+# 阻止 lxml C 扩展被加载。
+# ═════════════════════════════════════════════════════
+class _LxmlBlocker:
+    """拦截所有 lxml 相关导入，防止 Android 上的 fatal AssetFinder 崩溃。"""
+    _BLOCKED_PREFIXES = ('lxml', 'lxml.etree', 'lxml.html', 'lxml.sax',
+                        'lxml.isoschematron', 'lxml.ElementInclude')
+
+    def find_module(self, fullname, path=None):
+        if fullname.startswith('lxml') or fullname == 'lxml':
+            return self
+        return None
+
+    def load_module(self, fullname):
+        raise ImportError(
+            f"lxml is blocked on Android to prevent AssetFinder crash. "
+            f"Use xml.etree.ElementTree (standard library) instead."
+        )
+
+
+import sys
+sys.meta_path.insert(0, _LxmlBlocker())
+# ═════════════════════════════════════════════════════
+
+
+import os as _os
 
     # Chaquopy 传入的 files_info 可能是 Java ArrayList，递归转为原生 list
     files_info = _to_py_list(files_info)
