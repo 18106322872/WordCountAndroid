@@ -29,16 +29,10 @@ android {
                         install 'pdfminer.six'
                         // 注：已移除 python-docx（v1.1.12）— 其依赖 lxml(C扩展)在 Chaquopy 上触发
                         // AssetFinder/scripts 崩溃；Android 版 compare_docx/extract_docx 均已改为纯标准库实现
+                        // 注：lxml 通过 openpyxl 间接依赖进入 APK，由 wordcount.py 顶部的
+                        // _LxmlBlocker 拦截（PEP 451 find_spec 返回假 ModuleSpec + sys.modules 预填充）
                         install 'pillow'
                         install 'openpyxl'
-                        // v1.1.20: 排除 openpyxl 的间接依赖 lxml！
-                        // lxml 的 C 扩展(.so)在 Android 上触发 fatal 级 FileNotFoundError(AssetFinder/scripts)，
-                        // 该错误无法被 Python except 捕获，直接导致整个 Python 引擎崩溃。
-                        // 影响：PDF Level2(pdfminer)不执行 + 文档比较(compare_docx)崩溃。
-                        // sys.meta_path 拦截器(PEP 451+302+sys.modules预填充)均无法可靠拦截
-                        // （find_spec 抛异常会被 import 机制吞掉后继续尝试下一个 finder），
-                        // 唯一可靠方案是从根本上不让 lxml 进入 APK。
-                        exclude 'lxml'
                         install 'python-pptx'
                         install 'ezdxf'
                         install 'olefile'
