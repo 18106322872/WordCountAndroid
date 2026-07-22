@@ -10408,301 +10408,261 @@ def main():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# DOCX 文档比较（仿 Word「审阅 → 比较」）
+# DOCX 文档比较（仿 Word「审阅 → 比较」）— 纯标准库实现
+# 仅使用 Python 标准库：zipfile / xml.etree.ElementTree / json / re / difflib 等
+# 不依赖 python-docx / lxml（两者在 Android Chaquopy 上触发 AssetFinder 崩溃）
 # 输入：原文档路径、修订文档路径、输出路径、选项 JSON
 # 输出：带 w:ins/w:del 修订标记的 .docx + 修改句字数统计
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _safe_add_paragraph(doc, text):
-    """在输出文档中创建纯文本段落（安全：不跨文档克隆 oxml）。
+# ── WordprocessingML 命名空间（Clark 标记法，供 xml.etree.ElementTree 使用）──
+_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+_MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+_CT = "http://schemas.openxmlformats.org/package/2006/content-types"
+_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 
-    Android Chaquopy 上 lxml.etree.fromstring() 和 copy.deepcopy()
-    对 C 扩展对象均会触发 FileNotFoundError: AssetFinder/scripts。
-    唯一安全的方式是用 docx 高级 API 在目标文档内原地创建元素。
+def _q(tag):
+    """返回带命名空间前缀的完整标签名，如 _q('w:p') → '{http://...}p'."""
+    prefix, local = tag.split(":")
+    ns = {"w": _W, "r": _R, "wp": _WP, "mc": _MC, "ct": _CT, "rel": _REL}[prefix]
+    return f"{{{ns}}}{local}"
+
+
+import xml.etree.ElementTree as ET
+
+
+def _read_docx_paragraphs(docx_path):
+    """用 zipfile+ET 从 DOCX 中提取所有段落文本，返回 [text_str]。
+    
+    只读取 body 中的顶层 w:p（表格单元格内的段落归入表格文本）。
     """
-    p = doc.add_paragraph(text)
-    return p._element
+    import zipfile
+    paragraphs = []
+    with zipfile.ZipFile(docx_path, "r") as z:
+        data = z.read("word/document.xml")
+    root = ET.fromstring(data)
+    body = root.find(_q("w:body"))
+    if body is None:
+        return paragraphs
+    for child in body:
+        if child.tag == _q("w:p"):
+            texts = []
+            for t_elem in child.iter(_q("w:t")):
+                if t_elem.text:
+                    texts.append(t_elem.text)
+            paragraphs.append("".join(texts))
+        elif child.tag == _q("w:tbl"):
+            # 表格：汇总所有单元格文本为一个字符串
+            cell_texts = []
+            for tr in child.iter(_q("w:tr")):
+                for tc in tr.iter(_q("w:tc")):
+                    for p in tc.iter(_q("w:p")):
+                        t_parts = []
+                        for t in p.iter(_q("w:t")):
+                            if t.text:
+                                t_parts.append(t.text)
+                        cell_texts.append("".join(t_parts))
+            paragraphs.append("\n".join(cell_texts))
+    return paragraphs
 
 
-def _safe_add_table_note(doc, label, text_summary=""):
-    """安全地添加一个表格占位段落（替代不可靠的 oxml 克隆）。"""
-    p = doc.add_paragraph()
-    run = p.add_run(f"[{label}]")
-    run.bold = True
-    if text_summary:
-        p.add_run(" " + text_summary[:200])
-    return p._element
-
-
-def compare_docx(orig_path, rev_path, out_path, opts_json):
-    """比较两份 DOCX，生成修订标记 .docx 并统计修改句字数。
-
-    返回 JSON 字符串:
-      {"ok": true, "out_path": "...", "insertions": N, "deletions": N,
-       "replacements": N, "modified_sentence_chars": M}
-    失败时: {"ok": false, "error": "..."}
-    """
-    # ── 标准库 import 放在最外层（不会触发 AssetFinder/lxml 崩溃）──
-    import json, re, datetime, difflib, sys, traceback
-
-    # ── 诊断：_step 必须在任何操作之前初始化 ──
-    _step = "?-entry"
-
-    def _set_step(s):
-        nonlocal _step
-        _step = s
-
-    # ═══════════════════════════════════════════════════════════
-    #  阶段 0：安全探测 — 在主逻辑之前测试 docx 是否可导入
-    #  Chaquopy 环境下 lxml C 扩展可能触发 AssetFinder 错误，
-    #  该错误可能穿透 except Exception 甚至 except BaseException，
-    #  所以用独立函数 + 最宽捕获来探测，失败则立即返回 JSON。
-    # ═══════════════════════════════════════════════════════════
-    def _probe_docx():
-        """尝试导入 docx，返回 (ok: bool, err_msg: str)。"""
-        try:
-            import docx  # noqa: F401
-            return True, ""
-        except BaseException as e:
-            return False, f"{type(e).__name__}: {str(e)[:300]}"
-
-    _set_step("probe-docx")
-    probe_ok, probe_err = _probe_docx()
-    if not probe_ok:
-        err_msg = f"[step=probe-docx] DOCX 模块不可用（设备可能缺少必要的原生库）: {probe_err}"
-        sys.stderr.write(f"COMPARE_ERROR: {err_msg}\n")
-        return json.dumps({"ok": False, "error": err_msg}, ensure_ascii=False)
-
-    # ═══════════════════════════════════════════════════════════
-    #  阶段 1：正式执行比较（已知 docx 可导入）
-    # ═══════════════════════════════════════════════════════════
-    try:
-        from docx import Document
-        _set_step("imports-docx")
-        from docx.oxml.ns import qn
-        _set_step("imports-qn")
-        from docx.oxml import OxmlElement
-        _set_step("imports-oxml")
-        from docx.text.paragraph import Paragraph
-        from docx.table import Table
-        _set_step("imports-all-ok")
-
-        try:
-            opts = json.loads(opts_json) if opts_json else {}
-        except Exception:
-            opts = {}
-        level = opts.get("level", "word")            # 'char' | 'word'
-        case_sensitive = opts.get("case", True)      # 大小写更改
-        ignore_ws = opts.get("whitespace", False)    # 空格
-        use_table = opts.get("table", True)          # 表格
-        use_hf = opts.get("header_footer", True)     # 页眉和页脚
-        use_fn = opts.get("footnote", True)          # 脚注和尾注
-        use_tb = opts.get("textbox", True)           # 文本框
-        use_field = opts.get("field", True)          # 域
-
-        author = "WordCount"
-        date = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        _set_step("open_orig")
-        doc_o = Document(orig_path)
-        _set_step("open_rev")
-        doc_r = Document(rev_path)
-        _set_step("create_out")
-        out = Document()
-        _set_step("track_revisions")
-        _enable_track_revisions(out)
-
-        _set_step("prepare_body")
-        body = out.element.body
-        # 清掉新建文档默认留下的空段落
-        for p in list(body.findall(qn("w:p"))):
-            body.remove(p)
-        sectPr = body.find(qn("w:sectPr"))
-
-        def _append(el):
-            if sectPr is not None:
-                sectPr.addprevious(el)
-            else:
-                body.append(el)
-
-        rid = [0]
-
-        def rid_counter():
-            rid[0] += 1
-            return rid[0]
-
-        modified_chars = 0
-        ins_count = 0
-        del_count = 0
-        rep_count = 0
-
-        # ── 正文块（段落 + 表格）级 diff ──
-        _set_step("get_blocks_orig")
-        blocks_o = _get_blocks(doc_o)
-        _set_step("get_blocks_rev")
-        blocks_r = _get_blocks(doc_r)
-        _set_step("difflib_opcodes")
-        sm = difflib.SequenceMatcher(a=[b[2] for b in blocks_o], b=[b[2] for b in blocks_r])
-        opcodes = sm.get_opcodes()
-        # 合并相邻的 delete+insert 为 replace：单段仅改几个字 → 字符级红线（而非整段删除+插入）
-        merged = []
-        ki = 0
-        while ki < len(opcodes):
-            tag, i1, i2, j1, j2 = opcodes[ki]
-            if tag == "delete" and ki + 1 < len(opcodes):
-                t2, a1, a2, b1, b2 = opcodes[ki + 1]
-                if t2 == "insert" and (i2 - i1) == (b2 - b1):
-                    merged.append(("replace", i1, i2, j1, b2))
-                    ki += 2
-                    continue
-            if tag == "insert" and ki + 1 < len(opcodes):
-                t2, a1, a2, b1, b2 = opcodes[ki + 1]
-                if t2 == "delete" and (a2 - a1) == (j2 - j1):
-                    merged.append(("replace", a1, a2, j1, j2))
-                    ki += 2
-                    continue
-            merged.append((tag, i1, i2, j1, j2))
-            ki += 1
-
-        _set_step("diff_loop")
-        for idx, (tag, i1, i2, j1, j2) in enumerate(merged):
-            if tag == "equal":
-                for k in range(i1, i2):
-                    el = blocks_o[k]
-                    if el[0] == "p":
-                        _append(_safe_add_paragraph(out, el[2]))
-                    else:
-                        _append(_safe_add_table_note(out, "原文表格", el[2]))
-            elif tag == "delete":
-                for k in range(i1, i2):
-                    el = blocks_o[k]
-                    if el[0] == "p":
-                        _append(_build_deleted_paragraph(el[2], author, date, rid_counter))
-                        modified_chars += _count_modified_sentences(el[2], [(0, len(el[2]))])
-                    else:
-                        _append(_safe_add_table_note(out, "已删除表格", el[2]))
-                        modified_chars += _count_text(el[2])
-                    del_count += 1
-            elif tag == "insert":
-                for k in range(j1, j2):
-                    el = blocks_r[k]
-                    if el[0] == "p":
-                        _append(_build_inserted_paragraph(el[2], author, date, rid_counter))
-                    else:
-                        _append(_safe_add_table_note(out, "新增表格", el[2]))
-                    ins_count += 1
-            elif tag == "replace":
-                single = (i2 - i1 == 1 and j2 - j1 == 1)
-                if single:
-                    bo = blocks_o[i1]
-                    br = blocks_r[j1]
-                    if bo[0] == "p" and br[0] == "p":
-                        p, ranges = _build_diff_paragraph(bo[2], br[2], level, author, date,
-                                                          rid_counter, case_sensitive, ignore_ws)
-                        _append(p)
-                        modified_chars += _count_modified_sentences(bo[2], ranges)
-                        rep_count += 1
-                        continue
-                    if bo[0] == "tbl" and br[0] == "tbl" and use_table:
-                        new_el = _diff_table_block(doc_o, doc_r, bo[1], br[1], level, author,
-                                                   date, rid_counter, case_sensitive, ignore_ws)
-                        if new_el is not None:
-                            _append(new_el)
-                        else:
-                            _append(_safe_add_table_note(out, "原表格", bo[2]))
-                            _append(_safe_add_table_note(out, "修订表格", br[2]))
-                        modified_chars += _count_text(bo[2])
-                        rep_count += 1
-                        continue
-                # 多块替换 或 类型不匹配：原块删除 + 修订块插入
-                for k in range(i1, i2):
-                    el = blocks_o[k]
-                    if el[0] == "p":
-                        _append(_build_deleted_paragraph(el[2], author, date, rid_counter))
-                        modified_chars += _count_modified_sentences(el[2], [(0, len(el[2]))])
-                    else:
-                        _append(_safe_add_table_note(out, "已删除表格", el[2]))
-                        modified_chars += _count_text(el[2])
-                    del_count += 1
-                for k in range(j1, j2):
-                    el = blocks_r[k]
-                    if el[0] == "p":
-                        _append(_build_inserted_paragraph(el[2], author, date, rid_counter))
-                    else:
-                        _append(_safe_add_table_note(out, "新增表格", el[2]))
-                    ins_count += 1
-
-        # ── 附加区域：页眉页脚 / 脚注尾注 / 文本框 / 域 ──
-        _set_step("extra_sections")
-        extra_kinds = []
-        if use_hf:
-            extra_kinds.append(("header_footer", "【页眉/页脚变更】"))
-        if use_fn:
-            extra_kinds.append(("footnote", "【脚注/尾注变更】"))
-        if use_tb:
-            extra_kinds.append(("textbox", "【文本框变更】"))
-        if use_field:
-            extra_kinds.append(("field", "【域变更】"))
-        for kind, label in extra_kinds:
-            to = _extract_extra(doc_o, kind)
-            tr = _extract_extra(doc_r, kind)
-            if to != tr:
-                _append(_build_note_paragraph(label))
-                p, _ = _build_diff_paragraph(to, tr, level, author, date,
-                                             rid_counter, case_sensitive, ignore_ws)
-                _append(p)
-
-        _set_step("save")
-        out.save(out_path)
-        return json.dumps({
-            "ok": True,
-            "out_path": out_path,
-            "insertions": ins_count,
-            "deletions": del_count,
-            "replacements": rep_count,
-            "modified_sentence_chars": modified_chars,
-        }, ensure_ascii=False)
-    except BaseException as e:
-        _step_val = _step if '_step' in dir() else '?-undefined'
-        err_msg = f"[step={_step_val}] {type(e).__name__}: {str(e)[:350]}"
-        tb_text = traceback.format_exc()[:1200]
-        sys.stderr.write(f"COMPARE_ERROR: {err_msg}\n{tb_text}\n")
-        return json.dumps({"ok": False, "error": err_msg, "trace": tb_text}, ensure_ascii=False)
-
-
-def _enable_track_revisions(doc):
-    from docx.oxml.ns import qn
-    from docx.oxml import OxmlElement
-    try:
-        settings = doc.settings.element
-        for e in settings.findall(qn("w:trackRevisions")):
-            settings.remove(e)
-        tr = OxmlElement("w:trackRevisions")
-        settings.append(tr)
-    except Exception:
-        pass
-
-
-def _get_blocks(doc):
-    from docx.oxml.ns import qn
-    from docx.text.paragraph import Paragraph
-    from docx.table import Table
+def _read_docx_paragraphs_with_types(docx_path):
+    """返回 [(type, text), ...] 其中 type 为 'p' 或 'tbl'。"""
+    import zipfile
     blocks = []
-    body = doc.element.body
-    for child in body.iterchildren():
-        tag = child.tag
-        if tag == qn("w:p"):
-            p = Paragraph(child, doc)
-            blocks.append(("p", child, p.text or ""))
-        elif tag == qn("w:tbl"):
-            t = Table(child, doc)
-            text = "\n".join(c.text or "" for row in t.rows for c in row.cells)
-            blocks.append(("tbl", child, text))
+    with zipfile.ZipFile(docx_path, "r") as z:
+        data = z.read("word/document.xml")
+    root = ET.fromstring(data)
+    body = root.find(_q("w:body"))
+    if body is None:
+        return blocks
+    for child in body:
+        if child.tag == _q("w:p"):
+            texts = []
+            for t_elem in child.iter(_q("w:t")):
+                if t_elem.text:
+                    texts.append(t_elem.text)
+            blocks.append(("p", "".join(texts)))
+        elif child.tag == _q("w:tbl"):
+            cell_texts = []
+            for tr in child.iter(_q("w:tr")):
+                for tc in tr.iter(_q("w:tc")):
+                    for p in tc.iter(_q("w:p")):
+                        t_parts = []
+                        for t in p.iter(_q("w:t")):
+                            if t.text:
+                                t_parts.append(t.text)
+                        cell_texts.append("".join(t_parts))
+            blocks.append(("tbl", "\n".join(cell_texts)))
     return blocks
 
 
-def _tokenize(text, level):
-    """返回 list of (orig_text, norm_text, start, end)。start/end 为原文 char 区间。"""
+def _extract_extra_text(docx_path, kind):
+    """从 DOCX 中提取附加区域文本（页眉页脚/脚注/文本框/域）。"""
+    import zipfile
+    parts = []
+    try:
+        with zipfile.ZipFile(docx_path, "r") as z:
+            data = z.read("word/document.xml")
+        root = ET.fromstring(data)
+        if kind == "header_footer":
+            # 遍历 sectPr 中的 headerReference / footerReference 对应文件
+            for hf_ref in root.iter(_q("w:headerReference")):
+                r_id = hf_ref.get(_q("r:id"), "")
+                if r_id:
+                    parts.append(f"[header:{r_id}]")
+            for hf_ref in root.iter(_q("w:footerReference")):
+                r_id = hf_ref.get(_q("r:id"), "")
+                if r_id:
+                    parts.append(f"[footer:{r_id}]")
+        elif kind == "footnote":
+            for fn in root.iter(_q("w:footnote")):
+                txts = [t.text or "" for t in fn.iter(_q("w:t"))]
+                txt = "".join(txts).strip()
+                if txt:
+                    parts.append(txt)
+        elif kind == "textbox":
+            for txbx in root.iter(_q("w:txbxContent")):
+                txts = [t.text or "" for t in txbx.iter(_q("w:t"))]
+                txt = "".join(txts).strip()
+                if txt:
+                    parts.append(txt)
+        elif kind == "field":
+            for fld in root.iter(_q("w:fldSimple")):
+                txts = [t.text or "" for t in fld.iter(_q("w:t"))]
+                txt = "".join(txts).strip()
+                if txt:
+                    parts.append(txt)
+    except Exception:
+        pass
+    return "\n".join(parts)
+
+
+def _make_run_element(text, kind, author, date, rid):
+    """构建一个 w:r 元素（或包裹在 w:ins/w:del 中）。
+    
+    kind: 'ins' | 'del' | None(普通文本)
+    返回 Element。
+    """
+    if kind == "ins":
+        ins = ET.Element(_q("w:ins"))
+        ins.set(_q("w:id"), str(rid))
+        ins.set(_q("w:author"), author)
+        ins.set(_q("w:date"), date)
+        r = ET.SubElement(ins, _q("w:r"))
+        rpr = ET.SubElement(r, _q("w:rPr"))
+        color = ET.SubElement(rpr, _q("w:color"))
+        color.set(_q("w:val"), "2E74B5")  # 插入蓝
+        u = ET.SubElement(rpr, _q("w:u"))
+        u.set(_q("w:val"), "single")
+        t = ET.SubElement(r, _q("w:t"))
+        t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        t.text = text
+        return ins
+    elif kind == "del":
+        dele = ET.Element(_q("w:del"))
+        dele.set(_q("w:id"), str(rid))
+        dele.set(_q("w:author"), author)
+        dele.set(_q("w:date"), date)
+        r = ET.SubElement(dele, _q("w:r"))
+        rpr = ET.SubElement(r, _q("w:rPr"))
+        strike = ET.SubElement(rpr, _q("w:strike"))
+        color = ET.SubElement(rpr, _q("w:color"))
+        color.set(_q("w:val"), "C00000")  # 删除红
+        t = ET.SubElement(r, _q("w:t"))
+        t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        t.text = text
+        return dele
+    else:
+        r = ET.Element(_q("w:r"))
+        t = ET.SubElement(r, _q("w:t"))
+        t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        t.text = text
+        return r
+
+
+def _build_diff_paragraph_xml(text_o, text_r, level, author, date,
+                               rid_counter, case_sensitive, ignore_ws):
+    """对两个段落文本做字符/词级 diff，返回 (p_element, del_ranges)。"""
+    import difflib
+    p = ET.Element(_q("w:p"))
+    toks_o = _normalize_tokens(_tokenize_text(text_o, level), case_sensitive, ignore_ws)
+    toks_r = _normalize_tokens(_tokenize_text(text_r, level), case_sensitive, ignore_ws)
+    sm = difflib.SequenceMatcher(a=[t[1] for t in toks_o], b=[t[1] for t in toks_r])
+    del_ranges = []
+    rid_val = rid_counter()
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            seg = "".join(t[0] for t in toks_o[i1:i2])
+            if seg:
+                p.append(_make_run_element(seg, None, author, date, rid_val))
+        elif tag == "delete":
+            seg = "".join(t[0] for t in toks_o[i1:i2])
+            if seg:
+                p.append(_make_run_element(seg, "del", author, date, rid_val))
+                s = toks_o[i1][2]
+                e = toks_o[i2 - 1][3]
+                del_ranges.append((s, e))
+        elif tag == "insert":
+            seg = "".join(t[0] for t in toks_r[j1:j2])
+            if seg:
+                p.append(_make_run_element(seg, "ins", author, date, rid_val))
+        elif tag == "replace":
+            dseg = "".join(t[0] for t in toks_o[i1:i2])
+            iseg = "".join(t[0] for t in toks_r[j1:j2])
+            if dseg:
+                p.append(_make_run_element(dseg, "del", author, date, rid_val))
+                s = toks_o[i1][2]
+                e = toks_o[i2 - 1][3]
+                del_ranges.append((s, e))
+            if iseg:
+                p.append(_make_run_element(iseg, "ins", author, date, rid_val))
+    return p, del_ranges
+
+
+def _build_deleted_paragraph_xml(text, author, date, rid_counter):
+    """构建整段删除的 w:p 元素。"""
+    p = ET.Element(_q("w:p"))
+    if text:
+        p.append(_make_run_element(text, "del", author, date, rid_counter()))
+    return p
+
+
+def _build_inserted_paragraph_xml(text, author, date, rid_counter):
+    """构建整段插入的 w:p 元素。"""
+    p = ET.Element(_q("w:p"))
+    if text:
+        p.append(_make_run_element(text, "ins", author, date, rid_counter()))
+    return p
+
+
+def _build_note_paragraph_xml(label):
+    """构建一个标签段落（如【页眉/页脚变更】）。"""
+    p = ET.Element(_q("w:p"))
+    r = ET.SubElement(p, _q("w:r"))
+    rpr = ET.SubElement(r, _q("w:rPr"))
+    b = ET.SubElement(rpr, _q("w:b"))
+    t = ET.SubElement(r, _q("w:t"))
+    t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    t.text = label
+    return p
+
+
+def _build_plain_paragraph_xml(text):
+    """构建一个纯文本段落（无修订标记）。"""
+    p = ET.Element(_q("w:p"))
+    if text:
+        r = ET.SubElement(p, _q("w:r"))
+        t = ET.SubElement(r, _q("w:t"))
+        t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        t.text = text
+    return p
+
+
+def _tokenize_text(text, level):
+    """返回 list of (orig_text, norm_text, start, end)。"""
     if level == "char":
         return [(c, c, i, i + 1) for i, c in enumerate(text)]
     tokens = []
@@ -10725,7 +10685,7 @@ def _tokenize(text, level):
     return tokens
 
 
-def _normalize(tokens, case_sensitive, ignore_ws):
+def _normalize_tokens(tokens, case_sensitive, ignore_ws):
     out = []
     for orig, _, s, e in tokens:
         norm = orig
@@ -10735,172 +10695,6 @@ def _normalize(tokens, case_sensitive, ignore_ws):
             norm = re.sub(r"\s+", "", norm)
         out.append((orig, norm, s, e))
     return out
-
-
-def _make_run(text, kind, author, date, rid_counter):
-    from docx.oxml.ns import qn
-    from docx.oxml import OxmlElement
-    r = OxmlElement("w:r")
-    if kind == "ins":
-        ins = OxmlElement("w:ins")
-        ins.set(qn("w:id"), str(rid_counter()))
-        ins.set(qn("w:author"), author)
-        ins.set(qn("w:date"), date)
-        rPr = OxmlElement("w:rPr")
-        color = OxmlElement("w:color")
-        color.set(qn("w:val"), "2E74B5")  # Word 插入蓝
-        u = OxmlElement("w:u")
-        u.set(qn("w:val"), "single")
-        rPr.append(color)
-        rPr.append(u)
-        r.append(rPr)
-        t = OxmlElement("w:t")
-        t.set(qn("xml:space"), "preserve")
-        t.text = text
-        r.append(t)
-        ins.append(r)
-        return ins
-    elif kind == "del":
-        dele = OxmlElement("w:del")
-        dele.set(qn("w:id"), str(rid_counter()))
-        dele.set(qn("w:author"), author)
-        dele.set(qn("w:date"), date)
-        rPr = OxmlElement("w:rPr")
-        color = OxmlElement("w:color")
-        color.set(qn("w:val"), "C00000")  # Word 删除红
-        strike = OxmlElement("w:strike")
-        rPr.append(strike)
-        rPr.append(color)
-        r.append(rPr)
-        t = OxmlElement("w:t")
-        t.set(qn("xml:space"), "preserve")
-        t.text = text
-        r.append(t)
-        dele.append(r)
-        return dele
-    else:
-        t = OxmlElement("w:t")
-        t.set(qn("xml:space"), "preserve")
-        t.text = text
-        r.append(t)
-        return r
-
-
-def _build_diff_paragraph(text_o, text_r, level, author, date, rid_counter,
-                          case_sensitive, ignore_ws):
-    from docx.oxml.ns import qn
-    from docx.oxml import OxmlElement
-    import difflib
-    p = OxmlElement("w:p")
-    toks_o = _normalize(_tokenize(text_o, level), case_sensitive, ignore_ws)
-    toks_r = _normalize(_tokenize(text_r, level), case_sensitive, ignore_ws)
-    sm = difflib.SequenceMatcher(a=[t[1] for t in toks_o], b=[t[1] for t in toks_r])
-    del_ranges = []
-    for tag, i1, i2, j1, j2 in sm.get_opcodes():
-        if tag == "equal":
-            seg = "".join(t[0] for t in toks_o[i1:i2])
-            if seg:
-                p.append(_make_run(seg, None, author, date, rid_counter))
-        elif tag == "delete":
-            seg = "".join(t[0] for t in toks_o[i1:i2])
-            if seg:
-                p.append(_make_run(seg, "del", author, date, rid_counter))
-                s = toks_o[i1][2]
-                e = toks_o[i2 - 1][3]
-                del_ranges.append((s, e))
-        elif tag == "insert":
-            seg = "".join(t[0] for t in toks_r[j1:j2])
-            if seg:
-                p.append(_make_run(seg, "ins", author, date, rid_counter))
-        elif tag == "replace":
-            dseg = "".join(t[0] for t in toks_o[i1:i2])
-            iseg = "".join(t[0] for t in toks_r[j1:j2])
-            if dseg:
-                p.append(_make_run(dseg, "del", author, date, rid_counter))
-                s = toks_o[i1][2]
-                e = toks_o[i2 - 1][3]
-                del_ranges.append((s, e))
-            if iseg:
-                p.append(_make_run(iseg, "ins", author, date, rid_counter))
-    return p, del_ranges
-
-
-def _build_deleted_paragraph(text, author, date, rid_counter):
-    from docx.oxml.ns import qn
-    from docx.oxml import OxmlElement
-    p = OxmlElement("w:p")
-    if text:
-        p.append(_make_run(text, "del", author, date, rid_counter))
-    return p
-
-
-def _build_inserted_paragraph(text, author, date, rid_counter):
-    from docx.oxml.ns import qn
-    from docx.oxml import OxmlElement
-    p = OxmlElement("w:p")
-    if text:
-        p.append(_make_run(text, "ins", author, date, rid_counter))
-    return p
-
-
-def _build_note_paragraph(label):
-    from docx.oxml.ns import qn
-    from docx.oxml import OxmlElement
-    p = OxmlElement("w:p")
-    r = OxmlElement("w:r")
-    rPr = OxmlElement("w:rPr")
-    b = OxmlElement("w:b")
-    rPr.append(b)
-    r.append(rPr)
-    t = OxmlElement("w:t")
-    t.set(qn("xml:space"), "preserve")
-    t.text = label
-    r.append(t)
-    p.append(r)
-    return p
-
-
-def _diff_table_block(doc_o, doc_r, tbl_el_o, tbl_el_r, level, author, date,
-                      rid_counter, case_sensitive, ignore_ws):
-    """表格逐单元格字符级 diff。
-
-    注意：Android Chaquopy 上无法安全克隆 oxml 表格元素（lxml.fromstring/deepcopy
-    均触发 AssetFinder 错误），因此本函数在 Android 上始终返回 None，
-    由调用方降级为表格占位段落。
-    桌面端如需表格 diff 功能，可改为接收输出文档参数并用 add_table() 原地重建。
-    """
-    return None
-
-
-def _extract_extra(doc, kind):
-    from docx.oxml.ns import qn
-    parts = []
-    try:
-        if kind == "header_footer":
-            for sec in doc.sections:
-                for hf in (sec.header, sec.footer):
-                    for p in hf.paragraphs:
-                        if (p.text or "").strip():
-                            parts.append(p.text)
-        elif kind == "footnote":
-            for fn in doc.element.iter(qn("w:footnote")):
-                txt = "".join(t.text or "" for t in fn.iter(qn("w:t")))
-                if txt.strip():
-                    parts.append(txt)
-        elif kind == "textbox":
-            for txbx in doc.element.iter(qn("w:txbxContent")):
-                for p in txbx.iter(qn("w:p")):
-                    txt = "".join(t.text or "" for t in p.iter(qn("w:t")))
-                    if txt.strip():
-                        parts.append(txt)
-        elif kind == "field":
-            for fld in doc.element.iter(qn("w:fldSimple")):
-                txt = "".join(t.text or "" for t in fld.iter(qn("w:t")))
-                if txt.strip():
-                    parts.append(txt)
-    except Exception:
-        pass
-    return "\n".join(parts)
 
 
 def _split_sentences(text):
@@ -10936,8 +10730,259 @@ def _count_modified_sentences(text, ranges):
     return total
 
 
-def _count_text(text):
+def _count_text_chars(text):
     return len(re.sub(r"\s", "", text or ""))
+
+
+def _create_output_docx(orig_path, out_path, body_elements):
+    """基于原文档创建输出 DOCX，替换 body 内容为 body_elements。
+    
+    body_elements: list of ET.Element（w:p 或其他 body 子元素）
+    保留原文档的所有样式/rels/内容类型等，只替换 document.xml 的 body。
+    """
+    import zipfile
+
+    # 注册命名空间前缀（让输出 XML 可读且 Word 兼容）
+    ET.register_namespace("w", _W)
+    ET.register_namespace("r", _R)
+    ET.register_namespace("wp", _WP)
+    ET.register_namespace("mc", _MC)
+    ET.register_namespace("v", "urn:schemas-microsoft-com:vml")
+    ET.register_namespace("o", "urn:schemas-microsoft-com:office:office")
+    ET.register_namespace("m", "http://schemas.openxmlformats.org/officeDocument/2006/math")
+
+    # 读取原文档
+    with zipfile.ZipFile(orig_path, "r") as zin:
+        # 解析 document.xml
+        doc_data = zin.read("word/document.xml")
+        root = ET.fromstring(doc_data)
+
+        # 替换 body 内容
+        body = root.find(_q("w:body"))
+        if body is None:
+            body = ET.SubElement(root, _q("w:body"))
+
+        # 移除现有子元素（保留 sectPr 如果存在）
+        sect_pr = None
+        existing = list(body)
+        for child in existing:
+            if child.tag == _q("w:sectPr"):
+                sect_pr = child
+            body.remove(child)
+
+        # 添加新的 body 元素
+        for elem in body_elements:
+            body.append(elem)
+
+        # 恢复 sectPr（必须在最后）
+        if sect_pr is not None:
+            body.append(sect_pr)
+
+        # 添加 trackRevisions 到 settings.xml（如果存在）
+        settings_data = None
+        new_settings_data = None
+        try:
+            settings_data = zin.read("word/settings.xml")
+            sroot = ET.fromstring(settings_data)
+            # 移除已有的 trackRevisions
+            for tr in sroot.findall(_q("w:trackRevisions")):
+                sroot.remove(tr)
+            # 添加新的
+            tr = ET.SubElement(sroot, _q("w:trackRevisions"))
+            new_settings_data = ET.tostring(sroot, encoding="unicode", xml_declaration=True)
+            # ET.tostring 返回 str，需要编码为 bytes
+            if isinstance(new_settings_data, str):
+                new_settings_data = new_settings_data.encode("utf-8")
+        except Exception:
+            pass
+
+        # 写出输出文件
+        new_doc_data = ET.tostring(root, encoding="unicode", xml_declaration=True)
+        if isinstance(new_doc_data, str):
+            new_doc_data = new_doc_data.encode("utf-8")
+
+        # 构建输出 ZIP（复制原文档 + 替换修改过的文件）
+        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                if item.filename == "word/document.xml":
+                    zout.writestr(item, new_doc_data)
+                elif item.filename == "word/settings.xml" and new_settings_data is not None:
+                    zout.writestr(item, new_settings_data)
+                else:
+                    zout.writestr(item, zin.read(item.filename))
+
+
+def compare_docx(orig_path, rev_path, out_path, opts_json):
+    """比较两份 DOCX，生成修订标记 .docx 并统计修改句字数。
+
+    纯标准库实现（zipfile + xml.etree.ElementTree），不依赖 python-docx/lxml。
+    返回 JSON 字符串.
+    """
+    import json, re, datetime, difflib, sys, traceback
+
+    try:
+        # ── 解析选项 ──
+        try:
+            opts = json.loads(opts_json) if opts_json else {}
+        except Exception:
+            opts = {}
+        level = opts.get("level", "word")
+        case_sensitive = opts.get("case", True)
+        ignore_ws = opts.get("whitespace", False)
+        use_table = opts.get("table", True)
+        use_hf = opts.get("header_footer", True)
+        use_fn = opts.get("footnote", True)
+        use_tb = opts.get("textbox", True)
+        use_field = opts.get("field", True)
+
+        author = "WordCount"
+        date = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # ── 读取两份文档的块（段落 + 表格）──
+        blocks_o = _read_docx_paragraphs_with_types(orig_path)
+        blocks_r = _read_docx_paragraphs_with_types(rev_path)
+
+        # ── difflib 段落级比较 ──
+        sm = difflib.SequenceMatcher(
+            a=[b[1] for b in blocks_o],
+            b=[b[1] for b in blocks_r]
+        )
+        opcodes = sm.get_opcodes()
+
+        # 合并相邻 delete+insert 为 replace
+        merged = []
+        ki = 0
+        while ki < len(opcodes):
+            tag, i1, i2, j1, j2 = opcodes[ki]
+            if tag == "delete" and ki + 1 < len(opcodes):
+                t2, a1, a2, b1, b2 = opcodes[ki + 1]
+                if t2 == "insert" and (i2 - i1) == (b2 - b1):
+                    merged.append(("replace", i1, i2, j1, b2))
+                    ki += 2
+                    continue
+            if tag == "insert" and ki + 1 < len(opcodes):
+                t2, a1, a2, b1, b2 = opcodes[ki + 1]
+                if t2 == "delete" and (a2 - a1) == (j2 - j1):
+                    merged.append(("replace", a1, a2, j1, j2))
+                    ki += 2
+                    continue
+            merged.append((tag, i1, i2, j1, j2))
+            ki += 1
+
+        # ── 构建 output body 元素 ──
+        rid_seq = [0]
+
+        def rid_counter():
+            rid_seq[0] += 1
+            return rid_seq[0]
+
+        body_elements = []
+        modified_chars = 0
+        ins_count = 0
+        del_count = 0
+        rep_count = 0
+
+        for tag, i1, i2, j1, j2 in merged:
+            if tag == "equal":
+                for k in range(i1, i2):
+                    el = blocks_o[k]
+                    if el[0] == "p":
+                        body_elements.append(_build_plain_paragraph_xml(el[1]))
+                    else:
+                        body_elements.append(_build_note_paragraph_xml(f"[原文表格] {el[1][:200]}"))
+            elif tag == "delete":
+                for k in range(i1, i2):
+                    el = blocks_o[k]
+                    if el[0] == "p":
+                        body_elements.append(_build_deleted_paragraph_xml(el[1], author, date, rid_counter))
+                        modified_chars += _count_modified_sentences(el[1], [(0, len(el[1]))])
+                    else:
+                        body_elements.append(_build_note_paragraph_xml(f"[已删除表格] {el[1][:200]}"))
+                        modified_chars += _count_text_chars(el[1])
+                    del_count += 1
+            elif tag == "insert":
+                for k in range(j1, j2):
+                    el = blocks_r[k]
+                    if el[0] == "p":
+                        body_elements.append(_build_inserted_paragraph_xml(el[1], author, date, rid_counter))
+                    else:
+                        body_elements.append(_build_note_paragraph_xml(f"[新增表格] {el[1][:200]}"))
+                    ins_count += 1
+            elif tag == "replace":
+                single = (i2 - i1 == 1 and j2 - j1 == 1)
+                if single:
+                    bo = blocks_o[i1]
+                    br = blocks_r[j1]
+                    if bo[0] == "p" and br[0] == "p":
+                        p, ranges = _build_diff_paragraph_xml(
+                            bo[1], br[1], level, author, date,
+                            rid_counter, case_sensitive, ignore_ws)
+                        body_elements.append(p)
+                        modified_chars += _count_modified_sentences(bo[1], ranges)
+                        rep_count += 1
+                        continue
+                    if bo[0] == "tbl" and br[0] == "tbl" and use_table:
+                        # 表格 diff：降级为占位段落
+                        body_elements.append(_build_note_paragraph_xml(f"[原表格] {bo[1][:200]}"))
+                        body_elements.append(_build_note_paragraph_xml(f"[修订表格] {br[1][:200]}"))
+                        modified_chars += _count_text_chars(bo[1])
+                        rep_count += 1
+                        continue
+                # 多块替换或类型不匹配
+                for k in range(i1, i2):
+                    el = blocks_o[k]
+                    if el[0] == "p":
+                        body_elements.append(_build_deleted_paragraph_xml(el[1], author, date, rid_counter))
+                        modified_chars += _count_modified_sentences(el[1], [(0, len(el[1]))])
+                    else:
+                        body_elements.append(_build_note_paragraph_xml(f"[已删除表格] {el[1][:200]}"))
+                        modified_chars += _count_text_chars(el[1])
+                    del_count += 1
+                for k in range(j1, j2):
+                    el = blocks_r[k]
+                    if el[0] == "p":
+                        body_elements.append(_build_inserted_paragraph_xml(el[1], author, date, rid_counter))
+                    else:
+                        body_elements.append(_build_note_paragraph_xml(f"[新增表格] {el[1][:200]}"))
+                    ins_count += 1
+
+        # ── 附加区域 ──
+        extra_kinds = []
+        if use_hf:
+            extra_kinds.append(("header_footer", "【页眉/页脚变更】"))
+        if use_fn:
+            extra_kinds.append(("footnote", "【脚注/尾注变更】"))
+        if use_tb:
+            extra_kinds.append(("textbox", "【文本框变更】"))
+        if use_field:
+            extra_kinds.append(("field", "【域变更】"))
+        for kind, label in extra_kinds:
+            to = _extract_extra_text(orig_path, kind)
+            tr = _extract_extra_text(rev_path, kind)
+            if to != tr:
+                body_elements.append(_build_note_paragraph_xml(label))
+                p, _ = _build_diff_paragraph_xml(
+                    to, tr, level, author, date,
+                    rid_counter, case_sensitive, ignore_ws)
+                body_elements.append(p)
+
+        # ── 写出输出 DOCX ──
+        _create_output_docx(orig_path, out_path, body_elements)
+
+        return json.dumps({
+            "ok": True,
+            "out_path": out_path,
+            "insertions": ins_count,
+            "deletions": del_count,
+            "replacements": rep_count,
+            "modified_sentence_chars": modified_chars,
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        err_msg = f"{type(e).__name__}: {str(e)[:400]}"
+        tb_text = traceback.format_exc()[:1200]
+        sys.stderr.write(f"COMPARE_ERROR: {err_msg}\n{tb_text}\n")
+        return json.dumps({"ok": False, "error": err_msg, "trace": tb_text}, ensure_ascii=False)
 
 
 if __name__ == "__main__":
