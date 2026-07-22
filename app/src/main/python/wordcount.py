@@ -187,31 +187,43 @@ import sys
 
 
 # ═════════════════════════════════════════════════════
-# v1.1.19: Android lxml 崩溃拦截器（PEP 451 + PEP 302 双协议）
+# v1.1.20: Android lxml 崩溃拦截器（四层防护）
 # ═════════════════════════════════════════════════════
-# 根因：Chaquopy 打包了 lxml（通过 openpyxl 的间接依赖），
-# 但其 C 扩展(.so)在 Android 上触发 fatal 级 FileNotFoundError(AssetFinder/scripts)，
-# 该错误无法被 Python except 捕获，直接导致进程崩溃。
+# 根因：lxml 的 C 扩展(.so)在 Android 上触发 fatal 级
+# FileNotFoundError(AssetFinder/scripts)，该错误无法被
+# Python except 捕获，直接导致进程崩溃。
 #
-# v1.1.15~v1.1.18 只实现 PEP 302 的 find_module/load_module，
-# 但 Python 3.10 (Chaquopy) 主要使用 PEP 451 的 find_spec 协议，
-# 导致旧 API 拦截器被完全跳过 → 文档比较等功能仍然崩溃。
+# 历史教训（v1.1.15~v1.1.19 连续5个版本未根治）：
+#   v1.1.15~1.18: 只实现 PEP 302 find_module → Python 3.10 跳过
+#   v1.1.19:     加了 PEP 451 find_spec 但用 raise ImportError →
+#                 import 机制吞掉异常后继续下一个 finder → 仍崩
 #
-# 修复方案（三层防护）：
-#   1. 实现 find_spec (PEP 451) — Python 3.4+ 主路径
-#   2. 保留 find_module/load_module (PEP 302) — 向后兼容
-#   3. 预填充 sys.modules['lxml'] — 兜底，即使 finder 被绕过也拦截
+# 正确方案（四层防护，层层兜底）：
+#   0. build.gradle pip { exclude 'lxml' } — 根本上不让 lxml 进入 APK
+#   1. find_spec 返回假 ModuleSpec（PEP 451 正确用法，不抛异常）
+#   2. find_module/load_module（PEP 302 向后兼容）
+#   3. sys.modules 预填充（即使 finder 被绕过也拦截）
 # ═════════════════════════════════════════════════════
-class _LxmlBlocker:
+import importlib.util as _iu
+
+class _BlockedLoader(importlib.abc.Loader):
+    """假 loader：执行加载时抛出可控 ImportError。"""
+    def create_module(self, spec): return None  # 用默认模块创建
+    def exec_module(self, module):
+        raise ImportError(
+            "lxml is blocked on Android (AssetFinder crash prevention). "
+            "Use xml.etree.ElementTree (standard library) instead."
+        )
+
+_blocked_loader = _BlockedLoader()
+
+class _LxmlBlocker(importlib.abc.MetaPathFinder):
     """拦截所有 lxml 相关导入，防止 Android 上的 fatal AssetFinder 崩溃。"""
 
     def find_spec(self, fullname, path, target=None):
-        """PEP 451: Python 3.4+ 的 import 查找主路径。"""
+        """PEP 451: 返回假 ModuleSpec（不抛异常！抛异常会被吞掉）。"""
         if fullname == 'lxml' or fullname.startswith('lxml.') or fullname.startswith('lxml_'):
-            raise ImportError(
-                "lxml is blocked on Android to prevent AssetFinder crash. "
-                "Use xml.etree.ElementTree instead."
-            )
+            return _iu.module_spec(fullname, _blocked_loader)
         return None
 
     def find_module(self, fullname, path=None):
@@ -228,17 +240,19 @@ class _LxmlBlocker:
 
 sys.meta_path.insert(0, _LxmlBlocker())
 
-# 第三层防护：预填充 sys.modules，防止任何绕过 finder 的导入尝试
+# 第四层防护：预填充 sys.modules
 import types as _types
-_dummy_lxml = _types.ModuleType('lxml')
-_dummy_lxml.__path__ = []
-_dummy_lxml.__loader__ = None
-_sys_modules = sys.modules  # 引用，避免后续 del sys.modules 出问题
-_sys_modules['lxml'] = _dummy_lxml
+_sys_modules_ref = sys.modules
+_dummy = _types.ModuleType('lxml')
+_dummy.__path__ = []
+_dummy.__loader__ = _blocked_loader
+_sys_modules_ref['lxml'] = _dummy
 for _sub in ('lxml.etree', 'lxml.html', 'lxml.sax', 'lxml.isoschematron',
              'lxml.ElementInclude', 'lxml.cssselect', 'lxml.builder'):
-    _sys_modules[_sub] = _types.ModuleType(_sub)
-del _types, _dummy_lxml, _sys_modules, _sub
+    _m = _types.ModuleType(_sub)
+    _m.__loader__ = _blocked_loader
+    _sys_modules_ref[_sub] = _m
+del _types, _sys_modules_ref, _dummy, _sub, _m
 # ═════════════════════════════════════════════════════
 
 

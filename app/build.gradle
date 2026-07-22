@@ -13,8 +13,8 @@ android {
         // minSdk 26：Apache POI 5.x / log4j 用到 MethodHandle.invoke，D8 要求 Android O(26) 起
         minSdk 26
         targetSdk 34
-        versionCode 58
-        versionName '1.1.19'
+        versionCode 59
+        versionName '1.1.20'
 
         // 只编 arm64-v8a（华为等现代手机），缩小体积、功能零影响
         ndk {
@@ -31,6 +31,14 @@ android {
                         // AssetFinder/scripts 崩溃；Android 版 compare_docx/extract_docx 均已改为纯标准库实现
                         install 'pillow'
                         install 'openpyxl'
+                        // v1.1.20: 排除 openpyxl 的间接依赖 lxml！
+                        // lxml 的 C 扩展(.so)在 Android 上触发 fatal 级 FileNotFoundError(AssetFinder/scripts)，
+                        // 该错误无法被 Python except 捕获，直接导致整个 Python 引擎崩溃。
+                        // 影响：PDF Level2(pdfminer)不执行 + 文档比较(compare_docx)崩溃。
+                        // sys.meta_path 拦截器(PEP 451+302+sys.modules预填充)均无法可靠拦截
+                        // （find_spec 抛异常会被 import 机制吞掉后继续尝试下一个 finder），
+                        // 唯一可靠方案是从根本上不让 lxml 进入 APK。
+                        exclude 'lxml'
                         install 'python-pptx'
                         install 'ezdxf'
                         install 'olefile'
