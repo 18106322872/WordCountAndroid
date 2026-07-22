@@ -10847,9 +10847,15 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
     纯标准库实现（zipfile + xml.etree.ElementTree），不依赖 python-docx/lxml。
     返回 JSON 字符串.
     """
-    import json, re, datetime, difflib, sys, traceback
+    import json, re, datetime, difflib, sys, traceback, os
 
     try:
+        # ── 前置校验：文件存在性 ──
+        if not os.path.isfile(orig_path):
+            return json.dumps({"ok": False, "error": f"原文档不存在: {orig_path}"}, ensure_ascii=False)
+        if not os.path.isfile(rev_path):
+            return json.dumps({"ok": False, "error": f"修订文档不存在: {rev_path}"}, ensure_ascii=False)
+
         # ── 解析选项 ──
         try:
             opts = json.loads(opts_json) if opts_json else {}
@@ -10868,8 +10874,14 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
         date = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # ── 读取两份文档的块（段落 + 表格）──
-        blocks_o = _read_docx_paragraphs_with_types(orig_path)
-        blocks_r = _read_docx_paragraphs_with_types(rev_path)
+        try:
+            blocks_o = _read_docx_paragraphs_with_types(orig_path)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"读取原文档失败: {type(e).__name__}: {str(e)[:300]}"}, ensure_ascii=False)
+        try:
+            blocks_r = _read_docx_paragraphs_with_types(rev_path)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"读取修订文档失败: {type(e).__name__}: {str(e)[:300]}"}, ensure_ascii=False)
 
         # ── difflib 段落级比较 ──
         sm = difflib.SequenceMatcher(
@@ -10996,7 +11008,10 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
                 body_elements.append(p)
 
         # ── 写出输出 DOCX ──
-        _create_output_docx(orig_path, out_path, body_elements)
+        try:
+            _create_output_docx(orig_path, out_path, body_elements)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"写出结果文档失败: {type(e).__name__}: {str(e)[:300]}"}, ensure_ascii=False)
 
         return json.dumps({
             "ok": True,

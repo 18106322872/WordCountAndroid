@@ -920,21 +920,45 @@ private fun tryExtractInternalTitle(file: File, currentName: String): String {
                         return "$clean.docx"
                     }
                 }
-                // 策略2: DOCX 内容首行（从 document.xml 取第一个 w:t 文本）
+                // 策略2: DOCX 内容中有意义的文本（扫描所有 w:t，找第一个像标题的）
+                // v1.1.17 修复：不再取第一个 w:t（可能是"No."/"To:"等无意义标签），
+                // 而是找第一个含 CJK 字符或长度>=4 且不像英文标签的文本
                 val bodyEntry = zip.getEntry("word/document.xml")
                 if (bodyEntry != null) {
                     val bodyXml = zip.getInputStream(bodyEntry).bufferedReader().readText()
                     val tRe = """<w:t[^>]*>(.*?)</w:t>""".toRegex(RegexOption.DOT_MATCHES_ALL)
-                    val firstText = tRe.find(bodyXml)?.groupValues?.get(1)?.trim()
-                        ?.replace(Regex("<[^>]+>"), "")?.trim()
-                    if (!firstText.isNullOrBlank() && firstText.length >= 2) {
-                        val short = if (firstText.length > 25) firstText.substring(0, 25) + "…" else firstText
-                        val clean = short.replace(Regex("[\\\\/:*?\"<>|\n\r\t]"), "_").trim()
-                        if (clean.isNotBlank()) {
-                            Log.d("WordCount", "DOCX首行文本: '$clean'")
-                            return "$clean.docx"
+                    // 常见英文标签模式（跳过这些）
+                    val labelPattern = Regex("""^(?i)(no|to|from|date|name|subject|cc|bcc|ref|re|page|tel|fax|email|address|id|code|type|copy|total|amount|note|dear|sir|mr|ms|mrs|dr|prof)\s*[:.]?\s*$""")
+                    val labelPattern2 = Regex("""^[A-Z][a-z]?[\.:]\s*$""")  // 单/双字母+冒号/点
+                    tRe.findAll(bodyXml).forEach { tMatch ->
+                        val raw = tMatch.groupValues?.get(1)?.trim()
+                            ?.replace(Regex("<[^>]+>"), "")?.trim() ?: return@forEach
+                        if (raw.isBlank() || raw.length < 2) return@forEach
+                        // 跳过纯英文标签
+                        if (labelPattern.matches(raw) || labelPattern2.matches(raw)) return@forEach
+                        // 含 CJK → 直接采用（大概率是中文标题）
+                        if (raw.any { it.code in 0x4E00..0x9FFF || it.code in 0x3400..0x4DBF ||
+                                             it.code in 0xA960..0xA97C || it.code in 0xF900..0xFAFF ||
+                                             it.code in 0x3000..0x303F }) {
+                            val short = if (raw.length > 25) raw.substring(0, 25) + "…" else raw
+                            val clean = short.replace(Regex("[\\\\/:*?\"<>|\n\r\t]"), "_").trim()
+                            if (clean.isNotBlank()) {
+                                Log.d("WordCount", "DOCX有意义的文本(CJK): '$clean'")
+                                return "$clean.docx"
+                            }
+                        }
+                        // 纯英文但够长（>=4字符且不含标点结尾的标签式写法）
+                        if (raw.length >= 4 && !raw.endsWith(":") && !raw.endsWith(".")) {
+                            val short = if (raw.length > 25) raw.substring(0, 25) + "…" else raw
+                            val clean = short.replace(Regex("[\\\\/:*?\"<>|\n\r\t]"), "_").trim()
+                            if (clean.isNotBlank()) {
+                                Log.d("WordCount", "DOCX有意义的文本(长英文): '$clean'")
+                                return "$clean.docx"
+                            }
                         }
                     }
+                    // 所有 w:t 都不像标题 → 不用策略2，保留通用名
+                    Log.d("WordCount", "DOCX未找到有意义的标题文本，保留通用名")
                 }
             } finally { zip.close() }
         }
@@ -1189,16 +1213,20 @@ private fun addFiles(
                         // ── Level 1: Kotlin PdfExtractor（快速预筛）──
                         val ktRes = PdfExtractor.extract(f)
                         val ktStats = countTextKotlin(ktRes.text)
+                        Log.d("WordCount", "PDF Level1(Kotlin) $dName: chars=${ktStats.fourth} words=${ktStats.first} reliable=${ktRes.reliable} pages=${ktRes.pages}")
 
                         // ── Level 2: Python pdfminer（文字型 PDF 的主力）──
                         var pyWords = 0; var pyFe = 0; var pyNc = 0; var pyChars = 0; var pyPages = 0
                         var pyOk = false
+                        var pyError: String? = null
                         try {
                             val pyResults = PythonEngine.countFiles(context, listOf(f.absolutePath))
                             @Suppress("UNCHECKED_CAST")
                             val pyList = pyResults as? List<Map<String, Any?>>
+                            Log.d("WordCount", "PDF Level2(Python) $dName: raw=$pyResults")
                             if (!pyList.isNullOrEmpty()) {
                                 val py0 = pyList[0]
+                                Log.d("WordCount", "PDF Level2 $dName: py0_ok=${py0["ok"]} keys=${py0.keys}")
                                 if (py0["ok"] == true) {
                                     val pyData = py0["result"] as? Map<String, Any?>
                                     if (pyData != null) {
@@ -1209,14 +1237,21 @@ private fun addFiles(
                                         pyChars = (pyS?.get("chars") as? Number)?.toInt() ?: 0
                                         pyPages = (pyData["pages"] as? Number)?.toInt() ?: ktRes.pages
                                         pyOk = true
+                                    } else {
+                                        Log.w("WordCount", "PDF Level2 $dName: pyData为null, raw result=${py0["result"]}")
                                     }
+                                } else {
+                                    pyError = py0["error"]?.toString()
+                                    Log.w("WordCount", "PDF Level2 $dName: Python返回ok=false, error=$pyError")
                                 }
+                            } else {
+                                Log.w("WordCount", "PDF Level2 $dName: pyList为空或null")
                             }
                         } catch (e: Throwable) {
                             Log.w("WordCount", "PDF Python pdfminer 异常: $dName - ${e.javaClass.simpleName}: ${e.message}")
                         }
 
-                        Log.d("WordCount", "PDF $dName → KT:${ktStats.fourth}ch PY:${pyChars}ch KT_rel=${ktRes.reliable}")
+                        Log.d("WordCount", "PDF $dName → KT:${ktStats.fourth}ch PY:${pyChars}ch(pyOk=$pyOk) KT_rel=${ktRes.reliable}")
 
                         // ── 决策：选 Kolt 或 Python 的较好结果 ──
                         //   pdfminer 通常更准确（处理了 ToUnicode CMap / ObjStm 等）
