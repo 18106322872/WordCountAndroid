@@ -90,18 +90,10 @@ object OoXmlEngine {
         var pages: Int
         var pagesReason = ""
         if (renderedBreaks > 0) {
-            // ★ v1.1.14: 加 +1 边距——Word 经常省略末尾页的 lastRenderedPageBreak
-            // 例如 2.docx 有 10 个标记但 Word 显示 12 页（差 2？不，应该是 11→12 差 1）
-            // 用 renderedBreaks + 1（基础）+ 1（安全边距）= renderedBreaks + 2？
-            // 不对，重新想：LRP 标记的是"在此处分页"，N 个标记意味着有 N 个分页点
-            // 文档从第 1 页开始，每遇到一个分页点就进入下一页
-            // 所以 N 个标记 = 第 1 页 + N 次翻页 = N+1 页
-            // 如果 Word 少写了 1 个末尾标记，那实际是 N+1 个标记 → N+2 页
-            // 所以安全做法：pages = renderedBreaks + 2？但这可能多算...
-            //
-            // 更稳妥的做法：pages = renderedBreaks + 1（标准公式），然后检查内容是否明显超出
-            // 实际上最简单有效的修法就是 +1，因为实测数据表明普遍少 1
-            pages = maxOf(1, 1 + renderedBreaks + 1)
+            // 标准公式：N 个 lastRenderedPageBreak 标记 = N+1 页
+            // （Word 在每个分页点写标记，从第1页开始，N个标记意味着翻N次到第N+1页）
+            // 不再加安全边距——实测表明边距在某些文档上导致多算1~2页
+            pages = maxOf(1, 1 + renderedBreaks)
             pagesReason = "word_rendered_breaks_n${renderedBreaks}"
         } else {
             // Fallback: 显式分页符 + 节分隔符
@@ -124,8 +116,7 @@ object OoXmlEngine {
 
             val totalBreaks = explicitBreaks + separatorSectPr
             if (totalBreaks > 0) {
-                // ★ v1.1.14: 同样加 +1 安全边距
-                pages = maxOf(1, 1 + totalBreaks + 1)
+                pages = maxOf(1, 1 + totalBreaks)
                 pagesReason = "explicit_breaks_n${totalBreaks}"
             } else {
                 // 无任何分页标记：基于实际页面尺寸的智能估算

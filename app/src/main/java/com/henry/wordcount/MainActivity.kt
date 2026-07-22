@@ -407,9 +407,14 @@ fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEnt
                     )
                     val r = entry.result
                     if (r != null) {
+                        // v1.1.16: 估算页数标注"(估)"——当 pagesReason 含 estimate/layout 时
+                        val isEstimated = r.pagesReason?.contains("estimate") == true ||
+                            r.pagesReason?.contains("layout") == true
+                        val pageLabel = if (isEstimated) "页 ${r.pages ?: estimatePages(r.chars)}(估)"
+                            else "页 ${r.pages ?: estimatePages(r.chars)}"
                     Text(
-                        "字数 ${r.words} ｜ 中文 ${r.fe} ｜ 非中文 ${r.nc} ｜ 页 ${r.pages ?: estimatePages(r.chars)}" +
-                                (if (r.pagesReason != null) " ｜ ${r.pagesReason}" else ""),
+                        "字数 ${r.words} ｜ 中文 ${r.fe} ｜ 非中文 ${r.nc} ｜ $pageLabel" +
+                                (if (r.pagesReason != null && !isEstimated) " ｜ ${r.pagesReason}" else ""),
                         style = MaterialTheme.typography.bodySmall, color = Color.Gray
                     )
                         if (r.hasUnreliable) Text("含无法准确统计的内容（可导出）", style = MaterialTheme.typography.bodySmall, color = Color(0xFFB26A00))
@@ -835,7 +840,9 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFi
     val originalName = resolveDisplayName(context, uri)
     Log.d("WordCount", "copyUriToCache originalName='$originalName'")
 
-    // v1.1.13 终极安全网：多层检测 + 带序号替换名（确保每个文件有唯一可辨识名称）
+    // v1.1.16 改进：检测到 hash 时先用轻量名，后续 tryExtractInternalTitle 会尝试
+    // 从文件内部元数据(dc:title/PDF Title)或内容首行提取真实名称
+    // 不再使用序号（friendlyNameCounter），因为 "Word文档_2.docx" 这种名字无法辨识文件
     val displayName = if (looksLikeHashString(originalName) || isSuspiciousFilename(originalName)) {
         val ext = guessExt(context, uri)
         val typeLabel = when (ext.lowercase()) {
@@ -848,10 +855,8 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFi
             else -> "文档"
         }
         val safeExt = if (ext.isNotBlank()) ".$ext" else ""
-        // ★ v1.1.13: 全局递增序号，确保同名文件有区分度（不再出现三个"文档.docx"）
-        friendlyNameCounter++
-        val result = "${typeLabel}_${friendlyNameCounter}$safeExt"
-        Log.w("WordCount", "copyUriToCache 安全网触发: '$originalName' → '$result' (hash=${looksLikeHashString(originalName)}, suspicious=${isSuspiciousFilename(originalName)})")
+        val result = "$typeLabel$safeExt"
+        Log.w("WordCount", "copyUriToCache 安全网触发: '$originalName' → '$result' (等待内部标题提取)")
         result
     } else {
         originalName
@@ -885,11 +890,8 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFi
 }
 
 /**
- * v1.1.13: 从已缓存的文件中提取内部元数据标题，用于替换通用显示名。
- * 支持 DOCX (docProps/core.xml <dc:title>) 和 PDF (/Title)。
- * @param file 已缓存到本地的文件
- * @param currentName 当前显示名
- * @return 如果提取到有意义的标题则返回标题+扩展名，否则返回原名称
+ * v1.1.16: 从已缓存的文件中提取有意义的显示名称，用于替换通用名。
+ * 按优先级尝试：dc:title > PDF /Title > DOCX内容首行 > 原名
  */
 private fun tryExtractInternalTitle(file: File, currentName: String): String {
     // 只在当前名称是通用名时才尝试（避免覆盖真实文件名）
@@ -902,41 +904,72 @@ private fun tryExtractInternalTitle(file: File, currentName: String): String {
 
     val ext = file.extension.lowercase()
     return try {
-        when (ext) {
-            "docx" -> {
-                // 从 docProps/core.xml 提取 dc:title
-                val zip = java.util.zip.ZipFile(file)
-                try {
-                    val entry = zip.getEntry("docProps/core.xml")
-                    if (entry != null) {
-                        val xml = zip.getInputStream(entry).bufferedReader().readText()
-                        // 匹配 <dc:title>...</dc:title>
-                        val titleRe = """<dc:title[^>]*>(.*?)</dc:title>""".toRegex()
-                        titleRe.find(xml)?.groupValues?.get(1)?.trim()?.let { title ->
-                            if (title.isNotBlank() && title.length <= 150 &&
-                                !title.any { it.code < 0x20 } /* 无控制字符 */) {
-                                val clean = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
-                                Log.d("WordCount", "DOCX内部标题: '$clean' (原: '$currentName')")
-                                "$clean.docx"
-                            } else currentName
-                        } ?: currentName
-                    } else currentName
-                } finally { zip.close() }
-            }
-            "pdf" -> {
-                // PDF /Title 元数据（从文件头扫描前 64KB）
-                val bytes = file.inputStream().use { ins ->
-                    val buf = ByteArray(minOf(65536, file.length().toInt()))
-                    val total = ins.read(buf)
-                    if (total == buf.size) buf else buf.copyOf(total)
+        if (ext == "docx") {
+            // 策略1: docProps/core.xml <dc:title>
+            val zip = java.util.zip.ZipFile(file)
+            try {
+                val entry = zip.getEntry("docProps/core.xml")
+                if (entry != null) {
+                    val xml = zip.getInputStream(entry).bufferedReader().readText()
+                    val titleRe = """<dc:title[^>]*>(.*?)</dc:title>""".toRegex()
+                    val title = titleRe.find(xml)?.groupValues?.get(1)?.trim()
+                    if (!title.isNullOrBlank() && title.length <= 150 &&
+                        !title.any { it.code < 0x20 }) {
+                        val clean = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
+                        Log.d("WordCount", "DOCX内部标题: '$clean'")
+                        return "$clean.docx"
+                    }
                 }
-                extractPdfTitleFromBytes(bytes, bytes.size)?.let { title ->
-                    val clean = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
-                    if (clean.isNotBlank()) "$clean.pdf" else currentName
-                } ?: currentName
-            }
-            else -> currentName
+                // 策略2: DOCX 内容首行（从 document.xml 取第一个 w:t 文本）
+                val bodyEntry = zip.getEntry("word/document.xml")
+                if (bodyEntry != null) {
+                    val bodyXml = zip.getInputStream(bodyEntry).bufferedReader().readText()
+                    val tRe = """<w:t[^>]*>(.*?)</w:t>""".toRegex(RegexOption.DOT_MATCHES_ALL)
+                    val firstText = tRe.find(bodyXml)?.groupValues?.get(1)?.trim()
+                        ?.replace(Regex("<[^>]+>"), "")?.trim()
+                    if (!firstText.isNullOrBlank() && firstText.length >= 2) {
+                        val short = if (firstText.length > 25) firstText.substring(0, 25) + "…" else firstText
+                        val clean = short.replace(Regex("[\\\\/:*?\"<>|\n\r\t]"), "_").trim()
+                        if (clean.isNotBlank()) {
+                            Log.d("WordCount", "DOCX首行文本: '$clean'")
+                            return "$clean.docx"
+                        }
+                    }
+                }
+            } finally { zip.close() }
         }
+
+        if (ext == "pdf") {
+            // 策略3: PDF /Title 元数据
+            val bytes = file.inputStream().use { ins ->
+                val buf = ByteArray(minOf(65536, file.length().toInt()))
+                val total = ins.read(buf)
+                if (total == buf.size) buf else buf.copyOf(total)
+            }
+            extractPdfTitleFromBytes(bytes, bytes.size)?.let { title ->
+                val clean = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
+                if (clean.isNotBlank()) return "$clean.pdf"
+            }
+        }
+
+        // 策略4: TXT 首行
+        if (ext == "txt" || ext == "csv" || ext == "log") {
+            file.inputStream().use { ins ->
+                val header = ByteArray(minOf(4096, file.length().toInt()))
+                val n = ins.read(header)
+                if (n > 0) {
+                    val firstLine = String(header, 0, n, Charsets.UTF_8)
+                        .lineSequence().firstOrNull { it.isNotBlank() }?.trim()
+                    if (!firstLine.isNullOrBlank() && firstLine.length >= 2) {
+                        val short = if (firstLine.length > 25) firstLine.substring(0, 25) + "…" else firstLine
+                        val clean = short.replace(Regex("[\\\\/:*?\"<>|\n\r\t]"), "_").trim()
+                        if (clean.isNotBlank()) return "$clean.$ext"
+                    }
+                }
+            }
+        }
+
+        currentName
     } catch (_: Throwable) {
         currentName
     }
