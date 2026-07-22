@@ -789,11 +789,52 @@ private fun looksLikeHashString(s: String): Boolean {
     return false
 }
 
+/**
+ * v1.1.12: 检测"可疑文件名"——不像人类命名的任何长字符串。
+ * 作为 looksLikeHashString 的补充，捕获那些不完全匹配 hex/UUID 格式
+ * 但明显是系统内部 ID（如 ContentResolver 返回的编码标识符）。
+ *
+ * 规则：
+ * 1. 名字较长(>12)且无 CJK 字符
+ * 2. 去扩展名后，包含连续 8+ 个十六进制字符的序列（hash 特征片段）
+ * 3. 或者 basename 看起来像随机字母数字混合（高熵特征）
+ */
+private fun isSuspiciousFilename(s: String): Boolean {
+    val t = s.trim()
+    if (t.length < 8) return false
+    // 有 CJK 字符 → 很可能是真实文件名
+    if (t.any { it.code in 0x4E00..0x9FFF }) return false
+
+    // 分离 basename 和扩展名
+    val dotIdx = t.lastIndexOf('.')
+    val base = if (dotIdx > 0 && dotIdx < t.length - 1) t.substring(0, dotIdx) else t
+
+    // 规则1: basename 中有连续 12+ 个 hex 字符的子串 → 几乎可以确定是某种编码 ID
+    if (base.contains(Regex("[a-fA-F0-9]{12,}"))) return true
+
+    // 规则2: basename 以 "9e" 或类似 hex 前缀开头 + 长度>=16 + 无语义分隔符
+    // （某些 ROM 的 ContentResolver 内部 ID 固定以 9e 开头）
+    if (base.length >= 16 && Regex("^[a-fA-F0-9]{2,}[a-fA-F0-9]+").matches(base)) return true
+
+    // 规则3: 超长basename(>24) + 字母数字占比>90% + 不含元音(或极少) + 无空格/常见标点
+    if (base.length > 24) {
+        val alnumRatio = base.count { it.isLetterOrDigit() }.toFloat() / base.length
+        val vowelCount = base.count { it.lowercaseChar() in setOf('a','e','i','o','u') }
+        val letterCount = base.count { it.isLetter() }
+        val vowelRatio = if (letterCount > 0) vowelCount.toFloat() / letterCount else 1f
+        // 正常英文文件名元音比例约 30-60%；hash/ID 通常 < 10%
+        if (alnumRatio > 0.85f && vowelRatio < 0.15f && letterCount >= 8) return true
+    }
+
+    return false
+}
+
 private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFile {
     val originalName = resolveDisplayName(context, uri)
+    Log.d("WordCount", "copyUriToCache originalName='$originalName'")
 
-    // v1.1.11 改进：检测到 hash 时一律用友好名替换（不再保留难认的 ID 字符串）
-    val displayName = if (looksLikeHashString(originalName)) {
+    // v1.12 终极安全网：多层检测，确保任何形式的内部 ID/hash 都被替换
+    val displayName = if (looksLikeHashString(originalName) || isSuspiciousFilename(originalName)) {
         val ext = guessExt(context, uri)
         val typeLabel = when (ext.lowercase()) {
             "pdf" -> "PDF文档"
@@ -806,7 +847,7 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFi
         }
         val safeExt = if (ext.isNotBlank()) ".$ext" else ""
         val result = "$typeLabel$safeExt"
-        Log.w("WordCount", "copyUriToCache 安全网: '$originalName' → '$result'")
+        Log.w("WordCount", "copyUriToCache 安全网触发: '$originalName' → '$result' (hash=${looksLikeHashString(originalName)}, suspicious=${isSuspiciousFilename(originalName)})")
         result
     } else {
         originalName
