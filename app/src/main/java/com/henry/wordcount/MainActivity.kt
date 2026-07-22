@@ -583,9 +583,11 @@ private fun resolveDisplayName(context: android.content.Context, uri: Uri): Stri
                 val hasVowel = base.any { it.lowercaseChar() in 'a'..'z' && it.lowercaseChar() in setOf('a','e','i','o','u') }
                 val isPureHex = base.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }
                 val isMostlyDigits = base.count { it.isDigit() } > base.length * 0.6
-                // v1.1.10 新增放行条件：如果包含常见中文标点或括号，说明是有意义的文件名
+                // v1.1.11 修复：纯 hex basename ≥16 字符即判定为 hash（之前 >36 导致 28~32 字符的 ContentResolver 内部 ID 漯网）
+                // 非纯 hex 的数字编号文件名（如学号）才需要更长阈值
                 val hasCjkPunct = base.any { it in setOf('(', ')', '（', '）', '[', ']', '【', '】', '_', '-', '#', '@') }
-                if ((isPureHex || (!hasVowel && isMostlyDigits)) && !hasCjkPunct && base.length > 36) return true
+                if (isPureHex && base.length >= 16 && !hasCjkPunct) return true
+                if (!isPureHex && !hasVowel && isMostlyDigits && !hasCjkPunct && base.length > 36) return true
             }
         }
         // 以数字和少量字母为主的长字符串（内部 ID 特征）：字母+数字混合，长度>20，无中文/无常见扩展名
@@ -776,7 +778,9 @@ private fun looksLikeHashString(s: String): Boolean {
             val isPureHex = base.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }
             val isMostlyDigits = base.count { it.isDigit() } > base.length * 0.6
             val hasCjkPunct = base.any { it in setOf('(', ')', '（', '）', '[', ']', '【', '】', '_', '-', '#', '@') }
-            if ((isPureHex || (!hasVowel && isMostlyDigits)) && !hasCjkPunct && base.length > 36) return true
+            // v1.1.11: 纯 hex ≥16 即 hash；非纯 hex 编号文件名才需 >36
+            if (isPureHex && base.length >= 16 && !hasCjkPunct) return true
+            if (!isPureHex && !hasVowel && isMostlyDigits && !hasCjkPunct && base.length > 36) return true
         }
     }
     // 长数字字母混合无中文
@@ -788,30 +792,22 @@ private fun looksLikeHashString(s: String): Boolean {
 private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFile {
     val originalName = resolveDisplayName(context, uri)
 
-    // v1.1.10 改进安全网：分级处理而非一刀切替换为"文档.docx"
+    // v1.1.11 改进：检测到 hash 时一律用友好名替换（不再保留难认的 ID 字符串）
     val displayName = if (looksLikeHashString(originalName)) {
         val ext = guessExt(context, uri)
-        // 如果原始名不太长(< 60)且有扩展名，保留原名（比"Word文档.docx"更有辨识度）
-        // 这样至少不同文件显示不同的名字（即使名字是 ID）
-        if (originalName.length < 60 && originalName.contains(".")) {
-            Log.w("WordCount", "copyUriToCache 安全网(保留原名): '$originalName'")
-            originalName
-        } else {
-            // 确实是无效的长 ID/hash → 用类型通用名
-            val typeLabel = when (ext.lowercase()) {
-                "pdf" -> "PDF文档"
-                "doc", "docx" -> "Word文档"
-                "xls", "xlsx" -> "Excel表格"
-                "ppt", "pptx" -> "PPT演示"
-                "txt" -> "文本文件"
-                "png", "jpg", "jpeg", "bmp", "gif", "webp" -> "图片"
-                else -> "文档"
-            }
-            val safeExt = if (ext.isNotBlank()) ".$ext" else ""
-            val result = "$typeLabel$safeExt"
-            Log.w("WordCount", "copyUriToCache 安全网(通用名): '$originalName' → '$result'")
-            result
+        val typeLabel = when (ext.lowercase()) {
+            "pdf" -> "PDF文档"
+            "doc", "docx" -> "Word文档"
+            "xls", "xlsx" -> "Excel表格"
+            "ppt", "pptx" -> "PPT演示"
+            "txt" -> "文本文件"
+            "png", "jpg", "jpeg", "bmp", "gif", "webp" -> "图片"
+            else -> "文档"
         }
+        val safeExt = if (ext.isNotBlank()) ".$ext" else ""
+        val result = "$typeLabel$safeExt"
+        Log.w("WordCount", "copyUriToCache 安全网: '$originalName' → '$result'")
+        result
     } else {
         originalName
     }

@@ -112,16 +112,28 @@ object OoXmlEngine {
                 pagesReason = "explicit_breaks"
             } else {
                 // ★ v1.1.10 新增：无任何分页标记时，基于内容估算页数
-                // Word 排版受字体/行距/边距/表格/图片等影响，纯文本无法精确计算。
-                // 但"恒返回 1 页"比粗略估算更误导用户，所以用双指标取较大者：
-                //   - 按字符数：中文文档平均 ~750 字符/页（保守值，适应大字号/大行距场景）
-                //   - 按段落数：A4 默认格式约 ~12 段/页
+                // v1.1.11 改进：用去空白字符数（text.length 含大量换行符会虚高）
                 val paraCount = """<w:p[\s>]""".toRegex().findAll(bodyXml).count()
-                val charCount = text.length
-                val estByChars = if (charCount > 0) maxOf(1, (charCount + 749) / 750) else 1
+                val cleanCharCount = text.replace(Regex("\\s"), "").length
+                val estByChars = if (cleanCharCount > 0) maxOf(1, (cleanCharCount + 749) / 750) else 1
                 val estByParas = if (paraCount > 0) maxOf(1, (paraCount + 11) / 12) else 1
                 pages = maxOf(estByChars, estByParas)
-                pagesReason = "content_estimate(c=$charCount,p=$paraCount)"
+                pagesReason = "content_estimate(c=$cleanCharCount,p=$paraCount)"
+            }
+
+            // ★ v1.1.11 新增：即使有分页标记，也与内容估算取 max（防止分页标记少导致页数偏低）
+            // 例如：文档只有 1 个显式分页符 → break-based=2 页，但实际内容够 4 页
+            if (pagesReason != "content_estimate") {
+                val paraCount2 = """<w:p[\s>]""".toRegex().findAll(bodyXml).count()
+                // v1.1.11: 用去空白字符数估算（text.length 含大量换行符会虚高）
+                val cleanCharCount = text.replace(Regex("\\s"), "").length
+                val estByChars = if (cleanCharCount > 0) maxOf(1, (cleanCharCount + 749) / 750) else 1
+                val estByParas = if (paraCount2 > 0) maxOf(1, (paraCount2 + 11) / 12) else 1
+                val estimated = maxOf(estByChars, estByParas)
+                if (estimated > pages) {
+                    pages = estimated
+                    pagesReason = "${pagesReason}_capped_by_content(c=$cleanCharCount,p=$paraCount2)"
+                }
             }
         }
         return OoxmlResult(text, pages, "docx", pagesReason = pagesReason)
