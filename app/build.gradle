@@ -13,8 +13,8 @@ android {
         // minSdk 26：Apache POI 5.x / log4j 用到 MethodHandle.invoke，D8 要求 Android O(26) 起
         minSdk 26
         targetSdk 34
-        versionCode 54
-        versionName '1.1.13'
+        versionCode 55
+        versionName '1.1.15'
 
         // 只编 arm64-v8a（华为等现代手机），缩小体积、功能零影响
         ndk {
@@ -22,24 +22,27 @@ android {
         }
 
         // Chaquopy 17：内嵌 Python + 解析库；图片 OCR 交由 Kotlin 层 Tesseract 完成（模型随 APK 内置，离线可用）
-        chaquopy {
-            defaultConfig {
-                version '3.10'
-                pip {
-                    install 'pdfminer.six'
-                    // 注：已移除 python-docx（v1.1.12）— 其依赖 lxml(C扩展)在 Chaquopy 上触发
-                    // AssetFinder/scripts 崩溃；Android 版 compare_docx/extract_docx 均已改为纯标准库实现
-                    install 'pillow'
-                    install 'openpyxl'
-                    install 'python-pptx'
-                    install 'ezdxf'
-                    install 'olefile'
-                    // 注：pymupdf(fitz) 在 Chaquopy 无 Android wheel，故不引入；
-                    // 注：rapidocr-onnxruntime 依赖 onnxruntime（无 Android wheel），Chaquopy 无法安装；
-                    //      PDF 图片型 OCR 当前依赖设备端 ML Kit（PdfOcrEngine），若 ML Kit 不可用则降级报错。
+            chaquopy {
+                defaultConfig {
+                    version '3.10'
+                    pip {
+                        install 'pdfminer.six'
+                        // 注：已移除 python-docx（v1.1.12）— 其依赖 lxml(C扩展)在 Chaquopy 上触发
+                        // AssetFinder/scripts 崩溃；Android 版 compare_docx/extract_docx 均已改为纯标准库实现
+                        install 'pillow'
+                        install 'openpyxl'
+                        install 'python-pptx'
+                        install 'ezdxf'
+                        install 'olefile'
+                        // v1.1.14: 排除 lxml（Chaquopy 自带 libxml2/libxslt 时会顺带打包 lxml，
+                        // 其 C 扩展 .so 在 Android 上触发 fatal 级 AssetFinder/scripts 崩溃）
+                        options '-c', '../src/main/python/constraints.txt'
+                        // 注：pymupdf(fitz) 在 Chaquopy 无 Android wheel，故不引入；
+                        // 注：rapidocr-onnxruntime 依赖 onnxruntime（无 Android wheel），Chaquopy 无法安装；
+                        //      PDF 图片型 OCR 当前依赖设备端 ML Kit（PdfOcrEngine），若 ML Kit 不可用则降级报错。
+                    }
                 }
             }
-        }
 
         manifestPlaceholders = [appName: '字数统计']
     }
