@@ -950,8 +950,11 @@ private fun tryExtractInternalTitle(file: File, currentName: String): String {
                                              it.code in 0x3000..0x303F }) {
                             val short = if (raw.length > 25) raw.substring(0, 25) + "…" else raw
                             val clean = short.replace(Regex("[\\\\/:*?\"<>|\n\r\t]"), "_").trim()
-                            if (clean.isNotBlank() && (cjkCandidate == null || raw.length > cjkCandidate.length)) {
-                                cjkCandidate = clean
+                            if (clean.isNotBlank()) {
+                                val prevLen = cjkCandidate?.length ?: 0
+                                if (raw.length > prevLen) {
+                                    cjkCandidate = clean
+                                }
                             }
                         } else if (fallbackCandidate == null) {
                             // 纯英文但够长（>=4字符且不含标点结尾的标签式写法）→ 兜底候选
