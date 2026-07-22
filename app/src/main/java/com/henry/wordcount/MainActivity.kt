@@ -924,8 +924,12 @@ private fun tryExtractInternalTitle(file: File, currentName: String): String {
                 } finally { zip.close() }
             }
             "pdf" -> {
-                // PDF /Title 元数据（从文件头扫描）
-                val bytes = file.readBytes(minOf(65536, file.length().toInt()))
+                // PDF /Title 元数据（从文件头扫描前 64KB）
+                val bytes = file.inputStream().use { ins ->
+                    val buf = ByteArray(minOf(65536, file.length().toInt()))
+                    val total = ins.read(buf)
+                    if (total == buf.size) buf else buf.copyOf(total)
+                }
                 extractPdfTitleFromBytes(bytes, bytes.size)?.let { title ->
                     val clean = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
                     if (clean.isNotBlank()) "$clean.pdf" else currentName
