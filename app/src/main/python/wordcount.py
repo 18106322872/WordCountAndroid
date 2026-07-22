@@ -204,9 +204,11 @@ import sys
 #   2. find_module/load_module（PEP 302 向后兼容）
 #   3. sys.modules 预填充（即使 finder 被绕过也拦截）
 # ═════════════════════════════════════════════════════
+import importlib as _importlib
 import importlib.util as _iu
+from importlib.abc import Loader as _LoaderBase, MetaPathFinder as _MetaPathFinderBase
 
-class _BlockedLoader(importlib.abc.Loader):
+class _BlockedLoader(_LoaderBase):
     """假 loader：执行加载时抛出可控 ImportError。"""
     def create_module(self, spec): return None  # 用默认模块创建
     def exec_module(self, module):
@@ -217,7 +219,7 @@ class _BlockedLoader(importlib.abc.Loader):
 
 _blocked_loader = _BlockedLoader()
 
-class _LxmlBlocker(importlib.abc.MetaPathFinder):
+class _LxmlBlocker(_MetaPathFinderBase):
     """拦截所有 lxml 相关导入，防止 Android 上的 fatal AssetFinder 崩溃。"""
 
     def find_spec(self, fullname, path, target=None):
