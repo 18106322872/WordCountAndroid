@@ -557,6 +557,7 @@ private fun looksLikeRealFilename(s: String): Boolean {
  */
 private fun resolveDisplayName(context: android.content.Context, uri: Uri): String {
     // 辅助函数：检测字符串是否像 hash/UUID/内部 ID
+    // v1.1.10 放宽判定：避免误伤真实长文件名（如学号文件名 "3343976213xxx.docx"）
     fun looksLikeHash(s: String): Boolean {
         val t = s.trim()
         if (t.length < 8) return false
@@ -565,7 +566,7 @@ private fun resolveDisplayName(context: android.content.Context, uri: Uri): Stri
         if (t.matches(Regex("^[a-fA-F0-9]{8}-([a-fA-F0-9]{4}-){3}[a-fA-F0-9]{12}$"))) return true
         // wc_ 或 file_ 前缀 + 长数字（临时文件名模式）
         if (t.matches(Regex("^(wc_|file_)[0-9a-f]{10,}"))) return true
-        // v1.0.36 新增：带扩展名的 hash（如 ContentResolver 返回的 "9e20f478899dc29eb1xxx.pdf"）
+        // 带扩展名的 hash（如 ContentResolver 返回的 "9e20f478899dc29eb1xxx.pdf"）
         // 某些 ROM 的 SAF 用内部 ID+原始扩展名作为 DISPLAY_NAME
         val dotIdx = t.lastIndexOf('.')
         if (dotIdx > 0 && dotIdx < t.length - 1 && dotIdx <= 64) {
@@ -577,11 +578,14 @@ private fun resolveDisplayName(context: android.content.Context, uri: Uri): Stri
                 && !base.any { it.code in 0x4E00..0x9FFF }
                 && base.count { it.isLetterOrDigit() } > base.length * 0.85) {
                 // 进一步确认 basename 不像有意义的文件名：
-                // 要么纯 hex，要么字母全是小写且无元音/语义，要么纯数字
+                // 要么纯 hex，要么字母全是小写且无元音/语义，要么超长(>36)
+                // v1.1.10: 24→36，避免误伤 10~30 字符的数字编号文件名
                 val hasVowel = base.any { it.lowercaseChar() in 'a'..'z' && it.lowercaseChar() in setOf('a','e','i','o','u') }
                 val isPureHex = base.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }
                 val isMostlyDigits = base.count { it.isDigit() } > base.length * 0.6
-                if (isPureHex || (!hasVowel && isMostlyDigits) || base.length > 24) return true
+                // v1.1.10 新增放行条件：如果包含常见中文标点或括号，说明是有意义的文件名
+                val hasCjkPunct = base.any { it in setOf('(', ')', '（', '）', '[', ']', '【', '】', '_', '-', '#', '@') }
+                if ((isPureHex || (!hasVowel && isMostlyDigits)) && !hasCjkPunct && base.length > 36) return true
             }
         }
         // 以数字和少量字母为主的长字符串（内部 ID 特征）：字母+数字混合，长度>20，无中文/无常见扩展名
@@ -748,7 +752,9 @@ private fun extractPdfTitleFromBytes(data: ByteArray, length: Int): String? {
     return null
 }
 
-/** v1.0.39: 独立 hash 检测函数（copyUriToCache 安全网用，不依赖 resolveDisplayName 内嵌版本） */
+/** v1.1.10: 独立 hash 检测函数（copyUriToCache 安全网用，不依赖 resolveDisplayName 内嵌版本）
+ *  与 resolveDisplayName 内的 looksLikeHash 保持同步放宽判定。
+ */
 private fun looksLikeHashString(s: String): Boolean {
     val t = s.trim()
     if (t.length < 8) return false
@@ -758,7 +764,7 @@ private fun looksLikeHashString(s: String): Boolean {
     if (t.matches(Regex("^[a-fA-F0-9]{8}-([a-fA-F0-9]{4}-){3}[a-fA-F0-9]{12}$"))) return true
     // wc_/file_ 前缀
     if (t.matches(Regex("^(wc_|file_)[0-9a-f]{10,}"))) return true
-    // 带扩展名的 hash（如 "9e20f478899dc29eb1xxx.pdf"）
+    // 带扩展名的 hash
     val dotIdx = t.lastIndexOf('.')
     if (dotIdx > 0 && dotIdx < t.length - 1 && dotIdx <= 64) {
         val base = t.substring(0, dotIdx)
@@ -769,7 +775,8 @@ private fun looksLikeHashString(s: String): Boolean {
             val hasVowel = base.any { it.lowercaseChar() in 'a'..'z' && it.lowercaseChar() in setOf('a','e','i','o','u') }
             val isPureHex = base.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }
             val isMostlyDigits = base.count { it.isDigit() } > base.length * 0.6
-            if (isPureHex || (!hasVowel && isMostlyDigits) || base.length > 24) return true
+            val hasCjkPunct = base.any { it in setOf('(', ')', '（', '）', '[', ']', '【', '】', '_', '-', '#', '@') }
+            if ((isPureHex || (!hasVowel && isMostlyDigits)) && !hasCjkPunct && base.length > 36) return true
         }
     }
     // 长数字字母混合无中文
@@ -781,23 +788,30 @@ private fun looksLikeHashString(s: String): Boolean {
 private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFile {
     val originalName = resolveDisplayName(context, uri)
 
-    // v1.0.39 最终安全网：即使 resolveDisplayName 返回了 hash 类名称，强制覆盖
-    // （某些 ROM 的 ContentResolver 返回的值能绕过 looksLikeHash 所有策略）
+    // v1.1.10 改进安全网：分级处理而非一刀切替换为"文档.docx"
     val displayName = if (looksLikeHashString(originalName)) {
         val ext = guessExt(context, uri)
-        val typeLabel = when (ext.lowercase()) {
-            "pdf" -> "PDF文档"
-            "doc", "docx" -> "Word文档"
-            "xls", "xlsx" -> "Excel表格"
-            "ppt", "pptx" -> "PPT演示"
-            "txt" -> "文本文件"
-            "png", "jpg", "jpeg", "bmp", "gif", "webp" -> "图片"
-            else -> "文档"
+        // 如果原始名不太长(< 60)且有扩展名，保留原名（比"Word文档.docx"更有辨识度）
+        // 这样至少不同文件显示不同的名字（即使名字是 ID）
+        if (originalName.length < 60 && originalName.contains(".")) {
+            Log.w("WordCount", "copyUriToCache 安全网(保留原名): '$originalName'")
+            originalName
+        } else {
+            // 确实是无效的长 ID/hash → 用类型通用名
+            val typeLabel = when (ext.lowercase()) {
+                "pdf" -> "PDF文档"
+                "doc", "docx" -> "Word文档"
+                "xls", "xlsx" -> "Excel表格"
+                "ppt", "pptx" -> "PPT演示"
+                "txt" -> "文本文件"
+                "png", "jpg", "jpeg", "bmp", "gif", "webp" -> "图片"
+                else -> "文档"
+            }
+            val safeExt = if (ext.isNotBlank()) ".$ext" else ""
+            val result = "$typeLabel$safeExt"
+            Log.w("WordCount", "copyUriToCache 安全网(通用名): '$originalName' → '$result'")
+            result
         }
-        val safeExt = if (ext.isNotBlank()) ".$ext" else ""
-        val result = "$typeLabel$safeExt"
-        Log.w("WordCount", "copyUriToCache 安全网触发: '$originalName' → '$result'")
-        result
     } else {
         originalName
     }
@@ -1007,7 +1021,8 @@ private fun addFiles(
                                 "name" to dName, "ext" to ".${f.extension.lowercase()}",
                                 "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
                                 "meta" to mapOf("sheets" to res.sheets),
-                                "pages" to res.pages
+                                "pages" to res.pages,
+                                "pages_reason" to (if (res.pagesReason.isNotBlank()) res.pagesReason else null)
                             )
                             val fr = toFileResult(resMap, f.absolutePath)
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
@@ -1165,19 +1180,35 @@ private fun addFiles(
                     val f = cf.file
                     val dName = cf.displayName
                     try {
-                        val text = OldOfficeEngine.extractText(f)
+                        val extLower = f.extension.lowercase()
+                        // v1.1.10: DOC 用 extractDocFull 获取完整文本+页数元数据
+                        val text: String
+                        var docPages: Int = 0  // 0 = 未知
+                        if (extLower == "doc") {
+                            val docRes = OldOfficeEngine.extractDocFull(f)
+                            text = docRes.text
+                            docPages = docRes.pages
+                        } else {
+                            text = OldOfficeEngine.extractText(f)
+                        }
                         if (text.isBlank()) {
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = dName, cachePath = f.absolutePath, error = "此老格式文件内容为空或无法读取"))
                         } else {
                             val stats = countTextKotlin(text)
-                            val extDot = ".${f.extension.lowercase()}"
-                            val resMap = mapOf(
+                            val extDot = ".$extLower"
+                            // 构造 pages：DOC 有元数据页数就用，否则留 null 让 toFileResult 走 estimatePages 兜底
+                            val pagesValue = if (docPages > 0) docPages else null
+                            val resMap = mutableMapOf<String, Any?>(
                                 "name" to dName, "ext" to extDot,
                                 "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
                                 "meta" to emptyMap<String, Any?>()
                             )
-                            val fr = toFileResult(resMap, f.absolutePath)
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                            if (pagesValue != null) {
+                                resMap["pages"] = pagesValue
+                                resMap["pages_reason"] = "doc_summary_info"
+                            }
+                            val fr = toFileResult(resMap.toMap(), f.absolutePath)
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap.toMap()))
                         }
                     } catch (e: Throwable) {
                         Log.w("WordCount", "老格式解析失败 ${f.name}: ${e.message}")
@@ -1283,8 +1314,12 @@ private fun addFiles(
     }
 }
 
-/** 文本类格式（无明确页概念）按字符量估算页数：每 ~1000 字符一页，至少 1 页。 */
-fun estimatePages(chars: Int): Int = maxOf(1, (chars + 999) / 1000)
+/** 文本类格式（无明确页概念）按字符量估算页数。
+ *  v1.1.10 改进：中文文档平均 ~750 字符/页（适应大字号/大行距/表格多的场景）。
+ *  纯英文文档约 ~1000 字符/页（Word 默认格式）。
+ *  取保守值确保不会严重低估。
+ */
+fun estimatePages(chars: Int): Int = maxOf(1, (chars + 749) / 750)
 
 /** 压缩包内层结果 → toFileResult 可回解析的 meta 结构。 */
 private fun innerToMeta(r: InnerResult): Map<String, Any?> {

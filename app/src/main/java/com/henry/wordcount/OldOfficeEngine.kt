@@ -2,6 +2,7 @@ package com.henry.wordcount
 
 import org.apache.poi.hwpf.HWPFDocument
 import org.apache.poi.hwpf.extractor.WordExtractor
+import org.apache.poi.hpsf.SummaryInformation
 import org.apache.poi.hssf.usermodel.HSSFWorkbook
 import org.apache.poi.hslf.usermodel.HSLFSlideShow
 import org.apache.poi.hslf.usermodel.HSLFShape
@@ -27,6 +28,11 @@ import java.io.FileInputStream
  */
 object OldOfficeEngine {
 
+    data class DocResult(
+        val text: String,
+        val pages: Int = 0  // 0 表示未知，由调用方估算
+    )
+
     fun extractText(file: File): String {
         val ext = file.extension.lowercase()
         FileInputStream(file).use { fis ->
@@ -43,9 +49,48 @@ object OldOfficeEngine {
         val doc = HWPFDocument(fis)
         val extractor = WordExtractor(doc)
         try {
-            return extractor.text ?: ""
+            // v1.1.10: 尝试获取更完整的文本（包括页眉页脚等）
+            val mainText = extractor.text ?: ""
+            // 用 getRange().getText() 作为补充（可能包含更多内容）
+            val rangeText = try {
+                doc.range.text ?: ""
+            } catch (_: Throwable) { "" }
+            // 合并去重：rangeText 通常包含 mainText，取较长的
+            val result = if (rangeText.length > mainText.length) rangeText else mainText
+            return result
         } finally {
             runCatching { extractor.close() }
+            runCatching { doc.close() }
+        }
+    }
+
+    /**
+     * 完整提取 DOC 文档：文本 + 元数据（页数等）。
+     * v1.1.10 新增：解决 HWPF 默认提取文本不完整 + 无页数信息的问题。
+     */
+    fun extractDocFull(file: File): DocResult {
+        val fis = FileInputStream(file)
+        val doc = HWPFDocument(fis)
+        try {
+            val extractor = WordExtractor(doc)
+            val mainText = extractor.text ?: ""
+            val rangeText = try { doc.range.text ?: "" } catch (_: Throwable) { "" }
+            val text = if (rangeText.length > mainText.length) rangeText else mainText
+
+            // 尝试从文档属性获取页数（Word 保存时写入，不一定准确但比没有好）
+            var pages = 0
+            try {
+                val si = doc.summaryInformation
+                if (si != null) {
+                    // SummaryInformation 的 PAGE_COUNT 属性（如果 Word 保存过的话）
+                    val pc = si.pageCount
+                    if (pc > 0) pages = pc
+                }
+            } catch (_: Throwable) {}
+
+            runCatching { extractor.close() }
+            return DocResult(text = text, pages = pages)
+        } finally {
             runCatching { doc.close() }
         }
     }

@@ -22,7 +22,8 @@ object OoXmlEngine {
         val text: String,
         val pages: Int,
         val kind: String, // "docx" | "xlsx" | "pptx"
-        val sheets: List<String> = emptyList()
+        val sheets: List<String> = emptyList(),
+        val pagesReason: String = ""
     )
 
     fun extract(file: File): OoxmlResult? {
@@ -65,22 +66,26 @@ object OoXmlEngine {
         appendDocxXmlText(bodyXml, sb) { pageCounter[0]++ }
 
         val text = sb.toString()
-        // ── 页数统计（v1.0.32 保守化改进）──
+        // ── 页数统计（v1.1.10 改进：内容估算兜底）──
         //
-        // 策略：优先信任 Word 自己写的分页记录，避免多信号累加导致虚高。
-        //   A) <w:lastRenderedPageBreak/> — Word 上次渲染的实际分页位置（**最可靠，优先使用**）
+        // 策略优先级：
+        //   A) <w:lastRenderedPageBreak/> — Word 上次渲染的实际分页位置（**最可靠**）
         //   B+C) 显式分页符 + 中间 sectPr — 仅当 A=0 时作为 fallback
+        //   D) 内容估算兜底 — 当 A=B=C=0 时（文档无任何分页标记），基于字符数+段落数估算
         //
         // v1.0.27~v1.0.31 问题：三种信号简单累加(A+B+C)，同一分页点被多种方式重复记录
         // 导致页数偏多（如 Word 显示2页但APP算出3页）。
+        // v1.0.32~v1.1.9 问题：矫枉过正——无分页标记时恒返回 1，导致 12 页文档显示 1 页。
 
         // 信号 A: lastRenderedPageBreak（Word 自身渲染记录）
         val renderedBreaks = """<w:lastRenderedPageBreak/>""".toRegex().findAll(bodyXml).count()
 
         var pages: Int
+        var pagesReason = ""
         if (renderedBreaks > 0) {
-            // ★ v1.0.32: 有Word自身记录时只信它（最可靠），不叠加其他信号
+            // 有 Word 自身记录时只信它（最可靠）
             pages = maxOf(1, 1 + renderedBreaks)
+            pagesReason = "word_rendered_breaks"
         } else {
             // Fallback: 无 lastRenderedPageBreak 时用旧逻辑（显式分页符 + 节分隔符）
             val explicitBreaks = pageCounter[0]
@@ -102,9 +107,24 @@ object OoXmlEngine {
             }
 
             val totalBreaks = explicitBreaks + separatorSectPr
-            pages = maxOf(1, 1 + totalBreaks)
+            if (totalBreaks > 0) {
+                pages = maxOf(1, 1 + totalBreaks)
+                pagesReason = "explicit_breaks"
+            } else {
+                // ★ v1.1.10 新增：无任何分页标记时，基于内容估算页数
+                // Word 排版受字体/行距/边距/表格/图片等影响，纯文本无法精确计算。
+                // 但"恒返回 1 页"比粗略估算更误导用户，所以用双指标取较大者：
+                //   - 按字符数：中文文档平均 ~750 字符/页（保守值，适应大字号/大行距场景）
+                //   - 按段落数：A4 默认格式约 ~12 段/页
+                val paraCount = """<w:p[\s>]""".toRegex().findAll(bodyXml).count()
+                val charCount = text.length
+                val estByChars = if (charCount > 0) maxOf(1, (charCount + 749) / 750) else 1
+                val estByParas = if (paraCount > 0) maxOf(1, (paraCount + 11) / 12) else 1
+                pages = maxOf(estByChars, estByParas)
+                pagesReason = "content_estimate(c=$charCount,p=$paraCount)"
+            }
         }
-        return OoxmlResult(text, pages, "docx")
+        return OoxmlResult(text, pages, "docx", pagesReason = pagesReason)
     }
 
     /**
