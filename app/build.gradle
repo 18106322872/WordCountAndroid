@@ -13,8 +13,8 @@ android {
         // minSdk 26：Apache POI 5.x / log4j 用到 MethodHandle.invoke，D8 要求 Android O(26) 起
         minSdk 26
         targetSdk 34
-        versionCode 60
-        versionName '1.1.21'
+        versionCode 61
+        versionName '1.1.22'
 
         // 只编 arm64-v8a（华为等现代手机），缩小体积、功能零影响
         ndk {
@@ -29,10 +29,12 @@ android {
                         install 'pdfminer.six'
                         // 注：已移除 python-docx（v1.1.12）— 其依赖 lxml(C扩展)在 Chaquopy 上触发
                         // AssetFinder/scripts 崩溃；Android 版 compare_docx/extract_docx 均已改为纯标准库实现
-                        // 注：lxml 通过 openpyxl 间接依赖进入 APK，由 wordcount.py 顶部的
-                        // _LxmlBlocker 拦截（PEP 451 find_spec 返回假 ModuleSpec + sys.modules 预填充）
+                        // 注：v1.1.22 移除 openpyxl — 其硬依赖 lxml(C扩展)导致 fatal 崩溃；
+                        //   Android 端 XLSX 由 Kotlin OoXmlEngine.extractXlsx() 处理（纯 Kotlin，不经过 Python），
+                        //   故不需要 openpyxl；移除后 lxml 不会进入 APK，从根本上消除崩溃可能
+                        // 注：_LxmlBlocker 拦截器保留作为防御（防止其他未知路径拉入 lxml）
                         install 'pillow'
-                        install 'openpyxl'
+                        // install 'openpyxl'  — 已移除（v1.1.22），Android 不使用
                         install 'python-pptx'
                         install 'ezdxf'
                         install 'olefile'
