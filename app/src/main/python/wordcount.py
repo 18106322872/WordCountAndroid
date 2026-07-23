@@ -313,7 +313,7 @@ for _pentry in list(sys.path):
             _logging.getLogger(__name__).warning(
                 "lxml-defender L3: removed sys.path entry containing lxml: %s", _pentry)
 sys.path[:] = _cleaned_path
-del _cleaned_path, _pentry, _lxml_dir, _p, _sub, _m
+del _cleaned_path, _pentry, _lxml_dir, _sub, _m
 
 
 # ══ 第4层：sys.path_hooks 注入 ══

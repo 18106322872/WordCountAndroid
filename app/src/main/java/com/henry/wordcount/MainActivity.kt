@@ -862,11 +862,11 @@ private fun isNumberedOrGenericName(s: String): Boolean {
         base.startsWith("文档") || base.startsWith("压缩包") ||
         base.startsWith("CAD图纸")) return true
 
-    // 编号模式1: "数字-数字" 如 "1-1"、"2-3"
-    if (base.matches(Regex("^\\d+[)-]\\d+$"))) return true
+    // 编号模式1: "数字-数字" 如 "1-1"、"2-3"，可选尾括号如 "1-1)"
+    if (base.matches(Regex("^\\d+[)-]\\d+\\)?$"))) return true
 
-    // 编号模式2: "数字-数字)(数字)" 如 "1-1)(1)"
-    if (base.matches(Regex("^\\d+[)-]\\d+\\)?\\(\\d+\\)?$"))) return true
+    // 编号模式1b: "数字-数字)(数字)" 如 "1-1)(1)"
+    if (base.matches(Regex("^\\d+[)-]\\d+\\)\\(\\d+\\)$"))) return true
 
     // 编号模式3: 纯短编号（1~3个字符）如 "1"、"2"、"a"
     if (base.length <= 3 && base.all { it.isLetterOrDigit() }) return true
