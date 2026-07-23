@@ -363,7 +363,7 @@ sys.path_hooks.insert(0, _lxml_path_hook)
 _for_removal = [k for k in sys.path_importer_cache if k and 'lxml' in k]
 for _k in _for_removal:
     del sys.path_importer_cache[_k]
-del _for_removal  # 注意：不 del _k（空列表时循环变量未赋值 → NameError）
+# 不再 del 任何变量（v1.1.26~1.1.29 连续3个版本被 del 坑的教训）
 
 
 # ══ 第5层：覆盖 builtins.__import__ ══
@@ -390,10 +390,12 @@ def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
 
 _builtins.__import__ = _safe_import
 
-# 清理临时引用
-del _types, _iu, _LoaderBase, _MetaPathFinderBase, _importlib, _builtins
-del _safe_import, _original_import, _lxml_path_hook
 # ═════════════════════════════════════════════════════
+# 注意：不再 del 任何变量（v1.1.26~1.1.29 连续3个版本的教训）
+#   _p  (v1.1.26): 循环变量未赋值 → NameError
+#   _k  (v1.1.28): 循环变量未赋值 → NameError  
+#   _original_import (v1.1.29): 被 _safe_import 闭包引用，del 后运行时 NameError
+# 这些 _ 前缀私有变量留在模块命名空间无任何副作用，不值得冒险清理
 
 
 import re
