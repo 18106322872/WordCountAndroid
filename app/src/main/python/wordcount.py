@@ -313,7 +313,7 @@ for _pentry in list(sys.path):
             _logging.getLogger(__name__).warning(
                 "lxml-defender L3: removed sys.path entry containing lxml: %s", _pentry)
 sys.path[:] = _cleaned_path
-del _cleaned_path, _pentry, _lxml_dir, _sub, _m
+# 注意：不再 del 循环变量（_pentry/_sub/_m 可能在空列表时未赋值 → NameError）
 
 
 # ══ 第4层：sys.path_hooks 注入 ══
@@ -363,7 +363,7 @@ sys.path_hooks.insert(0, _lxml_path_hook)
 _for_removal = [k for k in sys.path_importer_cache if k and 'lxml' in k]
 for _k in _for_removal:
     del sys.path_importer_cache[_k]
-del _for_removal, _k
+del _for_removal  # 注意：不 del _k（空列表时循环变量未赋值 → NameError）
 
 
 # ══ 第5层：覆盖 builtins.__import__ ══
