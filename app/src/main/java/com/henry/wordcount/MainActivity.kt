@@ -836,14 +836,71 @@ private fun isSuspiciousFilename(s: String): Boolean {
     return false
 }
 
+/**
+ * v1.1.26: 检测编号模式或通用名——这类名称不包含有意义的文件标识信息。
+ *
+ * 覆盖范围：
+ *   - 编号模式："1-1"、"1-(1)"、"图1"、"Sheet1"、"Document (2)" 等
+ *   - 短编号 + 扩展名："1.docx"、"2.pdf"、"a.txt" 等
+ *   - 通用名前缀："Word文档"、"PDF文档" 等
+ */
+private fun isNumberedOrGenericName(s: String): Boolean {
+    val t = s.trim()
+    if (t.isEmpty()) return true
+
+    // 已有 CJK 且长度>4 → 大概率是有意义的中文文件名，不拦截
+    if (t.any { it.code in 0x4E00..0x9FFF } && t.length > 4) return false
+
+    // 分离 basename 和扩展名
+    val dotIdx = t.lastIndexOf('.')
+    val base = if (dotIdx > 0 && dotIdx < t.length - 1) t.substring(0, dotIdx) else t
+
+    // 通用名前缀（安全网生成的）
+    if (base.startsWith("Word文档") || base.startsWith("PDF文档") ||
+        base.startsWith("Excel表格") || base.startsWith("PPT演示") ||
+        base.startsWith("文本文件") || base.startsWith("图片") ||
+        base.startsWith("文档") || base.startsWith("压缩包") ||
+        base.startsWith("CAD图纸")) return true
+
+    // 编号模式1: "数字-数字" 如 "1-1"、"2-3"
+    if (base.matches(Regex("^\\d+[)-]\\d+$"))) return true
+
+    // 编号模式2: "数字-数字)(数字)" 如 "1-1)(1)"
+    if (base.matches(Regex("^\\d+[)-]\\d+\\)?\\(\\d+\\)?$"))) return true
+
+    // 编号模式3: 纯短编号（1~3个字符）如 "1"、"2"、"a"
+    if (base.length <= 3 && base.all { it.isLetterOrDigit() }) return true
+
+    // 编号模式4: "单词+数字" 的短模式如 "Sheet1"、"Doc2"、"图1"
+    if (base.matches(Regex("^(Sheet|Doc|Document|File|Image|Pic|图|档|表|页)\\d*$", RegexOption.IGNORE_CASE))) return true
+
+    // 编号模式5: "数字" 或 "数字)" 或 "(数字)" 开头且总长较短
+    if (base.matches(Regex("^(\\d+\\)|\\(?\\d+\\)?)$")) return true
+
+    // 编号模式6: "No." / "NO." 开头后跟纯数字/短文本
+    if (base.matches(Regex("^(?i)(no\\.?|number#?)\\s*\\d*$"))) return true
+
+    return false
+}
+
 private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFile {
     val originalName = resolveDisplayName(context, uri)
     Log.d("WordCount", "copyUriToCache originalName='$originalName'")
 
-    // v1.1.16 改进：检测到 hash 时先用轻量名，后续 tryExtractInternalTitle 会尝试
-    // 从文件内部元数据(dc:title/PDF Title)或内容首行提取真实名称
-    // 不再使用序号（friendlyNameCounter），因为 "Word文档_2.docx" 这种名字无法辨识文件
-    val displayName = if (looksLikeHashString(originalName) || isSuspiciousFilename(originalName)) {
+    // v1.1.26 改进：检测所有非理想文件名（不仅是 hash/suspicious），
+    // 统一走安全网替换 + 内部标题提取。
+    //
+    // 检测范围：
+    //   A. hash/UUID/内部ID（looksLikeHashString / isSuspiciousFilename）
+    //   B. 编号模式："1-1"、"1-(1)"、"图1"、"Sheet1" 等
+    //   C. 通用名前缀（"Word文档"/"PDF文档" 等——已在后续安全网生成）
+    //
+    // v1.1.16 只覆盖了 A 类；v1.1.26 扩展到 B+C 类。
+    val needsExtraction = looksLikeHashString(originalName)
+        || isSuspiciousFilename(originalName)
+        || isNumberedOrGenericName(originalName)
+
+    val displayName = if (needsExtraction) {
         val ext = guessExt(context, uri)
         val typeLabel = when (ext.lowercase()) {
             "pdf" -> "PDF文档"
@@ -890,17 +947,22 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFi
 }
 
 /**
- * v1.1.16: 从已缓存的文件中提取有意义的显示名称，用于替换通用名。
+ * v1.1.26: 从已缓存的文件中提取有意义的显示名称，用于替换非理想名称。
  * 按优先级尝试：dc:title > PDF /Title > DOCX内容首行 > 原名
+ *
+ * 触发条件（v1.1.26 放宽）：不仅限于通用名前缀，
+ * 对任何编号模式/无意义名称都尝试内部标题提取。
  */
 private fun tryExtractInternalTitle(file: File, currentName: String): String {
-    // 只在当前名称是通用名时才尝试（避免覆盖真实文件名）
+    // 只在当前名称是非理想名称时才尝试（避免覆盖真实有意义的文件名）
     val isGenericName = currentName.startsWith("Word文档") ||
         currentName.startsWith("PDF文档") || currentName.startsWith("Excel表格") ||
         currentName.startsWith("PPT演示") || currentName.startsWith("文本文件") ||
         currentName.startsWith("图片") || currentName.startsWith("文档") ||
         currentName.startsWith("压缩包") || currentName.startsWith("CAD图纸")
-    if (!isGenericName) return currentName
+    // v1.1.26 扩展：编号模式名称也需要尝试提取
+    val isNumbered = isNumberedOrGenericName(currentName)
+    if (!isGenericName && !isNumbered) return currentName
 
     val ext = file.extension.lowercase()
     return try {

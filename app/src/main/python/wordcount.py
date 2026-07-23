@@ -187,70 +187,79 @@ import sys
 
 
 # ═════════════════════════════════════════════════════
-# v1.1.24: Android lxml 崩溃拦截器（最终修正版）
+# v1.1.26: Android lxml 崩溃拦截器（五层防御终极版）
 # ═════════════════════════════════════════════════════
 # 根因：lxml 的 C 扩展(.so)在 Android 上触发 fatal 级
 # FileNotFoundError(AssetFinder/scripts)，该错误无法被
 # Python except 捕获，直接导致进程崩溃。
 #
-# 历史教训（v1.1.15~v1.1.23 连续9个版本未根治）：
+# 历史教训（v1.1.15~v1.1.25 连续11个版本未根治）：
 #   v1.1.15~1.18: 只实现 PEP 302 find_module → Python 3.10 跳过
-#   v1.1.19:     加了 PEP 451 find_spec 但用 raise ImportError →
-#                 import 机制吞掉异常后继续下一个 finder → 仍崩
-#   v1.1.20~21: find_spec 返回假 Spec 但 importlib 未定义/NameError
-#   v1.1.22~23: 移除 openpyxl+python-pptx（两条 lxml 路径）
-#                但 Chaquopy 运行时自身预装 lxml → 仍崩
+#   v1.1.19:     加了 PEP 451 find_spec 但 raise → import 机制吞异常
+#   v1.1.20~21: find_spec 返回假 Spec 但 NameError importlib 未定义
+#   v1.1.22~23: 移除 openpyxl+python-pptx（用户依赖路径）
+#   v1.1.24~25: create_module 返回空 module + exec_module pass
+#                ★ 但仍失败！根因：Chaquopy AssetFinder 通过
+#                  sys.path 机制（非 sys.meta_path）加载 lxml，
+#                  meta_path 拦截器对 path-based 导入无效！
 #
-# ★ v1.1.24 最终发现的关键根因 ★
-#   _BlockedLoader.create_module() 返回 None → Python 对扩展模块
-#   使用默认创建机制 → 默认机制**立即加载 .so 文件** → 崩溃发生
-#   在 exec_module() **之前**！所以 exec_module 中的 raise 永远不会执行。
-#
-# 正确方案：create_module() 返回真正的空 module 对象，
-#   让 Python 完全不接触 .so 文件；exec_module() 用 pass（不用 raise）。
+# ★ v1.1.26 五层防御方案 ★
+#   第1层: sys.meta_path 拦截器（PEP 302 + PEP 451）— 显式 import
+#   第2层: sys.modules 预填充 — 任何 "import lxml" 先查缓存即命中
+#   第3层: sys.path 清理 — 删除含 lxml 子目录的 path 条目（阻断 path-based finder）
+#   第4层: sys.path_hooks 注入 — 自定义 PathEntryFinder 拦截 lxml 目录
+#   第5层: 覆盖 builtins.__import__ — 兜底捕获所有导入尝试
 # ═════════════════════════════════════════════════════
 import importlib as _importlib
 import importlib.util as _iu
 from importlib.abc import Loader as _LoaderBase, MetaPathFinder as _MetaPathFinderBase
 import types as _types
+import builtins as _builtins
 
+# ── 共享工具 ──
+_BLOCKED_LOADER = None  # 下面定义后回填
+
+def _is_lxml_name(name):
+    """检查模块名是否属于 lxml 家族。"""
+    return (name == 'lxml'
+            or name.startswith('lxml.')
+            or name.startswith('lxml_')
+            or name == 'lxml.etree'
+            or name in ('lxml.html', 'lxml.sax', 'lxml.isoschematron',
+                        'lxml.ElementInclude', 'lxml.cssselect', 'lxml.builder'))
+
+
+# ══ 第1层：sys.meta_path 拦截器 ══
 class _BlockedLoader(_LoaderBase):
     """假 loader：返回空模块，阻止 .so 被加载。"""
     def create_module(self, spec):
-        # ★ 关键修复：返回空 module 对象（不是 None！）
-        # 如果返回 None，Python 对扩展模块会用默认机制加载 .so → 崩溃
         mod = _types.ModuleType(spec.name)
         mod.__loader__ = self
         mod.__package__ = spec.parent
         mod.__spec__ = spec
-        return mod
+        return mod  # ← 必须返回非 None！否则 Python 默认机制加载 .so → 崩溃
 
     def exec_module(self, module):
-        # 模块已经是空对象，不需要做任何事
-        # 注意：用 pass 而不是 raise ImportError
-        # （raise 会导致 import 失败后尝试下一个 finder → 可能找到真的 lxml）
-        pass
+        pass  # ← 用 pass 不用 raise（raise 会尝试下一个 finder）
 
-_blocked_loader = _BlockedLoader()
 
-class _LxmlBlocker(_MetaPathFinderBase):
-    """拦截所有 lxml 相关导入，防止 Android 上的 fatal AssetFinder 崩溃。"""
+_BLOCKED_LOADER = _BlockedLoader()
+
+
+class _LxmlMetaPathBlocker(_MetaPathFinderBase):
+    """第1层：meta_path 拦截所有 lxml 导入。"""
 
     def find_spec(self, fullname, path, target=None):
-        """PEP 451: 返回假 ModuleSpec（不抛异常！）。"""
-        if fullname == 'lxml' or fullname.startswith('lxml.') or fullname.startswith('lxml_'):
-            spec = _iu.module_spec(fullname, _blocked_loader)
-            return spec
+        if _is_lxml_name(fullname):
+            return _iu.module_spec(fullname, _BLOCKED_LOADER)
         return None
 
     def find_module(self, fullname, path=None):
-        """PEP 302: 向后兼容旧版 Python 的 fallback 路径。"""
-        if fullname == 'lxml' or fullname.startswith('lxml.') or fullname.startswith('lxml_'):
+        if _is_lxml_name(fullname):
             return self
         return None
 
     def load_module(self, fullname):
-        # PEP 302 fallback：返回空模块
         if fullname in sys.modules:
             return sys.modules[fullname]
         mod = _types.ModuleType(fullname)
@@ -258,20 +267,132 @@ class _LxmlBlocker(_MetaPathFinderBase):
         sys.modules[fullname] = mod
         return mod
 
-sys.meta_path.insert(0, _LxmlBlocker())
 
-# 预填充 sys.modules（即使 finder 被绕过也拦截）
-_sys_modules_ref = sys.modules
+# 插入到 meta_path 最前面
+sys.meta_path.insert(0, _LxmlMetaPathBlocker())
+
+
+# ══ 第2层：sys.modules 预填充 ══
 _dummy_lxml = _types.ModuleType('lxml')
 _dummy_lxml.__path__ = []
-_dummy_lxml.__loader__ = _blocked_loader
-_sys_modules_ref['lxml'] = _dummy_lxml
+_dummy_lxml.__loader__ = _BLOCKED_LOADER
+sys.modules['lxml'] = _dummy_lxml
 for _sub in ('lxml.etree', 'lxml.html', 'lxml.sax', 'lxml.isoschematron',
              'lxml.ElementInclude', 'lxml.cssselect', 'lxml.builder'):
     _m = _types.ModuleType(_sub)
-    _m.__loader__ = _blocked_loader
-    _sys_modules_ref[_sub] = _m
-del _types, _sys_modules_ref, _dummy_lxml, _sub, _m
+    _m.__loader__ = _BLOCKED_LOADER
+    sys.modules[_sub] = _m
+
+
+# ══ 第3层：sys.path 清理 ══
+# Chaquopy 将 pip 包安装在 assets 目录下，通过 sys.path 暴露。
+# 如果某个 path 条目下存在 lxml/ 子目录，path-based finder 会直接从那里加载，
+# 完全绕过 sys.meta_path！必须将这些条目从 sys.path 中移除。
+_cleaned_path = []
+for _pentry in list(sys.path):
+    # 检查该路径下是否存在 lxml 相关文件/目录
+    if _pentry:
+        # 尝试检测 lxml 目录或 .so 文件
+        _lxml_dir = None
+        for _candidate in [
+            _pentry + '/lxml',
+            _pentry + '/lxml.etree',
+        ]:
+            try:
+                import os as _os
+                if _os.path.isdir(_candidate) or _os.path.isfile(_candidate + '.so') or _os.path.isfile(_candidate + '.pyd'):
+                    _lxml_dir = _candidate
+                    break
+            except Exception:
+                pass
+        if _lxml_dir is None:
+            _cleaned_path.append(_pentry)
+        else:
+            # 发现 lxml 所在路径，整条移除
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "lxml-defender L3: removed sys.path entry containing lxml: %s", _pentry)
+sys.path[:] = _cleaned_path
+del _cleaned_path, _pentry, _lxml_dir, _p, _sub, _m
+
+
+# ══ 第4层：sys.path_hooks 注入 ══
+# 即使 lxml 目录残留在 sys.path 中（L3 遗漏），自定义的 PathEntryFinder
+# 会在目录级查找时拦截 lxml 子包。
+class _LxmlPathEntryFinder:
+    """伪装成 PathEntryFinder，当被要求查找 lxml 时返回假 loader。"""
+
+    def find_module(self, fullname, path=None):
+        if _is_lxml_name(fullname):
+            return _BLOCKED_LOADER
+        return None
+
+    def find_spec(self, fullname, target=None):
+        if _is_lxml_name(fullname):
+            return _iu.module_spec(fullname, _BLOCKED_LOADER)
+        return None
+
+    def __repr__(self):
+        return '<LxmlPathEntryFinder>'
+
+
+_LXML_PATH_HOOK_ENTRY = _LxmlPathEntryFinder()
+
+
+def _lxml_path_hook(path):
+    """如果路径看起来像包含 lxml 的包目录，返回拦截 finder。"""
+    if not path:
+        raise ImportError()
+    try:
+        # 检查路径是否为 lxml 相关
+        _basename = path.rsplit('/', 1)[-1] if '/' in path else path.rsplit('\\', 1)[-1]
+        if _basename in ('lxml', 'lxml.etree', 'lxml.html'):
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "lxml-defender L4: intercepted path_hook for lxml: %s", path)
+            return _LXML_PATH_HOOK_ENTRY
+    except Exception:
+        pass
+    raise ImportError("lxml-defender: not an lxml path")
+
+
+# 在 path_hooks 最前面注入我们的钩子
+sys.path_hooks.insert(0, _lxml_path_hook)
+
+# 清除 path_importer_cache 中可能的 lxml 缓存
+_for_removal = [k for k in sys.path_importer_cache if k and 'lxml' in k]
+for _k in _for_removal:
+    del sys.path_importer_cache[_k]
+del _for_removal, _k
+
+
+# ══ 第5层：覆盖 builtins.__import__ ══
+_original_import = _builtins.__import__
+
+
+def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
+    """最终兜底：拦截所有 lxml 导入尝试。"""
+    if _is_lxml_name(name):
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "lxml-defender L5: blocked __import__(%s)", name)
+        # 确保已注册到 sys.modules
+        if name not in sys.modules:
+            _mod = _types.ModuleType(name)
+            _mod.__loader__ = _BLOCKED_LOADER
+            sys.modules[name] = _mod
+        if fromlist:
+            # 处理 "from lxml import etree" 形式
+            return sys.modules[name]
+        return sys.modules[name]
+    return _original_import(name, globals, locals, fromlist, level)
+
+
+_builtins.__import__ = _safe_import
+
+# 清理临时引用
+del _types, _iu, _LoaderBase, _MetaPathFinderBase, _importlib, _builtins
+del _safe_import, _original_import, _lxml_path_hook
 # ═════════════════════════════════════════════════════
 
 

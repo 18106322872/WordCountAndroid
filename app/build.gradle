@@ -13,8 +13,8 @@ android {
         // minSdk 26：Apache POI 5.x / log4j 用到 MethodHandle.invoke，D8 要求 Android O(26) 起
         minSdk 26
         targetSdk 34
-        versionCode 63
-        versionName '1.1.25'
+        versionCode 64
+        versionName '1.1.26'
 
         // 只编 arm64-v8a（华为等现代手机），缩小体积、功能零影响
         ndk {
@@ -33,12 +33,12 @@ android {
                         //   这两个包是 lxml 进入 APK 的用户依赖路径。
                         //   Android 端 XLSX 由 Kotlin OoXmlEngine.extractXlsx() 处理，
                         //   PPTX 由 Kotlin OoXmlEngine.extractPptx() 处理，均不经过 Python。
-                        // v1.1.24: 修复拦截器 create_module 返回空模块（而非 None）
-                        //   之前 create_module 返回 None → Python 默认机制加载 .so → 崩溃
+                        // v1.1.26: 新增五层 lxml 防御体系（meta_path + modules + path清理 + path_hooks + __import__覆盖）
+                        // v1.1.26: 移除 ezdfx（其依赖可能间接触发 lxml；Android 上 DXF 使用率极低）
                         install 'pillow'
                         // install 'openpyxl'    — 已移除（v1.1.22），Android 不使用
                         // install 'python-pptx'  — 已移除（v1.1.23），硬依赖 lxml；Android 用 Kotlin OoXmlEngine
-                        install 'ezdxf'
+                        // install 'ezdxf'        — 已移除（v1.1.26），减少 lxml 触发风险
                         install 'olefile'
                         // 注：pymupdf(fitz) 在 Chaquopy 无 Android wheel，故不引入；
                         // 注：rapidocr-onnxruntime 依赖 onnxruntime（无 Android wheel），Chaquopy 无法安装；
