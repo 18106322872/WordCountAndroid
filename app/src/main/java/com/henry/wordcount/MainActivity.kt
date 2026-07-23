@@ -874,11 +874,14 @@ private fun isNumberedOrGenericName(s: String): Boolean {
     // 编号模式4: "单词+数字" 的短模式如 "Sheet1"、"Doc2"、"图1"
     if (base.matches(Regex("^(Sheet|Doc|Document|File|Image|Pic|图|档|表|页)\\d*$", RegexOption.IGNORE_CASE))) return true
 
-    // 编号模式5: "数字" 或 "数字)" 或 "(数字)" 开头且总长较短
-    if (base.matches(Regex("^(\\d+\\)|\\(?\\d+\\)?)$")) return true
+    // 编号模式5: "数字)" 或 "(数字)" 或纯数字
+    // 拆分为多个简单条件避免复杂正则转义问题
+    if (Regex("""^\d+\)$""").matches(base)) return true       // "123)"
+    if (Regex("""^\(\d+\)?$""").matches(base)) return true     // "(123)" 或 "(123"
+    if (base.all { it.isDigit() } && base.isNotEmpty()) return true  // 纯数字
 
     // 编号模式6: "No." / "NO." 开头后跟纯数字/短文本
-    if (base.matches(Regex("^(?i)(no\\.?|number#?)\\s*\\d*$"))) return true
+    if (Regex("""^(?i)(no\.?|number#?)\s*\d*$""").matches(base)) return true
 
     return false
 }
