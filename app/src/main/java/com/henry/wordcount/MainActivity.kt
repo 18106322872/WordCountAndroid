@@ -151,7 +151,7 @@ private fun guessExt(context: android.content.Context, uri: Uri): String {
     val name = androidx.documentfile.provider.DocumentFile.fromSingleUri(context, uri)?.name
     if (!name.isNullOrBlank()) {
         val dotIdx = name.lastIndexOf('.')
-        if (dotIdx > 0) return name.substring(dotIdx).lowercase()
+        if (dotIdx > 0) return name.substring(dotIdx + 1).lowercase() // ← v1.1.31: 不含前导点
     }
     // 2) 从 ContentResolver 的 MIME type 反推
     try {
@@ -890,20 +890,19 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFi
     val originalName = resolveDisplayName(context, uri)
     Log.d("WordCount", "copyUriToCache originalName='$originalName'")
 
-    // v1.1.26 改进：检测所有非理想文件名（不仅是 hash/suspicious），
-    // 统一走安全网替换 + 内部标题提取。
-    //
+    // v1.1.31 改进：放宽非理想文件名检测，确保编号模式名称走内部标题提取。
     // 检测范围：
     //   A. hash/UUID/内部ID（looksLikeHashString / isSuspiciousFilename）
     //   B. 编号模式："1-1"、"1-(1)"、"图1"、"Sheet1" 等
-    //   C. 通用名前缀（"Word文档"/"PDF文档" 等——已在后续安全网生成）
-    //
-    // v1.1.16 只覆盖了 A 类；v1.1.26 扩展到 B+C 类。
-    val needsExtraction = looksLikeHashString(originalName)
-        || isSuspiciousFilename(originalName)
-        || isNumberedOrGenericName(originalName)
+    //   C. 通用名前缀（"Word文档"/"PDF文档" 等）
+    //   D. 短名字（basename <= 4 字符）
+    val baseName = originalName.substringBeforeLast('.').ifBlank { originalName }
+    val isShortOrGeneric = baseName.length <= 4
+            || looksLikeHashString(originalName)
+            || isSuspiciousFilename(originalName)
+            || isNumberedOrGenericName(originalName)
 
-    val displayName = if (needsExtraction) {
+    val displayName = if (isShortOrGeneric) {
         val ext = guessExt(context, uri)
         val typeLabel = when (ext.lowercase()) {
             "pdf" -> "PDF文档"
