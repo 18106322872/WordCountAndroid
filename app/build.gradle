@@ -33,8 +33,8 @@ android {
                         //   这两个包是 lxml 进入 APK 的用户依赖路径。
                         //   Android 端 XLSX 由 Kotlin OoXmlEngine.extractXlsx() 处理，
                         //   PPTX 由 Kotlin OoXmlEngine.extractPptx() 处理，均不经过 Python。
-                        // v1.1.24: 排除 lxml（Chaquopy 可能预装）+ 修复拦截器 create_module 返回空模块
-                        exclude 'lxml'
+                        // v1.1.24: 修复拦截器 create_module 返回空模块（而非 None）
+                        //   之前 create_module 返回 None → Python 默认机制加载 .so → 崩溃
                         install 'pillow'
                         // install 'openpyxl'    — 已移除（v1.1.22），Android 不使用
                         // install 'python-pptx'  — 已移除（v1.1.23），硬依赖 lxml；Android 用 Kotlin OoXmlEngine
