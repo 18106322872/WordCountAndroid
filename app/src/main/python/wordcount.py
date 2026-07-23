@@ -187,35 +187,49 @@ import sys
 
 
 # ═════════════════════════════════════════════════════
-# v1.1.20: Android lxml 崩溃拦截器（四层防护）
+# v1.1.24: Android lxml 崩溃拦截器（最终修正版）
 # ═════════════════════════════════════════════════════
 # 根因：lxml 的 C 扩展(.so)在 Android 上触发 fatal 级
 # FileNotFoundError(AssetFinder/scripts)，该错误无法被
 # Python except 捕获，直接导致进程崩溃。
 #
-# 历史教训（v1.1.15~v1.1.19 连续5个版本未根治）：
+# 历史教训（v1.1.15~v1.1.23 连续9个版本未根治）：
 #   v1.1.15~1.18: 只实现 PEP 302 find_module → Python 3.10 跳过
 #   v1.1.19:     加了 PEP 451 find_spec 但用 raise ImportError →
 #                 import 机制吞掉异常后继续下一个 finder → 仍崩
+#   v1.1.20~21: find_spec 返回假 Spec 但 importlib 未定义/NameError
+#   v1.1.22~23: 移除 openpyxl+python-pptx（两条 lxml 路径）
+#                但 Chaquopy 运行时自身预装 lxml → 仍崩
 #
-# 正确方案（四层防护，层层兜底）：
-#   0. build.gradle pip { exclude 'lxml' } — 根本上不让 lxml 进入 APK
-#   1. find_spec 返回假 ModuleSpec（PEP 451 正确用法，不抛异常）
-#   2. find_module/load_module（PEP 302 向后兼容）
-#   3. sys.modules 预填充（即使 finder 被绕过也拦截）
+# ★ v1.1.24 最终发现的关键根因 ★
+#   _BlockedLoader.create_module() 返回 None → Python 对扩展模块
+#   使用默认创建机制 → 默认机制**立即加载 .so 文件** → 崩溃发生
+#   在 exec_module() **之前**！所以 exec_module 中的 raise 永远不会执行。
+#
+# 正确方案：create_module() 返回真正的空 module 对象，
+#   让 Python 完全不接触 .so 文件；exec_module() 用 pass（不用 raise）。
 # ═════════════════════════════════════════════════════
 import importlib as _importlib
 import importlib.util as _iu
 from importlib.abc import Loader as _LoaderBase, MetaPathFinder as _MetaPathFinderBase
+import types as _types
 
 class _BlockedLoader(_LoaderBase):
-    """假 loader：执行加载时抛出可控 ImportError。"""
-    def create_module(self, spec): return None  # 用默认模块创建
+    """假 loader：返回空模块，阻止 .so 被加载。"""
+    def create_module(self, spec):
+        # ★ 关键修复：返回空 module 对象（不是 None！）
+        # 如果返回 None，Python 对扩展模块会用默认机制加载 .so → 崩溃
+        mod = _types.ModuleType(spec.name)
+        mod.__loader__ = self
+        mod.__package__ = spec.parent
+        mod.__spec__ = spec
+        return mod
+
     def exec_module(self, module):
-        raise ImportError(
-            "lxml is blocked on Android (AssetFinder crash prevention). "
-            "Use xml.etree.ElementTree (standard library) instead."
-        )
+        # 模块已经是空对象，不需要做任何事
+        # 注意：用 pass 而不是 raise ImportError
+        # （raise 会导致 import 失败后尝试下一个 finder → 可能找到真的 lxml）
+        pass
 
 _blocked_loader = _BlockedLoader()
 
@@ -223,9 +237,10 @@ class _LxmlBlocker(_MetaPathFinderBase):
     """拦截所有 lxml 相关导入，防止 Android 上的 fatal AssetFinder 崩溃。"""
 
     def find_spec(self, fullname, path, target=None):
-        """PEP 451: 返回假 ModuleSpec（不抛异常！抛异常会被吞掉）。"""
+        """PEP 451: 返回假 ModuleSpec（不抛异常！）。"""
         if fullname == 'lxml' or fullname.startswith('lxml.') or fullname.startswith('lxml_'):
-            return _iu.module_spec(fullname, _blocked_loader)
+            spec = _iu.module_spec(fullname, _blocked_loader)
+            return spec
         return None
 
     def find_module(self, fullname, path=None):
@@ -235,26 +250,28 @@ class _LxmlBlocker(_MetaPathFinderBase):
         return None
 
     def load_module(self, fullname):
-        raise ImportError(
-            "lxml is blocked on Android to prevent AssetFinder crash. "
-            "Use xml.etree.ElementTree instead."
-        )
+        # PEP 302 fallback：返回空模块
+        if fullname in sys.modules:
+            return sys.modules[fullname]
+        mod = _types.ModuleType(fullname)
+        mod.__loader__ = self
+        sys.modules[fullname] = mod
+        return mod
 
 sys.meta_path.insert(0, _LxmlBlocker())
 
-# 第四层防护：预填充 sys.modules
-import types as _types
+# 预填充 sys.modules（即使 finder 被绕过也拦截）
 _sys_modules_ref = sys.modules
-_dummy = _types.ModuleType('lxml')
-_dummy.__path__ = []
-_dummy.__loader__ = _blocked_loader
-_sys_modules_ref['lxml'] = _dummy
+_dummy_lxml = _types.ModuleType('lxml')
+_dummy_lxml.__path__ = []
+_dummy_lxml.__loader__ = _blocked_loader
+_sys_modules_ref['lxml'] = _dummy_lxml
 for _sub in ('lxml.etree', 'lxml.html', 'lxml.sax', 'lxml.isoschematron',
              'lxml.ElementInclude', 'lxml.cssselect', 'lxml.builder'):
     _m = _types.ModuleType(_sub)
     _m.__loader__ = _blocked_loader
     _sys_modules_ref[_sub] = _m
-del _types, _sys_modules_ref, _dummy, _sub, _m
+del _types, _sys_modules_ref, _dummy_lxml, _sub, _m
 # ═════════════════════════════════════════════════════
 
 
