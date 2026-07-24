@@ -12,7 +12,7 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 /**
- * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.61 位置邻近回退版）。
+ * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.62 子串改蓝+部分删除版）。
  *
  * 设计目标：输出文档与 Word「审阅-比较」结果一致。
  * 核心思路：
@@ -45,7 +45,8 @@ object DocxComparator {
         val oi: Int,   // 原文档段落下标（-1 表示无）
         val rj: Int,   // 修订文档段落下标（-1 表示无）
         val pos: Double,
-        val gap: String = ""   // SDEL 时承载被删除的原文片段
+        val gap: String = "",   // SDEL 时承载被删除的原文片段
+        val delExclude: List<Pair<Int, Int>>? = null  // 部分消耗时标记被子串占用的区间（DEL 只输出剩余片段）
     )
 
     /** 跟踪 orig 段落的使用状态（支持部分消耗）*/
@@ -108,15 +109,27 @@ object DocxComparator {
 
         for (op in ops) {
             when (op.tag) {
-                "EQ", "SUB_EQ" -> {
-                    // 完全相同/子串匹配的段落 → 按修订档原样输出（黑字不变）
+                "EQ" -> {
+                    // 完全相同段落 → 黑字不变
                     bodyParts.add(revParas[op.rj].xml)
                     eqBlackChars += revParas[op.rj].text.length
+                }
+                "SUB_EQ" -> {
+                    // 子串匹配段：修订档里被原文档大段包含、但作为独立新段落出现的内容
+                    // → 按"新增段落"输出(蓝字插入)，与 Word 一致；避免被误标为黑字。
+                    bodyParts.add(wrapInsertedParagraph(revParas[op.rj].xml, author, date, ridSeq))
+                    insCount++
+                    totalInsChars += revParas[op.rj].text.length
                 }
                 "DEL" -> {
                     // 原档中被删除的段落（仅非空段落）
                     if (origParas[op.oi].text.isNotEmpty()) {
-                        bodyParts.add(wrapDeletedParagraph(origParas[op.oi].xml, author, date, ridSeq))
+                        if (op.delExclude != null) {
+                            // 部分消耗的 orig：只输出未被子串提取的剩余片段为红字删除
+                            bodyParts.add(wrapPartialDeletedParagraph(origParas[op.oi].xml, op.delExclude, author, date, ridSeq))
+                        } else {
+                            bodyParts.add(wrapDeletedParagraph(origParas[op.oi].xml, author, date, ridSeq))
+                        }
                         delCount++
                         totalDelChars += origParas[op.oi].text.length
                     }
@@ -305,13 +318,16 @@ object DocxComparator {
         }
 
         // ── Phase 4: DEL / INS ──
-        // 关键修复：被 SUB_EQ 部分消耗的 orig 段落不输出为 DEL，
-        // 因为其有效内容已经以全黑(SUB_EQ)形式输出了，再输出整段DEL会导致重复。
+        // 被 SUB_EQ 部分消耗的 orig 段落：不再整体输出为 DEL（会与子串黑字重复），
+        // 而是只输出未被子串占用的剩余片段为红字删除（delExclude 标记已占用区间）。
         for (i in 0 until n) {
             if (!oStates[i].fullyUsed && origParas[i].text.isNotEmpty()) {
-                // 跳过已被部分消耗的 orig（有 usedRanges 说明被 SUB_EQ 提取了子串）
-                if (oStates[i].usedRanges.isNotEmpty()) continue
-                ops.add(CmpOp("DEL", i, -1, 0.0))
+                if (oStates[i].usedRanges.isNotEmpty()) {
+                    // 部分消耗：输出剩余片段为红字删除
+                    ops.add(CmpOp("DEL", i, -1, 0.0, delExclude = oStates[i].usedRanges.toList()))
+                } else {
+                    ops.add(CmpOp("DEL", i, -1, 0.0))
+                }
             }
         }
         for (j in 0 until m) {
@@ -778,6 +794,41 @@ object DocxComparator {
         val pPr = extractPPr(paraXml)
         val inner = extractParaInner(paraXml)
         return "<w:p>$pPr<w:ins w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">$inner</w:ins></w:p>"
+    }
+
+    /**
+     * 部分删除：原文档大段被拆出若干子段(SUB_EQ)后，剩余片段按红字删除输出。
+     * exclude 标记已被子段占用的区间，只输出其补集区间为红字。
+     */
+    private fun wrapPartialDeletedParagraph(paraXml: String, exclude: List<Pair<Int, Int>>, author: String, date: String, ridSeq: IntArray): String {
+        val pPr = extractPPr(paraXml)
+        val runs = extractWRuns(paraXml)
+        val totalLen = extractParaText(paraXml).length
+        val kept = complementRanges(exclude, totalLen)
+        val sb = StringBuilder("<w:p>$pPr")
+        for ((s, e) in kept) {
+            if (e <= s) continue
+            val seg = extractRunsInRange(runs, s, e)
+            if (seg.isNotEmpty()) {
+                sb.append("<w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">$seg</w:del>")
+            }
+        }
+        sb.append("</w:p>")
+        return sb.toString()
+    }
+
+    /** 计算 [0,total) 中排除 exclude 区间后的补集区间（升序、不重叠）。 */
+    private fun complementRanges(exclude: List<Pair<Int, Int>>, total: Int): List<Pair<Int, Int>> {
+        if (exclude.isEmpty()) return listOf(Pair(0, total))
+        val sorted = exclude.sortedBy { it.first }
+        val res = mutableListOf<Pair<Int, Int>>()
+        var cur = 0
+        for ((s, e) in sorted) {
+            if (s > cur) res.add(Pair(cur, s))
+            cur = kotlin.math.max(cur, e)
+        }
+        if (cur < total) res.add(Pair(cur, total))
+        return res
     }
 
     private fun wrapDeletedText(origXml: String, gap: String, author: String, date: String, ridSeq: IntArray): String {
