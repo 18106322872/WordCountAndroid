@@ -12,7 +12,7 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 /**
- * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.58 修复版）。
+ * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.59 修复版）。
  *
  * 设计目标：输出文档与 Word「审阅-比较」结果一致。
  * 核心思路：
@@ -202,12 +202,16 @@ object DocxComparator {
         candidates.sortByDescending { it.first }
 
         // 贪心分配：跳过极端长度比（避免把子串误配为REP）
+        // 但【包含关系】例外：如果一方完全包含另一方，必须配为REP，
+        // 否则拆成 DEL+INS 会导致相同内容重复输出
         for ((s, oi, rj) in candidates) {
             if (oUsed[oi] || rUsed[rj]) continue
             val otLen = origParas[oi].text.length
             val rtLen = revParas[rj].text.length
-            // 如果一方长度不足另一方的40%，跳过（这类情况交给DEL+INS更准确）
-            if (rtLen < otLen * 0.4 || otLen < rtLen * 0.4) continue
+            val hasContainment = origParas[oi].text in revParas[rj].text ||
+                                  revParas[rj].text in origParas[oi].text
+            val lengthOk = (rtLen >= otLen * 0.4 && otLen >= rtLen * 0.4)
+            if (!lengthOk && !hasContainment) continue  // 无包含关系且长度悬殊 → 跳过
             ops.add(CmpOp("REP", oi, rj, 0.0))
             oUsed[oi] = true
             rUsed[rj] = true
