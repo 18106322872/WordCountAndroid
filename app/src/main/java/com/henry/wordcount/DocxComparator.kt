@@ -12,7 +12,7 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 /**
- * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.60 子串优先匹配版）。
+ * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.61 位置邻近回退版）。
  *
  * 设计目标：输出文档与 Word「审阅-比较」结果一致。
  * 核心思路：
@@ -263,6 +263,47 @@ object DocxComparator {
             rUsed[rj] = true
         }
 
+        // ── Phase 2.5: Position-Proximity Fallback（位置邻近回退）──
+        // 解决"orig 段落的前/后缀嵌入 rev 段落"导致无法匹配的问题。
+        // 例: O2("通过测评...") 的前12字符 = R3 的后12字符，
+        //     similarity=0.153 < 0.35 阈值 → 无法进入 Phase3 REP → 变成独立 DEL ❌
+        // 修复：如果位置邻近(pos_diff≤2)且有首尾重叠(≥6ch)，强制配对为 REP。
+        val proximityRepList = mutableListOf<Pair<Int, Int>>()
+        for (i in 0 until n) {
+            if (oStates[i].fullyUsed) continue
+            val oiText = origParas[i].text
+            if (oiText.isEmpty()) continue
+
+            var bestJ = -1
+            var bestScore = -1
+            var bestOverlap = 0
+
+            for (j in 0 until m) {
+                if (rUsed[j]) continue
+                val rjText = revParas[j].text
+                if (rjText.isEmpty()) continue
+
+                val posDiff = kotlin.math.abs(i - j)
+                val overlap = maxOverlap(oiText, rjText)
+
+                if (overlap >= 6 && posDiff <= 2) {
+                    val score = overlap * 3 + (3 - posDiff) * 5
+                    if (score > bestScore) {
+                        bestScore = score
+                        bestJ = j
+                        bestOverlap = overlap
+                    }
+                }
+            }
+
+            if (bestJ >= 0) {
+                ops.add(CmpOp("REP", i, bestJ, 0.0))
+                oStates[i].fullyUsed = true
+                rUsed[bestJ] = true
+                proximityRepList.add(Pair(i, bestJ))
+            }
+        }
+
         // ── Phase 4: DEL / INS ──
         // 关键修复：被 SUB_EQ 部分消耗的 orig 段落不输出为 DEL，
         // 因为其有效内容已经以全黑(SUB_EQ)形式输出了，再输出整段DEL会导致重复。
@@ -346,6 +387,24 @@ object DocxComparator {
         if (longer.contains(shorter)) return shorter.length.toDouble() / longer.length
         // 标准 LCS 比率
         return lcsRatio(a, b)
+    }
+
+    /**
+     * 计算两段文本的最大首尾重叠长度。
+     * 用于位置邻近回退：当 orig 的前缀与 rev 的后缀重叠（或反之），
+     * 说明两个段落可能是"首尾相接"关系，应配对为 REP 而非独立 DEL。
+     */
+    private fun maxOverlap(a: String, b: String): Int {
+        val maxCheck = kotlin.math.min(kotlin.math.min(a.length, b.length), 30)
+        // a 的前缀 = b 的后缀
+        for (k in maxCheck downTo 1) {
+            if (k <= b.length && a.startsWith(b.substring(b.length - k))) return k
+        }
+        // a 的后缀 = b 的前缀
+        for (k in maxCheck downTo 1) {
+            if (k <= a.length && k <= b.length && a.substring(a.length - k) == b.substring(0, k)) return k
+        }
+        return 0
     }
 
     /**
