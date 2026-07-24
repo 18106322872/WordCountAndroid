@@ -12,12 +12,12 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 /**
- * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.55 修正版）。
+ * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.56 重构版）。
  *
  * 设计目标：输出文档与 Word「审阅-比较」结果一致。
  * 核心思路：
  *   1. 以【原文档 XML 为底板】，保留完整格式。
- *   2. 段落级对齐：exact 相等 → 黑字(EQ)；rev 段落整体包含于 orig 段落 → rev 黑字(SBLACK)+orig 差值红字(SDEL)；
+ *   2. 段落级对齐：exact 相等 → 黑字(EQ)；相似配对(greedy) → 内联字符级 diff(REP)；其余 orig→红字删除(DEL)，rev→蓝字插入(INS)。
  *      相似段落(字符 LCS 比率≥0.5) → 内联字符级 diff(REP)；其余 orig→红字删除(DEL)，rev→蓝字插入(INS)。
  *   3. 相邻「删除+插入」仅当二者相似时才合并为一段内联修订(REP)，避免无关段落被错误合并。
  *
@@ -39,7 +39,7 @@ object DocxComparator {
         val summary: String = ""
     )
 
-    /** 对齐后的一次操作。tag: EQ / REP / DEL / INS / SBLACK / SDEL */
+    /** 对齐后的一次操作。tag: EQ / REP / DEL / INS */
     data class CmpOp(
         val tag: String,
         val oi: Int,   // 原文档段落下标（-1 表示无）
@@ -96,21 +96,12 @@ object DocxComparator {
         for (op in ops) {
             when (op.tag) {
                 "EQ" -> {
+                    // 完全相同的段落 → 原样输出（黑字不变）
                     bodyParts.add(origParas[op.oi].xml)
                     eqBlackChars += origParas[op.oi].text.length
                 }
-                "SBLACK" -> {
-                    // rev 段落是 orig 的子串 → 这部分文字在两文档中都存在，不算修改
-                    bodyParts.add(revParas[op.rj].xml)
-                    eqBlackChars += revParas[op.rj].text.length
-                }
-                "SDEL" -> {
-                    bodyParts.add(wrapDeletedText(origParas[op.oi].xml, op.gap, author, date, ridSeq))
-                    delCount++
-                    totalDelChars += op.gap.length
-                }
                 "DEL" -> {
-                    // 跳过空段落，不生成无意义的空删除
+                    // 原档中被删除的段落（仅非空段落）
                     if (origParas[op.oi].text.isNotEmpty()) {
                         bodyParts.add(wrapDeletedParagraph(origParas[op.oi].xml, author, date, ridSeq))
                         delCount++
@@ -118,11 +109,13 @@ object DocxComparator {
                     }
                 }
                 "INS" -> {
+                    // 修订档中新插入的段落
                     bodyParts.add(wrapInsertedParagraph(revParas[op.rj].xml, author, date, ridSeq))
                     insCount++
                     totalInsChars += revParas[op.rj].text.length
                 }
                 "REP" -> {
+                    // 相似段落 → 内联字符级 diff（蓝字插入+红字删除）
                     val (pXml, delC, insC) = buildDiffParagraphXml(
                         origParas[op.oi].xml,
                         origParas[op.oi].text,
@@ -131,7 +124,7 @@ object DocxComparator {
                     )
                     bodyParts.add(pXml)
                     totalDelChars += delC
-                    totalInsChars += insC   // REP 中只有新增部分算"修改"
+                    totalInsChars += insC
                     repCount++
                 }
             }
@@ -139,7 +132,7 @@ object DocxComparator {
 
         writeOutputDocx(origFile, outPath, bodyParts)
 
-        // 修改字数 = 修订档总字数 - 未改动的字数（EQ+SBLACK）
+        // 修改字数 = 修订档总字数 - 未改动的字数（仅 EQ）
         // 保证 ≤ 修订档总字数（用户要求：最高=修订档字数）
         val revTotalChars = revParas.sumOf { it.text.length }
         val modifiedChars = kotlin.math.max(0, revTotalChars - eqBlackChars)
@@ -161,7 +154,7 @@ object DocxComparator {
     }
 
     // ══════════════════════════════════════════════════════
-    //  段落对齐（exact + SUBEQ 拆分 + 相似 LCS + 受控合并）
+    //  段落对齐（exact → greedy REP → DEL/INS → 文档序重排）
     // ══════════════════════════════════════════════════════
 
     private fun alignParagraphs(origParas: List<Para>, revParas: List<Para>): List<CmpOp> {
@@ -171,7 +164,7 @@ object DocxComparator {
         val rUsed = BooleanArray(m)
         val ops = mutableListOf<CmpOp>()
 
-        // 阶段A：exact
+        // ── Phase 1: Exact matches → EQ（完全相同的段落，黑字不变）──
         for (i in 0 until n) {
             if (oUsed[i]) continue
             val ot = origParas[i].text
@@ -179,7 +172,7 @@ object DocxComparator {
             for (j in 0 until m) {
                 if (rUsed[j]) continue
                 if (ot == revParas[j].text) {
-                    ops.add(CmpOp("EQ", i, j, ops.size.toDouble()))
+                    ops.add(CmpOp("EQ", i, j, 0.0))
                     oUsed[i] = true
                     rUsed[j] = true
                     break
@@ -187,90 +180,85 @@ object DocxComparator {
             }
         }
 
-        // 阶段B：SUBEQ（rev 整体包含于 orig → 拆为 SBLACK+SDEL）
+        // ── Phase 2: Greedy best-match → REP（相似段落做内联字符级 diff）──
+        val remOIndices = mutableListOf<Int>()
+        val remRIndices = mutableListOf<Int>()
+        for (i in 0 until n) if (!oUsed[i] && origParas[i].text.isNotEmpty()) remOIndices.add(i)
+        for (j in 0 until m) if (!rUsed[j] && revParas[j].text.isNotEmpty()) remRIndices.add(j)
+
+        // 构建所有候选配对（相似度 ≥ 阈值）
+        val candidates = mutableListOf<Triple<Double, Int, Int>>()
+        val SIM_THRESHOLD = 0.35
+        for (oi in remOIndices) {
+            for (rj in remRIndices) {
+                val s = similarity(origParas[oi].text, revParas[rj].text)
+                if (s >= SIM_THRESHOLD) {
+                    candidates.add(Triple(s, oi, rj))
+                }
+            }
+        }
+        // 按相似度降序排列
+        candidates.sortByDescending { it.first }
+
+        // 贪心分配：跳过极端长度比（避免把子串误配为REP）
+        for ((s, oi, rj) in candidates) {
+            if (oUsed[oi] || rUsed[rj]) continue
+            val otLen = origParas[oi].text.length
+            val rtLen = revParas[rj].text.length
+            // 如果一方长度不足另一方的40%，跳过（这类情况交给DEL+INS更准确）
+            if (rtLen < otLen * 0.4 || otLen < rtLen * 0.4) continue
+            ops.add(CmpOp("REP", oi, rj, 0.0))
+            oUsed[oi] = true
+            rUsed[rj] = true
+        }
+
+        // ── Phase 3: 未匹配 → DEL / INS ──
         for (i in 0 until n) {
-            if (oUsed[i]) continue
-            val ot = origParas[i].text
-            if (ot.isEmpty()) continue
-            val contained = mutableListOf<Pair<Int, Int>>() // (position, revIndex)
-            for (j in 0 until m) {
-                if (rUsed[j]) continue
-                val rt = revParas[j].text
-                if (rt.length < 5) continue       // 太短的不做 SUBEQ
-                if (rt.length >= ot.length) continue // rt 不比 ot 短，跳过（交给 Phase C 做 REP/DEL+INS）
-                val pos = ot.indexOf(rt)
-                if (pos >= 0) contained.add(Pair(pos, j))
+            if (!oUsed[i] && origParas[i].text.isNotEmpty()) {
+                ops.add(CmpOp("DEL", i, -1, 0.0))
             }
-            if (contained.isEmpty()) continue
-            contained.sortBy { it.first }
-            val segs = mutableListOf<CmpOp>()
-            var prev = 0
-            for ((pos, j) in contained) {
-                if (pos > prev) {
-                    segs.add(CmpOp("SDEL", i, -1, ops.size.toDouble() + segs.size, ot.substring(prev, pos)))
-                }
-                segs.add(CmpOp("SBLACK", i, j, ops.size.toDouble() + segs.size))
-                prev = pos + revParas[j].text.length
-                rUsed[j] = true
+        }
+        for (j in 0 until m) {
+            if (!rUsed[j] && revParas[j].text.isNotEmpty()) {
+                ops.add(CmpOp("INS", -1, j, 0.0))
             }
-            if (prev < ot.length) {
-                segs.add(CmpOp("SDEL", i, -1, ops.size.toDouble() + segs.size, ot.substring(prev, ot.length)))
-            }
-            oUsed[i] = true
-            ops.addAll(segs)
         }
 
-        // 阶段C：对其余段落做相似度感知 LCS（跳过空段落）
-        val remO = mutableListOf<Int>()
-        val remR = mutableListOf<Int>()
-        for (i in 0 until n) if (!oUsed[i] && origParas[i].text.isNotEmpty()) remO.add(i)
-        for (j in 0 until m) if (!rUsed[j] && revParas[j].text.isNotEmpty()) remR.add(j)
-
-                if (remO.isNotEmpty() || remR.isNotEmpty()) {
-            val useSimilarity = (remO.size * remR.size) <= 6000
-            val codes = computeDiffText(
-                remO.map { origParas[it].text },
-                remR.map { revParas[it].text },
-                useSimilarity
-            )
-            val raw = mutableListOf<CmpOp>()
-            for (c in codes) {
-                when (c.tag) {
-                    "equal" -> {
-                        for (k in c.i1 until c.i2) {
-                            val oi = remO[k]
-                            val rj = remR[c.j1 + (k - c.i1)]
-                            raw.add(CmpOp("REP", oi, rj, ops.size.toDouble() + raw.size))
-                        }
-                    }
-                    "delete" -> {
-                        for (k in c.i1 until c.i2) raw.add(CmpOp("DEL", remO[k], -1, ops.size.toDouble() + raw.size))
-                    }
-                    "insert" -> {
-                        for (k in c.j1 until c.j2) raw.add(CmpOp("INS", -1, remR[k], ops.size.toDouble() + raw.size))
-                    }
+        // ── 按文档逻辑顺序重排（修订档顺序驱动）──
+        // EQ/REP/INS 按 rev 下标排序，DEL 按 orig 下标+0.5 排序
+        ops.sortWith(compareBy(
+            { op ->
+                when (op.tag) {
+                    "EQ", "REP", "INS" -> op.rj.toDouble()
+                    "DEL" -> op.oi + 0.5
+                    else -> 999.0
+                }
+            },
+            { op -> 
+                when (op.tag) {
+                    "DEL" -> 1  // DEL 在同位置排后面
+                    else -> 0
                 }
             }
-            val mergedRaw = mutableListOf<CmpOp>()
-            var ri = 0
-            while (ri < raw.size) {
-                val op = raw[ri]
-                if (op.tag == "DEL" && ri + 1 < raw.size && raw[ri + 1].tag == "INS") {
-                    val ot = origParas[op.oi].text
-                    val rt = revParas[raw[ri + 1].rj].text
-                    if (isAligned(ot, rt)) {
-                        mergedRaw.add(CmpOp("REP", op.oi, raw[ri + 1].rj, ops.size.toDouble() + mergedRaw.size))
-                        ri += 2
-                        continue
-                    }
-                }
-                mergedRaw.add(op)
-                ri++
-            }
-            ops.addAll(mergedRaw)
-        }
+        ))
 
         return ops
+    }
+
+    /**
+     * 两段文本的相似度（基于修正的 LCS 比率）。
+     */
+    private fun similarity(a: String, b: String): Double {
+        if (a.isEmpty() && b.isEmpty()) return 1.0
+        if (a.isEmpty() || b.isEmpty()) return 0.0
+        if (a == b) return 1.0
+        // 快速路径：包含关系
+        val (shorter, longer) = if (a.length <= b.length) a to b else b to a
+        if (longer.contains(shorter)) return shorter.length.toDouble() / longer.length
+        // 标准 LCS 比率
+        return lcsRatio(a, b)
+    }
+
     }
 
     /**
