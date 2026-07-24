@@ -211,6 +211,7 @@ import sys
 # ═════════════════════════════════════════════════════
 import importlib as _importlib
 import importlib.util as _iu
+import importlib.machinery as _im  # ModuleSpec 构造函数（Python 3.10 兼容）
 from importlib.abc import Loader as _LoaderBase, MetaPathFinder as _MetaPathFinderBase
 import types as _types
 import builtins as _builtins
@@ -233,7 +234,7 @@ def _make_lxml_stub(name):
     mod = _types.ModuleType(name)
     mod.__loader__ = _BLOCKED_LOADER
     # 关键：必须有 __spec__，否则 PEP 451 based finder 会尝试重新加载
-    mod.__spec__ = _iu.module_spec(name, _BLOCKED_LOADER)
+    mod.__spec__ = _im.ModuleSpec(name, _BLOCKED_LOADER)
     mod.__spec__.has_location = False
     mod.__package__ = name.split('.')[0] if '.' in name else name
     mod.__path__ = []  # 包标记
@@ -276,7 +277,7 @@ class _LxmlMetaPathBlocker(_MetaPathFinderBase):
 
     def find_spec(self, fullname, path, target=None):
         if _is_lxml_name(fullname):
-            return _iu.module_spec(fullname, _BLOCKED_LOADER)
+            return _im.ModuleSpec(fullname, _BLOCKED_LOADER)
         return None
 
     def find_module(self, fullname, path=None):
@@ -346,7 +347,7 @@ class _SafePathEntryFinder:
             import logging as _logging
             _logging.getLogger(__name__).warning(
                 "lxml-defender L4: blocked path-based spec for %s", fullname)
-            return _iu.module_spec(fullname, _BLOCKED_LOADER)
+            return _im.ModuleSpec(fullname, _BLOCKED_LOADER)
         return None
 
     def __repr__(self):
