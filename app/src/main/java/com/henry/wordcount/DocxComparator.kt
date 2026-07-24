@@ -12,7 +12,7 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 /**
- * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.53 重写版）。
+ * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.55 修正版）。
  *
  * 设计目标：输出文档与 Word「审阅-比较」结果一致。
  * 核心思路：
@@ -88,17 +88,21 @@ object DocxComparator {
         var insCount = 0
         var delCount = 0
         var repCount = 0
-        var totalInsChars = 0
-        var totalDelChars = 0
+        var totalInsChars = 0       // 新增字符（计入修改字数）
+        var totalDelChars = 0       // 删除字符（仅统计，不计入modifiedChars）
+        var eqBlackChars = 0        // 未改动字符（从修订档总字数中扣除）
         val bodyParts = mutableListOf<String>()
 
         for (op in ops) {
             when (op.tag) {
                 "EQ" -> {
                     bodyParts.add(origParas[op.oi].xml)
+                    eqBlackChars += origParas[op.oi].text.length
                 }
                 "SBLACK" -> {
+                    // rev 段落是 orig 的子串 → 这部分文字在两文档中都存在，不算修改
                     bodyParts.add(revParas[op.rj].xml)
+                    eqBlackChars += revParas[op.rj].text.length
                 }
                 "SDEL" -> {
                     bodyParts.add(wrapDeletedText(origParas[op.oi].xml, op.gap, author, date, ridSeq))
@@ -106,9 +110,12 @@ object DocxComparator {
                     totalDelChars += op.gap.length
                 }
                 "DEL" -> {
-                    bodyParts.add(wrapDeletedParagraph(origParas[op.oi].xml, author, date, ridSeq))
-                    delCount++
-                    totalDelChars += origParas[op.oi].text.length
+                    // 跳过空段落，不生成无意义的空删除
+                    if (origParas[op.oi].text.isNotEmpty()) {
+                        bodyParts.add(wrapDeletedParagraph(origParas[op.oi].xml, author, date, ridSeq))
+                        delCount++
+                        totalDelChars += origParas[op.oi].text.length
+                    }
                 }
                 "INS" -> {
                     bodyParts.add(wrapInsertedParagraph(revParas[op.rj].xml, author, date, ridSeq))
@@ -124,7 +131,7 @@ object DocxComparator {
                     )
                     bodyParts.add(pXml)
                     totalDelChars += delC
-                    totalInsChars += insC
+                    totalInsChars += insC   // REP 中只有新增部分算"修改"
                     repCount++
                 }
             }
@@ -132,7 +139,10 @@ object DocxComparator {
 
         writeOutputDocx(origFile, outPath, bodyParts)
 
-        val modifiedChars = totalInsChars + totalDelChars
+        // 修改字数 = 修订档总字数 - 未改动的字数（EQ+SBLACK）
+        // 保证 ≤ 修订档总字数（用户要求：最高=修订档字数）
+        val revTotalChars = revParas.sumOf { it.text.length }
+        val modifiedChars = kotlin.math.max(0, revTotalChars - eqBlackChars)
         val summary = buildString {
             append("插入 $insCount 处(${totalInsChars}字) | 删除 $delCount 处(${totalDelChars}字) | 修改 $repCount 处")
         }
@@ -169,7 +179,7 @@ object DocxComparator {
             for (j in 0 until m) {
                 if (rUsed[j]) continue
                 if (ot == revParas[j].text) {
-                    ops.add(CmpOp("EQ", i, j, i.toDouble()))
+                    ops.add(CmpOp("EQ", i, j, ops.size.toDouble()))
                     oUsed[i] = true
                     rUsed[j] = true
                     break
@@ -177,7 +187,7 @@ object DocxComparator {
             }
         }
 
-        // 阶段B：SUBEQ（rev 整体包含于 orig，且 rev 明显更短）
+        // 阶段B：SUBEQ（rev 整体包含于 orig → 拆为 SBLACK+SDEL）
         for (i in 0 until n) {
             if (oUsed[i]) continue
             val ot = origParas[i].text
@@ -186,8 +196,8 @@ object DocxComparator {
             for (j in 0 until m) {
                 if (rUsed[j]) continue
                 val rt = revParas[j].text
-                if (rt.length < 10) continue
-                if (rt.length >= 0.7 * ot.length) continue
+                if (rt.length < 5) continue       // 太短的不做 SUBEQ
+                if (rt.length >= ot.length) continue // rt 不比 ot 短，跳过（交给 Phase C 做 REP/DEL+INS）
                 val pos = ot.indexOf(rt)
                 if (pos >= 0) contained.add(Pair(pos, j))
             }
@@ -195,72 +205,71 @@ object DocxComparator {
             contained.sortBy { it.first }
             val segs = mutableListOf<CmpOp>()
             var prev = 0
-            var frac = 0.0
             for ((pos, j) in contained) {
                 if (pos > prev) {
-                    segs.add(CmpOp("SDEL", i, -1, i.toDouble() + frac, ot.substring(prev, pos)))
-                    frac += 0.1
+                    segs.add(CmpOp("SDEL", i, -1, ops.size.toDouble() + segs.size, ot.substring(prev, pos)))
                 }
-                segs.add(CmpOp("SBLACK", i, j, i.toDouble() + frac))
-                frac += 0.1
+                segs.add(CmpOp("SBLACK", i, j, ops.size.toDouble() + segs.size))
                 prev = pos + revParas[j].text.length
                 rUsed[j] = true
             }
             if (prev < ot.length) {
-                segs.add(CmpOp("SDEL", i, -1, i.toDouble() + frac, ot.substring(prev, ot.length)))
+                segs.add(CmpOp("SDEL", i, -1, ops.size.toDouble() + segs.size, ot.substring(prev, ot.length)))
             }
             oUsed[i] = true
             ops.addAll(segs)
         }
 
-        // 阶段C：相似度感知 LCS（仅对其余段落）
+        // 阶段C：对其余段落做相似度感知 LCS（跳过空段落）
         val remO = mutableListOf<Int>()
         val remR = mutableListOf<Int>()
-        for (i in 0 until n) if (!oUsed[i]) remO.add(i)
-        for (j in 0 until m) if (!rUsed[j]) remR.add(j)
+        for (i in 0 until n) if (!oUsed[i] && origParas[i].text.isNotEmpty()) remO.add(i)
+        for (j in 0 until m) if (!rUsed[j] && revParas[j].text.isNotEmpty()) remR.add(j)
 
-        val useSimilarity = (remO.size * remR.size) <= 6000
-        val codes = computeDiffText(
-            remO.map { origParas[it].text },
-            remR.map { revParas[it].text },
-            useSimilarity
-        )
-        val raw = mutableListOf<CmpOp>()
-        for (c in codes) {
-            when (c.tag) {
-                "equal" -> {
-                    for (k in c.i1 until c.i2) {
-                        val oi = remO[k]
-                        val rj = remR[c.j1 + (k - c.i1)]
-                        raw.add(CmpOp("REP", oi, rj, oi.toDouble()))
+                if (remO.isNotEmpty() || remR.isNotEmpty()) {
+            val useSimilarity = (remO.size * remR.size) <= 6000
+            val codes = computeDiffText(
+                remO.map { origParas[it].text },
+                remR.map { revParas[it].text },
+                useSimilarity
+            )
+            val raw = mutableListOf<CmpOp>()
+            for (c in codes) {
+                when (c.tag) {
+                    "equal" -> {
+                        for (k in c.i1 until c.i2) {
+                            val oi = remO[k]
+                            val rj = remR[c.j1 + (k - c.i1)]
+                            raw.add(CmpOp("REP", oi, rj, ops.size.toDouble() + raw.size))
+                        }
+                    }
+                    "delete" -> {
+                        for (k in c.i1 until c.i2) raw.add(CmpOp("DEL", remO[k], -1, ops.size.toDouble() + raw.size))
+                    }
+                    "insert" -> {
+                        for (k in c.j1 until c.j2) raw.add(CmpOp("INS", -1, remR[k], ops.size.toDouble() + raw.size))
                     }
                 }
-                "delete" -> {
-                    for (k in c.i1 until c.i2) raw.add(CmpOp("DEL", remO[k], -1, remO[k].toDouble()))
-                }
-                "insert" -> {
-                    for (k in c.j1 until c.j2) raw.add(CmpOp("INS", -1, remR[k], remR[k].toDouble()))
-                }
             }
-        }
-        // 受控合并：相邻「删除+插入」仅当相似时合并为内联修订(REP)
-        val mergedRaw = mutableListOf<CmpOp>()
-        var ri = 0
-        while (ri < raw.size) {
-            val op = raw[ri]
-            if (op.tag == "DEL" && ri + 1 < raw.size && raw[ri + 1].tag == "INS" &&
-                isAligned(origParas[op.oi].text, revParas[raw[ri + 1].rj].text)
-            ) {
-                mergedRaw.add(CmpOp("REP", op.oi, raw[ri + 1].rj, op.pos))
-                ri += 2
-            } else {
+            val mergedRaw = mutableListOf<CmpOp>()
+            var ri = 0
+            while (ri < raw.size) {
+                val op = raw[ri]
+                if (op.tag == "DEL" && ri + 1 < raw.size && raw[ri + 1].tag == "INS") {
+                    val ot = origParas[op.oi].text
+                    val rt = revParas[raw[ri + 1].rj].text
+                    if (isAligned(ot, rt)) {
+                        mergedRaw.add(CmpOp("REP", op.oi, raw[ri + 1].rj, ops.size.toDouble() + mergedRaw.size))
+                        ri += 2
+                        continue
+                    }
+                }
                 mergedRaw.add(op)
-                ri += 1
+                ri++
             }
+            ops.addAll(mergedRaw)
         }
-        ops.addAll(mergedRaw)
 
-        ops.sortWith(compareBy({ it.pos }, { if (it.tag == "SDEL") 0 else 1 }))
         return ops
     }
 
