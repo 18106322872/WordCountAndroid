@@ -14,16 +14,15 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 /**
- * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.39 修正版）。
+ * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.52 重写版）。
  *
  * 完全不依赖 Python/lxml，用 Android 标准库（ZipFile + XmlPullParser）实现。
  * 替代原 Python 版 compare_docx（该版本因 Chaquopy lxml C 扩展崩溃无法使用）。
  *
- * v1.1.39 修正：
- * - 修复 diff 结果全为 0 的 bug（原 generateOpcodesSimple 在某些情况下无法正确匹配）
- * - parseBlocksFromXml 增加非命名空间感知的 fallback 解析
- * - 增加 Log.d 调试日志便于排查
- * - diff 算法改用标准 LCS 回溯（正确生成 opcodes）
+ * v1.1.52 重写：
+ * - 多段落 replace 改为子级 LCS 对齐 + 内联字符级 diff（匹配 Word 原生格式）
+ * - 修复 modifiedChars 统计：只算实际变动的字数，不再整段累加
+ * - 输出文档格式接近 Word「审阅-比较」结果（内联 w:ins/w:del 标记）
  */
 object DocxComparator {
 
@@ -144,49 +143,95 @@ object DocxComparator {
                     }
                 }
                 "replace" -> {
-                    val single = (i2 - i1 == 1 && j2 - j1 == 1)
-                    if (single) {
-                        val bo = blocksO[i1]
-                        val br = blocksR[j1]
-                        if (bo.type == "p" && br.type == "p") {
-                            val maxLen = maxOf(bo.text.length, br.text.length)
-                            if (maxLen > MAX_DIFF_TOKENS) {
-                                bodyParts.add(buildDeletedParagraph(bo.text, author, date, ::nextRid))
-                                bodyParts.add(buildInsertedParagraph(br.text, author, date, ::nextRid))
-                                modifiedChars += countTextChars(bo.text) + countTextChars(br.text)
-                            } else {
-                                val (pXml, ranges) = buildDiffParagraph(
-                                    bo.text, br.text, level, author, date, ::nextRid,
-                                    caseSensitive, ignoreWs
-                                )
-                                bodyParts.add(pXml)
-                                modifiedChars += countModifiedSentences(bo.text, ranges)
+                    // v1.1.52: 多段落 replace 也做子对齐 + 内联字符级 diff
+                    val subOrig = (i1 until i2).map { blocksO[it] }
+                    val subRev = (j1 until j2).map { blocksR[it] }
+
+                    // 只取段落类型的块做子对齐
+                    val subPOrg = subOrig.filter { it.type == "p" }
+                    val subPRev = subRev.filter { it.type == "p" }
+
+                    if (subPOrg.isNotEmpty() || subPRev.isNotEmpty()) {
+                        // 子级段落 LCS 对齐
+                        val subTextsO = subPOrg.map { it.text }
+                        val subTextsR = subPRev.map { it.text }
+                        val subOps = computeDiff(subTextsO, subTextsR)
+                        val subMerged = mergeReplace(subOps)
+
+                        var localRepCount = 0
+                        for ((stag, si1, si2, sj1, sj2) in subMerged) {
+                            when (stag) {
+                                "equal" -> {
+                                    for (k in si1 until si2) {
+                                        bodyParts.add(buildPlainParagraph(subPOrg[k].text))
+                                    }
+                                }
+                                "delete" -> {
+                                    for (k in si1 until si2) {
+                                        bodyParts.add(buildDeletedParagraph(subPOrg[k].text, author, date, ::nextRid))
+                                        modifiedChars += countTextChars(subPOrg[k].text)
+                                    }
+                                    delCount += (si2 - si1)
+                                }
+                                "insert" -> {
+                                    for (k in sj1 until sj2) {
+                                        bodyParts.add(buildInsertedParagraph(subPRev[k].text, author, date, ::nextRid))
+                                    }
+                                    insCount += (sj2 - sj1)
+                                }
+                                "replace" -> {
+                                    // 单对段落：做内联字符级 diff
+                                    for (di in 0 until minOf(si2 - si1, sj2 - sj1)) {
+                                        val bo = subPOrg[si1 + di]
+                                        val br = subPRev[sj1 + di]
+                                        val maxLen = maxOf(bo.text.length, br.text.length)
+                                        if (maxLen > MAX_DIFF_TOKENS) {
+                                            bodyParts.add(buildDeletedParagraph(bo.text, author, date, ::nextRid))
+                                            bodyParts.add(buildInsertedParagraph(br.text, author, date, ::nextRid))
+                                            modifiedChars += countTextChars(bo.text) + countTextChars(br.text)
+                                        } else {
+                                            val (pXml, ranges) = buildDiffParagraph(
+                                                bo.text, br.text, level, author, date, ::nextRid,
+                                                caseSensitive, ignoreWs
+                                            )
+                                            bodyParts.add(pXml)
+                                            // 只算实际被修改的字数（删除范围 + 插入估算）
+                                            modifiedChars += countModifiedSentences(bo.text, ranges)
+                                            // 加上插入部分的净增字数
+                                            val insExtra = maxOf(0, countTextChars(br.text) - countTextChars(bo.text))
+                                            if (insExtra > 0) modifiedChars += insExtra / 2  // 估算一半是新增
+                                        }
+                                        localRepCount++
+                                    }
+                                    // 剩余未配对的原文段落（删除）
+                                    for (di in (si2 - si1) until (sj2 - sj1)) {
+                                        // 不可能到这里
+                                    }
+                                    for (di in minOf(si2 - si1, sj2 - sj1) until (si2 - si1)) {
+                                        bodyParts.add(buildDeletedParagraph(subPOrg[si1 + di].text, author, date, ::nextRid))
+                                        modifiedChars += countTextChars(subPOrg[si1 + di].text)
+                                        delCount++
+                                    }
+                                    for (di in minOf(si2 - si1, sj2 - sj1) until (sj2 - sj1)) {
+                                        bodyParts.add(buildInsertedParagraph(subPRev[sj1 + di].text, author, date, ::nextRid))
+                                        insCount++
+                                    }
+                                }
                             }
-                            repCount++
-                            continue
                         }
-                        if (bo.type == "tbl" && br.type == "tbl" && useTable) {
-                            bodyParts.add(buildNoteParagraph("[原表格] ${bo.text.take(200)}"))
-                            bodyParts.add(buildNoteParagraph("[修订表格] ${br.text.take(200)}"))
-                            modifiedChars += countTextChars(bo.text) + countTextChars(br.text)
-                            repCount++
-                            continue
-                        }
+                        repCount += maxOf(localRepCount, 1)
                     }
-                    // 多段落 replace → 删除 + 插入
-                    for (k in i1 until i2) {
-                        val el = blocksO[k]
-                        if (el.type == "p") bodyParts.add(buildDeletedParagraph(el.text, author, date, ::nextRid))
-                        else bodyParts.add(buildNoteParagraph("[已删表格] ${el.text.take(200)}"))
-                        modifiedChars += countTextChars(el.text)
-                        delCount++
+
+                    // 表格类块直接标注
+                    val tblOrg = subOrig.filter { it.type == "tbl" }
+                    val tblRev = subRev.filter { it.type == "tbl" }
+                    for (tbl in tblOrg) {
+                        bodyParts.add(buildNoteParagraph("[原表格] ${tbl.text.take(200)}"))
+                        modifiedChars += countTextChars(tbl.text)
                     }
-                    for (k in j1 until j2) {
-                        val el = blocksR[k]
-                        if (el.type == "p") bodyParts.add(buildInsertedParagraph(el.text, author, date, ::nextRid))
-                        else bodyParts.add(buildNoteParagraph("[新增表格] ${el.text.take(200)}"))
-                        modifiedChars += countTextChars(el.text)
-                        insCount++
+                    for (tbl in tblRev) {
+                        bodyParts.add(buildNoteParagraph("[修订表格] ${tbl.text.take(200)}"))
+                        modifiedChars += countTextChars(tbl.text)
                     }
                 }
             }
