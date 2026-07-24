@@ -259,7 +259,7 @@ object DocxComparator {
         try {
             val factory = XmlPullParserFactory.newInstance()
             factory.setNamespaceAware(true)
-            val parser = factory.newParser()
+            val parser = factory.newPullParser()
             parser.setInput(StringReader(xml))
 
             var inBody = false
@@ -332,7 +332,7 @@ object DocxComparator {
                 // 流式读取，不一次性加载整个文件到内存
                 val factory = XmlPullParserFactory.newInstance()
                 factory.setNamespaceAware(true)
-                val parser = factory.newParser()
+                val parser = factory.newPullParser()
                 parser.setInput(zip.getInputStream(entry), "UTF-8")
 
                 var currentText = StringBuilder()
