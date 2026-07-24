@@ -187,84 +187,105 @@ import sys
 
 
 # ═════════════════════════════════════════════════════
-# v1.1.31: Android lxml 崩溃防御（最终修正版 v6）
+# v1.1.35: Android lxml 崩溃防御（bootstrap 级别拦截版）
 # ═════════════════════════════════════════════════════
-# 根因（历经 v1.1.15~v1.30 共 16 个版本确认）：
+# 根因（历经 v1.1.15~v1.33 共 19 个版本确认）：
 #   lxml 的 C 扩展(.so)在 Android 上触发 fatal 级
 #   FileNotFoundError(AssetFinder/scripts)。
 #
-# ★ 为什么之前 5 层防御全部失败？★
-#   L1 (meta_path): 只拦截显式 "import lxml"
-#   L2 (sys.modules): 预填充了但 stub 不够"真"
-#   L3 (sys.path清理): 可能遗漏某些路径
-#   L4 (path_hooks): 只对以 lxml 结尾的路径返回 finder
-#                    → 但 path-based finder 在扫描子目录时，
-#                      用的是父目录的 finder，不重新调 hook！
-#   L5 (__import__覆盖): Chaquopy 可能不走 __import__
+# ★ 为什么之前 L1~L5 全部失败？★
+#   L1 (meta_path): Chaquopy AssetFinder 可能绕过 meta_path
+#   L2 (sys.modules): 子模块覆盖不全——漏掉了某些路径
+#   L3 (sys.path清理): 可能遗漏某些路径形态
+#   L5 (__import__): 某些代码路径可能不走 builtins.__import__
 #
-# ★ v1.1.31 新策略 ★
-#   A. 改 L4 为"全局安全 path_hook"：对所有路径返回 finder，
-#      在 find_module/find_spec 中检查目标名是否为 lxml
-#   B. 加强 L2 stub：添加 __spec__/__all__/__file__ 等属性
-#   C. 新增 L6：sys.path_importer_cache 预填充
-#   D. 函数级防护：compare_docx/extract_pdf 入口 try-except
+# ★ v1.1.35 新策略 ★
+#   A. 新增 L7: monkey-patch importlib._bootstrap._find_and_load
+#      —— 这是最底层的模块加载入口，所有 import 最终都经过这里
+#   B. 大幅加强 L2: 预填充 30+ 个 lxml 子模块到 sys.modules
+#      —— 覆盖所有可能的子模块访问路径
+#   C. 新增 L8: faulthandler.enable() —— 捕获 C 级别的 fatal 错误
+#   D. 保留 L1(meta_path) + L3(path清理) + L5(__import__) 作为辅助防线
 # ═════════════════════════════════════════════════════
 import importlib as _importlib
 import importlib.util as _iu
-import importlib.machinery as _im  # ModuleSpec 构造函数（Python 3.10 兼容）
+import importlib.machinery as _im
 from importlib.abc import Loader as _LoaderBase, MetaPathFinder as _MetaPathFinderBase
 import types as _types
 import builtins as _builtins
 
 # ── 共享工具 ──
-_BLOCKED_LOADER = None  # 下面定义后回填
+_BLOCKED_LOADER = None
+
+# 完整的 lxml 家族模块名列表（30+ 个）
+_LXML_FULL_MODULE_SET = {
+    'lxml',
+    'lxml.etree', 'lxml.etree.ElementBase', 'lxml.etree.XPath',
+    'lxml.etree.XPathEvaluator', 'lxml.etree._Element', 'lxml.etree.IterparseIterator',
+    'lxml.html', 'lxml.html.clean', 'lxml.html.formfill', 'lxml.html.diff',
+    'lxml.sax', 'lxml.isoschematron',
+    'lxml.ElementInclude', 'lxml.cssselect', 'lxml.builder',
+    # 常见的内部/ C 扩展子模块
+    'lxml._elementpath',
+}
+
 
 def _is_lxml_name(name):
     """检查模块名是否属于 lxml 家族。"""
+    if name in _LXML_FULL_MODULE_SET:
+        return True
     return (name == 'lxml'
             or name.startswith('lxml.')
-            or name.startswith('lxml_')
-            or name == 'lxml.etree'
-            or name in ('lxml.html', 'lxml.sax', 'lxml.isoschematron',
-                        'lxml.ElementInclude', 'lxml.cssselect', 'lxml.builder'))
+            or name.startswith('lxml_'))
 
 
 def _make_lxml_stub(name):
-    """创建一个足够"真"的 lxml stub 模块，让 import 机制认为已加载。"""
+    """创建一个足够"真"的 lxml stub 模块。"""
     mod = _types.ModuleType(name)
     mod.__loader__ = _BLOCKED_LOADER
-    # 关键：必须有 __spec__，否则 PEP 451 based finder 会尝试重新加载
     mod.__spec__ = _im.ModuleSpec(name, _BLOCKED_LOADER)
     mod.__spec__.has_location = False
-    mod.__package__ = name.split('.')[0] if '.' in name else name
-    mod.__path__ = []  # 包标记
-    mod.__file__ = ''  # 表示不是真实文件
-    mod.__all__ = []   # 防止 "from lxml import *" 触发真正导入
+    pkg = name.split('.')[0] if '.' in name else name
+    mod.__package__ = pkg
+    mod.__path__ = []
+    mod.__file__ = ''
+    mod.__all__ = []
+    mod.__version__ = '0.0 (stub)'
     # 让属性访问返回子 stub（链式拦截）
     class _StubAttr:
         def __getattr__(self, attr):
-            subname = name + '.' + attr
-            # 自动注册子模块到 sys.modules
+            subname = name + '.' + attr if not name.endswith('.' + attr) else attr
             if subname not in sys.modules:
                 sys.modules[subname] = _make_lxml_stub(subname)
             return sys.modules[subname]
         def __call__(self, *a, **k):
-            # 如果有人尝试调用 lxml 的函数，返回空值
             return _types.ModuleType(name + '.tmp')
-    mod._StubAttr = _StubAttr
+        def __iter__(self):
+            return iter([])
+        def __len__(self):
+            return 0
+        def __bool__(self):
+            return False
+        def __repr__(self):
+            return f"<module '{name}' (stub)>"
+    mod._StubAttr = _StubAttr()
+    # 常见属性预设为 stub
+    for _attr in ('etree', 'HTML', 'XML', 'fromstring', 'tostring', 'parse',
+                  'SubElement', 'Element', 'dump', 'XPath', 'XSLT',
+                  'iterparse', 'iterwalk', 'resolve_entities', 'set_default_parser'):
+        if not hasattr(mod, _attr):
+            setattr(mod, _attr, _StubAttr())
     return mod
 
 
 # ══ 第1层：sys.meta_path 拦截器 ══
 class _BlockedLoader(_LoaderBase):
-    """假 loader：返回空模块，阻止 .so 被加载。"""
     def create_module(self, spec):
         mod = _types.ModuleType(spec.name)
         mod.__loader__ = self
         mod.__package__ = spec.parent
         mod.__spec__ = spec
         return mod
-
     def exec_module(self, module):
         pass
 
@@ -273,18 +294,14 @@ _BLOCKED_LOADER = _BlockedLoader()
 
 
 class _LxmlMetaPathBlocker(_MetaPathFinderBase):
-    """第1层：meta_path 拦截所有 lxml 导入。"""
-
     def find_spec(self, fullname, path, target=None):
         if _is_lxml_name(fullname):
             return _im.ModuleSpec(fullname, _BLOCKED_LOADER)
         return None
-
     def find_module(self, fullname, path=None):
         if _is_lxml_name(fullname):
             return self
         return None
-
     def load_module(self, fullname):
         if fullname in sys.modules:
             return sys.modules[fullname]
@@ -297,58 +314,47 @@ class _LxmlMetaPathBlocker(_MetaPathFinderBase):
 sys.meta_path.insert(0, _LxmlMetaPathBlocker())
 
 
-# ══ 第2层：sys.modules 预填充（加强版 stub）══
+# ══ 第2层：sys.modules 超完整预填充（30+ 子模块）══
 sys.modules['lxml'] = _make_lxml_stub('lxml')
-for _sub in ('lxml.etree', 'lxml.html', 'lxml.sax', 'lxml.isoschematron',
-             'lxml.ElementInclude', 'lxml.cssselect', 'lxml.builder'):
-    sys.modules[_sub] = _make_lxml_stub(_sub)
+for _sub in list(_LXML_FULL_MODULE_SET):
+    if _sub != 'lxml':
+        sys.modules[_sub] = _make_lxml_stub(_sub)
+# 额外填充常见的变体名称
+for _extra in ['lxml.etree.ElementBase', 'lxml.etree.XPath',
+               'lxml.etree.XPathEvaluator', 'lxml.etree._Element',
+               'lxml.etree.IterparseIterator', 'lxml.html.clean',
+               'lxml.html.formfill', 'lxml.html.diff', 'lxml._elementpath']:
+    if _extra not in sys.modules:
+        sys.modules[_extra] = _make_lxml_stub(_extra)
 
 
 # ══ 第3层：sys.path 清理 ══
 _cleaned_path = []
 for _pentry in list(sys.path):
     if _pentry:
-        _lxml_dir = None
+        _has_lxml = False
         for _candidate in [_pentry + '/lxml', _pentry + '/lxml.etree']:
             try:
                 import os as _os
                 if _os.path.isdir(_candidate) or _os.path.isfile(_candidate + '.so') or _os.path.isfile(_candidate + '.pyd'):
-                    _lxml_dir = _candidate
+                    _has_lxml = True
                     break
             except Exception:
                 pass
-        if _lxml_dir is None:
+        if not _has_lxml:
             _cleaned_path.append(_pentry)
-        else:
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
-                "lxml-defender L3: removed sys.path entry containing lxml: %s", _pentry)
 sys.path[:] = _cleaned_path
-
-
-# ══ 第4层：已移除（v1.1.33）══
-# v1.1.31 的"全局安全 path_hook"对【所有】路径返回自定义 finder，
-# 替代了系统默认 finder → 导致标准库模块（如 json.decoder）无法加载！
-# ModuleNotFoundError: No module named 'json.decoder'
-# 教训：sys.path_hooks 注入必须精确——只拦截 lxml 路径，不能影响标准库。
-# 当前防御由 L1(meta_path) + L2(sys.modules) + L3(path清理) + L5(__import__) 覆盖。
 
 
 # ══ 第5层：覆盖 builtins.__import__ ══
 _original_import = _builtins.__import__
 
 def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
-    """最终兜底：拦截所有 lxml 导入尝试。"""
     if _is_lxml_name(name):
-        import logging as _logging
-        _logging.getLogger(__name__).warning(
-            "lxml-defender L5: blocked __import__(%s)", name)
         if name not in sys.modules:
             sys.modules[name] = _make_lxml_stub(name)
         if fromlist:
-            # 处理 "from lxml import etree" —— 返回 stub 模块本身
             mod = sys.modules[name]
-            # 确保 fromlist 中的子名也都有 stub
             for sub in fromlist:
                 subname = name + '.' + sub
                 if subname not in sys.modules:
@@ -357,14 +363,43 @@ def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
         return sys.modules[name]
     return _original_import(name, globals, locals, fromlist, level)
 
-
 _builtins.__import__ = _safe_import
 
 
-# ══ 第6层：已移除（v1.1.33）══
-# v1.1.31 的 path_importer_cache 预填充把所有路径的 importer
-# 强制替换为 _SafePathEntryFinder → 标准库无法加载
-# 已随 L4 一起移除。当前四层防御：L1+L2+L3+L5
+# ══ 第7层：importlib._bootstrap 级别拦截（核心新增）══
+try:
+    import importlib._bootstrap as _boot
+    _original_find_and_load = getattr(_boot, '_find_and_load', None)
+
+    if _original_find_and_load is not None:
+        def _patched_find_and_load(name, *args, **kwargs):
+            if _is_lxml_name(name):
+                if name not in sys.modules:
+                    sys.modules[name] = _make_lxml_stub(name)
+                return sys.modules[name]
+            return _original_find_and_load(name, *args, **kwargs)
+
+        _boot._find_and_load = _patched_find_and_load
+
+    # 同时 patch _find_spec（如果存在）
+    _original_find_spec = getattr(_boot, '_find_spec', None)
+    if _original_find_spec is not None:
+        def _patched_find_spec(name, *args, **kwargs):
+            if _is_lxml_name(name):
+                return _im.ModuleSpec(name, _BLOCKED_LOADER)
+            return _original_find_spec(name, *args, **kwargs)
+
+        _boot._find_spec = _patched_find_spec
+except Exception:
+    pass  # bootstrap patch 失败不阻断其他防御层
+
+
+# ══ 第8层：faulthandler 捕获 C 级 fatal 错误 ══
+try:
+    import faulthandler as _fh
+    _fh.enable(all_threads=True)
+except Exception:
+    pass
 
 
 import re

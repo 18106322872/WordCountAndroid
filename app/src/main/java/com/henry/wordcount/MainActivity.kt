@@ -890,14 +890,14 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFi
     val originalName = resolveDisplayName(context, uri)
     Log.d("WordCount", "copyUriToCache originalName='$originalName'")
 
-    // v1.1.31 改进：放宽非理想文件名检测，确保编号模式名称走内部标题提取。
+    // v1.1.35 放宽检测：确保各种无意义文件名都走内部标题提取。
     // 检测范围：
     //   A. hash/UUID/内部ID（looksLikeHashString / isSuspiciousFilename）
-    //   B. 编号模式："1-1"、"1-(1)"、"图1"、"Sheet1" 等
+    //   B. 编号模式："1-1"、"1-(1)"、"图1"、"Sheet1"、"1-1)." 等
     //   C. 通用名前缀（"Word文档"/"PDF文档" 等）
-    //   D. 短名字（basename <= 4 字符）
+    //   D. 短名字（basename <= 5 字符，从4放宽到5）
     val baseName = originalName.substringBeforeLast('.').ifBlank { originalName }
-    val isShortOrGeneric = baseName.length <= 4
+    val isShortOrGeneric = baseName.length <= 5  // v1.1.35: 4→5，捕获 "1-1)" 等编号模式
             || looksLikeHashString(originalName)
             || isSuspiciousFilename(originalName)
             || isNumberedOrGenericName(originalName)
@@ -1075,6 +1075,21 @@ private fun tryExtractInternalTitle(file: File, currentName: String): String {
     } catch (_: Throwable) {
         currentName
     }
+    // v1.1.35: 如果提取后仍然是通用名（如 "PDF文档.pdf"），则生成带序号的友好名
+    // 避免多个文件都显示 "PDF文档.pdf" 无法区分
+    if (currentName.startsWith("PDF文档") || currentName.startsWith("Word文档") ||
+        currentName.startsWith("Excel表格") || currentName.startsWith("PPT演示") ||
+        currentName.startsWith("文本文件") || currentName.startsWith("图片") ||
+        currentName.startsWith("文档") || currentName.startsWith("压缩包")) {
+        // 用文件大小+修改时间的哈希生成短序号，保证同一文件始终同名、不同文件不同名
+        val sig = (file.length() xor (file.lastModified() / 1000L)).toInt()
+        val shortId = if (sig < 0) -sig else sig
+        val base = currentName.substringBeforeLast('.')
+        val e = currentName.substringAfterLast('.', "")
+        val suffix = if (e.isNotBlank()) ".$e" else ""
+        return "${base}_${shortId.toString(36).take(4)}$suffix"
+    }
+    return currentName
 }
 
 /**
