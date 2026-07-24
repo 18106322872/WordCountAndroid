@@ -12,7 +12,7 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 /**
- * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.56 重构版）。
+ * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.58 修复版）。
  *
  * 设计目标：输出文档与 Word「审阅-比较」结果一致。
  * 核心思路：
@@ -90,7 +90,7 @@ object DocxComparator {
         var repCount = 0
         var totalInsChars = 0       // 新增字符（计入修改字数）
         var totalDelChars = 0       // 删除字符（仅统计，不计入modifiedChars）
-        var eqBlackChars = 0        // 未改动字符（从修订档总字数中扣除）
+        var eqBlackChars = 0        // 未改动字符（EQ 段落全字数 + REP 段落中 equal 部分）
         val bodyParts = mutableListOf<String>()
 
         for (op in ops) {
@@ -116,7 +116,7 @@ object DocxComparator {
                 }
                 "REP" -> {
                     // 相似段落 → 内联字符级 diff（蓝字插入+红字删除）
-                    val (pXml, delC, insC) = buildDiffParagraphXml(
+                    val (pXml, delC, insC, eqC) = buildDiffParagraphXml(
                         origParas[op.oi].xml,
                         origParas[op.oi].text,
                         revParas[op.rj].text,
@@ -125,6 +125,7 @@ object DocxComparator {
                     bodyParts.add(pXml)
                     totalDelChars += delC
                     totalInsChars += insC
+                    eqBlackChars += eqC   // REP 段落中未修改的部分也是"黑字"
                     repCount++
                 }
             }
@@ -224,25 +225,59 @@ object DocxComparator {
             }
         }
 
-        // ── 按文档逻辑顺序重排（修订档顺序驱动）──
-        // EQ/REP/INS 按 rev 下标排序，DEL 按 orig 下标+0.5 排序
-        ops.sortWith(compareBy(
-            { op ->
-                when (op.tag) {
-                    "EQ", "REP", "INS" -> op.rj.toDouble()
-                    "DEL" -> op.oi + 0.5
-                    else -> 999.0
-                }
-            },
-            { op -> 
-                when (op.tag) {
-                    "DEL" -> 1  // DEL 在同位置排后面
-                    else -> 0
-                }
-            }
-        ))
+        // ── 双指针归并排序（以修订档顺序为骨架）──
+        // 维护 orig(i) / rev(j) 两个指针同步前进，保证输出顺序与 Word 一致
+        val sortedOps = mergeInDocumentOrder(ops, n, m)
 
-        return ops
+        return sortedOps
+    }
+
+    /**
+     * 双指针归并：按文档逻辑顺序重排操作序列。
+     * 以修订档段落顺序为骨架，DEL 段落在其原文档对应位置穿插。
+     * 核心原则：修订档顺序优先（INS 先于 DEL 输出）。
+     */
+    private fun mergeInDocumentOrder(ops: List<CmpOp>, n: Int, m: Int): List<CmpOp> {
+        // 构建查找表
+        val opByOi = mutableMapOf<Int, CmpOp>()   // oi → op (含 DEL)
+        val opByRj = mutableMapOf<Int, CmpOp>()   // rj → op (含 EQ/REP/INS)
+        for (op in ops) {
+            if (op.oi >= 0) opByOi[op.oi] = op
+            if (op.rj >= 0) opByRj[op.rj] = op
+        }
+
+        val result = mutableListOf<CmpOp>()
+        var i = 0
+        var j = 0
+        while (i < n || j < m) {
+            // 优先检查 Oi ↔ Rj 是否有匹配（EQ 或 REP）
+            val matchedAtIj = if (i < n && j < m) { val op = opByOi[i]; if (op != null && op.rj == j && op.tag in listOf("EQ", "REP")) op else null } else null
+
+            if (matchedAtIj != null) {
+                // 有匹配：输出匹配对，双指针前进
+                result.add(matchedAtIj)
+                i++; j++
+            } else if (j < m && opByRj[j]?.tag == "INS") {
+                // 修订档当前位置是新增段落 → 优先输出（修订档顺序驱动）
+                result.add(opByRj[j]!!)
+                j++
+            } else if (i < n && opByOi[i]?.tag == "DEL") {
+                // 原文档当前位置是被删除段落
+                result.add(opByOi[i]!!)
+                i++
+            } else if (i < n && !opByOi.containsKey(i)) {
+                // orig 位置无操作（空段落等），跳过
+                i++
+            } else if (j < m && !opByRj.containsKey(j)) {
+                // rev 位置无操作，跳过
+                j++
+            } else {
+                // 兜底：任一指针前进防止死循环
+                if (j < m) j++ else if (i < n) i++ else break
+            }
+        }
+
+        return result
     }
 
     /**
@@ -320,6 +355,9 @@ object DocxComparator {
     // ══════════════════════════════════════════════════════
 
     private data class Quad(val tag: String, val i1: Int, val i2: Int, val j1: Int, val j2: Int)
+
+    /** 四元组，用于 buildDiffParagraphXml 返回 (xml, delChars, insChars, equalChars) */
+    private data class Quadruple<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
 
     private fun computeDiffText(a: List<String>, b: List<String>, useSimilarity: Boolean): List<Quad> {
         val m = a.size
@@ -433,18 +471,20 @@ object DocxComparator {
     private fun buildDiffParagraphXml(
         origXml: String, origText: String, revText: String,
         author: String, date: String, ridSeq: IntArray
-    ): Triple<String, Int, Int> {
+    ): Quadruple<String, Int, Int, Int> {
         val runs = extractWRuns(origXml)
         val ops = charDiff(origText, revText)
 
         val sb = StringBuilder("<w:p>")
         var delChars = 0
         var insChars = 0
+        var equalChars = 0
         for (op in ops) {
             when (op.tag) {
                 "equal" -> {
                     val seg = extractRunsInRange(runs, op.i1, op.i2)
                     if (seg.isNotEmpty()) sb.append(seg)
+                    equalChars += (op.i2 - op.i1)
                 }
                 "delete" -> {
                     val seg = extractRunsInRange(runs, op.i1, op.i2)
@@ -479,7 +519,7 @@ object DocxComparator {
             }
         }
         sb.append("</w:p>")
-        return Triple(sb.toString(), delChars, insChars)
+        return Quadruple(sb.toString(), delChars, insChars, equalChars)
     }
 
     private fun charDiff(textO: String, textR: String): List<Quad> {
