@@ -259,8 +259,6 @@ object DocxComparator {
         return lcsRatio(a, b)
     }
 
-    }
-
     /**
      * 两段落是否应作为「相似配对」参与内联修订：
      *  - 完全相同 → true
