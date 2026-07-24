@@ -201,6 +201,17 @@ private fun guessExt(context: android.content.Context, uri: Uri): String {
     return ""
 }
 
+/** v1.1.50: 为文件名生成稳定的短hash（用于通用名后缀，区分同名文件） */
+private fun absoluteHashCode(s: String): Int {
+    var h = 0
+    for (c in s) {
+        h = 31 * h + c.code
+        // 防止溢出为负数时显示问题（取绝对值但保留分布）
+        if (h == Int.MIN_VALUE) h = 0 else if (h < 0) h = -h
+    }
+    return h
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun WordCountApp(initialUris: List<Uri>) {
@@ -918,8 +929,10 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFi
             else -> "文档"
         }
         val safeExt = if (ext.isNotBlank()) ".$ext" else ""
-        val result = "$typeLabel$safeExt"
-        Log.w("WordCount", "copyUriToCache 安全网触发: '$originalName' → '$result' (等待内部标题提取)")
+        // v1.1.50: 用文件路径hash生成短后缀（4位hex），确保同名文件可区分
+        val shortHash = absoluteHashCode(originalName).toString(16).takeLast(4).uppercase()
+        val result = "${typeLabel}_${shortHash}${safeExt}"
+        Log.w("WordCount", "copyUriToCache 安全网触发: '$originalName' → '$result' (baseName='$baseName' len=${baseName.length})")
         result
     } else {
         originalName
@@ -1199,7 +1212,8 @@ private fun addFiles(
             busySet(true)
             cachedFileCounter = 0  // 重置兜底命名计数器
             try {
-                runCatching { PythonEngine.start(context) }
+                val pyStartResult = runCatching { PythonEngine.start(context) }
+                Log.d("WordCount", "PythonEngine.start: ${if (pyStartResult.isSuccess) "OK" else "FAIL: ${pyStartResult.exceptionOrNull()?.message}"}")
                 val cachedFiles = uris.map { copyUriToCache(context, it) }
                 val files = cachedFiles.map { it.file }
             val imageFiles = mutableListOf<CachedFile>()
