@@ -6,7 +6,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.regex.Regex
+import kotlin.text.Regex
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
@@ -137,7 +137,7 @@ object DocxComparator {
             append("插入 $insCount 处(${totalInsChars}字) | 删除 $delCount 处(${totalDelChars}字) | 修改 $repCount 处")
         }
 
-        Log.d(TAG, "result: ins=$insCount($totalInsChars字) del=$delCount($totalDelChars字) rep=$repCount chars=$modifiedChars")
+        Log.d(TAG, "result: ins=$insCount(${totalInsChars}字) del=$delCount(${totalDelChars}字) rep=$repCount chars=$modifiedChars")
 
         return CompareResult(
             ok = true,
@@ -405,7 +405,7 @@ object DocxComparator {
                     while (ci < aChunk.size && cji < bChunk.size && eq(aChunk[ci], bChunk[cji])) { ci++; cji++ }
                     result.add(Quad("equal", ai + si, ai + ci, bi + sji, bi + cji))
                 } else {
-                    val lookAhead = kotlin.math.min(25, aChunk.size - ci, bChunk.size - cji)
+                    val lookAhead = kotlin.math.min(25, kotlin.math.min(aChunk.size - ci, bChunk.size - cji))
                     var found = false
                     search@ for (di in 0..lookAhead) {
                         for (dj in 0..lookAhead) {
