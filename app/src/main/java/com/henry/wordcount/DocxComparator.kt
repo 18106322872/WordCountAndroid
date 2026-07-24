@@ -482,12 +482,14 @@ object DocxComparator {
     }
 
     // ════════════════════════════════════════════════════════
-    //  Diff 算法（LCS + 回溯，正确生成 opcodes）
+    // ════════════════════════════════════════════════════════
+    //  Diff 算法（标准 LCS DP + 回溯 → opcodes）
     // ════════════════════════════════════════════════════════
 
     /**
      * 计算两个列表的 diff opcodes。
-     * 使用标准 LCS 动态规划 + 回溯，正确处理所有情况。
+     * v1.1.40: 完全重写。标准 LCS DP → 回溯 → 合并 ranges。
+     * 消除 v1.1.39 的多重嵌套/废弃代码路径，确保正确且高效。
      */
     private fun <T> computeDiff(a: List<T>, b: List<T>): List<Quadruple> {
         val m = a.size
@@ -495,239 +497,112 @@ object DocxComparator {
         if (m == 0) return if (n == 0) emptyList() else listOf(Quadruple("insert", 0, 0, 0, n))
         if (n == 0) return listOf(Quadruple("delete", 0, m, 0, 0))
 
-        // 如果任一列表为空，直接返回
-        // 使用滚动数组计算 LCS 长度（用于判断是否有差异）
-        // 但回溯需要完整矩阵，对于大列表改用启发式方法
-        if (m * n <= 100000) {
-            // 小到中等规模：使用完整 DP 表 + 回溯
-            return computeDiffFullDp(a, b)
-        } else {
-            // 大规模：使用优化的 Myers/Hirschberg 或分块策略
-            return computeDiffLarge(a, b)
-        }
-    }
+        // 大规模输入分块处理（避免 O(m*n) 内存）
+        if (m.toLong() * n.toLong() > 200000L) return computeDiffChunked(a, b)
 
-    /**
-     * 完整 DP 表 + 回溯（适用于 m*n <= 100000 的场景）。
-     */
-    private fun <T> computeDiffFullDp(a: List<T>, b: List<T>): List<Quadruple> {
-        val m = a.size
-        val n = b.size
-
-        // DP 表：dp[i][j] = LCS length of a[0..i) and b[0..j)
+        // ══ 标准 LCS DP 表 ══
         val dp = Array(m + 1) { IntArray(n + 1) }
         for (i in 1..m) {
+            val ai = a[i - 1]
             for (j in 1..n) {
-                dp[i][j] = if (a[i - 1] == b[j - 1]) dp[i - 1][j - 1] + 1
+                dp[i][j] = if (ai == b[j - 1]) dp[i - 1][j - 1] + 1
                            else maxOf(dp[i - 1][j], dp[i][j - 1])
             }
         }
 
-        // 回溯生成 opcodes
-        val opcodes = mutableListOf<Quadruple>()
-        var i = m
-        var j = n
-        val eqI = mutableListOf<Int>()
-        val eqJ = mutableListOf<Int>()
-        val ops = mutableListOf<String>()  // 从后往前记录操作
-
+        // ══ 回溯收集反向操作 ══
+        val revOps = mutableListOf<String>() // "eq" / "ins" / "del"
+        var i = m; var j = n
         while (i > 0 || j > 0) {
             when {
-                i > 0 && j > 0 && a[i - 1] == b[j - 1] -> {
-                    eqI.add(i - 1); eqJ.add(j - 1)
-                    ops.add("eq"); i--; j--
-                }
-                j > 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) -> {
-                    ops.add("ins"); j--
-                }
-                else -> {
-                    ops.add("del"); i--
-                }
+                i > 0 && j > 0 && a[i - 1] == b[j - 1] -> { revOps.add("eq"); i--; j-- }
+                j > 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) -> { revOps.add("ins"); j-- }
+                else -> { revOps.add("del"); i-- }
             }
         }
 
-        // 反转并合并相邻相同操作为 opcode ranges
-        ops.reverse(); eqI.reverse(); eqJ.reverse()
-
+        // ══ 反转 + 合并相邻操作为 opcode ranges ══
+        revOps.reverse()
+        val result = mutableListOf<Quadruple>()
         var idx = 0
-        val eqIdx = 0
-        while (idx < ops.size) {
-            val op = ops[idx]
-            when (op) {
+        var ci = 0; var cj = 0  // 游标
+
+        while (idx < revOps.size) {
+            when (revOps[idx]) {
                 "eq" -> {
-                    val start = idx
-                    while (idx < ops.size && ops[idx] == "eq") idx++
-                    // 找到对应的 equal range
-                    // eqI/eqJ 中对应位置的元素
-                    val eqStart = start
-                    val eqEnd = idx
-                    // 我们需要重建正确的 i1,i2,j1,j2
-                    // 这里用简化方式：从上下文推断
+                    val si = ci; val sj = cj
+                    while (idx < revOps.size && revOps[idx] == "eq") { ci++; cj++; idx++ }
+                    result.add(Quadruple("equal", si, ci, sj, cj))
                 }
                 "ins" -> {
-                    val startJ = /* 推断 */ 0
-                    val endJ = startJ + 1
-                    // ... 这变得复杂了
+                    val sj = cj
+                    while (idx < revOps.size && revOps[idx] == "ins") { cj++; idx++ }
+                    result.add(Quadruple("insert", ci, ci, sj, cj))
                 }
-                "del" -> { idx++ }
+                "del" -> {
+                    val si = ci
+                    while (idx < revOps.size && revOps[idx] == "del") { ci++; idx++ }
+                    result.add(Quadruple("delete", si, ci, cj, cj))
+                }
                 else -> idx++
             }
         }
-
-        // 回溯方法太复杂且容易出错，改用更简单的方法：
-        // 直接从 DP 表重新构建 opcodes
-        return buildOpcodesFromDp(a, b, dp)
-    }
-
-    /**
-     * 从 DP 表正确构建 opcodes（前向扫描）。
-     */
-    private fun <T> buildOpcodesFromDp(a: List<T>, b: List<T>, dp: Array<IntArray>): List<Quadruple> {
-        val m = a.size
-        val n = b.size
-        val result = mutableListOf<Quadruple>()
-        var i = 0
-        var j = 0
-
-        while (i < m || j < n) {
-            if (i < m && j < n && a[i] == b[j]) {
-                // equal: 尽可能延伸
-                val startI = i; val startJ = j
-                while (i < m && j < n && a[i] == b[j]) { i++; j++ }
-                result.add(Quadruple("equal", startI, i, startJ, j))
-            } else {
-                // 不匹配：决定是 delete / insert / replace
-                // 向前看找下一个匹配点
-                var bestDel = -1
-                var bestIns = -1
-                var bestDist = Int.MAX_VALUE
-                val maxLook = minOf(50, m - i, n - j)
-
-                // 尝试在 a[i+di] == b[j+dj] 处找到下一个匹配
-                outer@ for (di in 0..maxLook) {
-                    for (dj in 0..maxLook) {
-                        if (di == 0 && dj == 0) continue
-                        val ai = i + di
-                        val bj = j + dj
-                        if (ai < m && bj < n && a[ai] == b[bj]) {
-                            val dist = di + dj
-                            if (dist < bestDist) {
-                                bestDel = di; bestIns = dj; bestDist = dist
-                                // 优先选择纯删除或纯插入（di=0 或 dj=0）
-                                if (di == 0 || dj == 0) break@outer
-                            }
-                        }
-                    }
-                }
-
-                if (bestDist < Int.MAX_VALUE && bestDist <= maxLook) {
-                    if (bestIns == 0) {
-                        // 纯删除
-                        result.add(Quadruple("delete", i, i + bestDel, j, j))
-                        i += bestDel
-                    } else if (bestDel == 0) {
-                        // 纯插入
-                        result.add(Quadruple("insert", i, i, j, j + bestIns))
-                        j += bestIns
-                    } else {
-                        // 替换
-                        result.add(Quadruple("replace", i, i + bestDel, j, j + bestIns))
-                        i += bestDel; j += bestIns
-                    }
-                } else {
-                    // 没找到匹配：将剩余全部作为 replace
-                    val endI = m; val endJ = n
-                    if (i < endI || j < endJ) {
-                        result.add(Quadruple("replace", i, endI, j, endJ))
-                    }
-                    i = endI; j = endJ
-                }
-            }
-        }
-
         return result
     }
 
     /**
-     * 大规模列表的 diff（分块处理避免 O(m*n) 内存）。
+     * 大规模分块 diff（m*n > 200000 时使用）。
      */
-    private fun <T> computeDiffLarge(a: List<T>, b: List<T>): List<Quadruple> {
-        // 分块策略：将大列表分成块，逐块比较
-        val chunkSize = 500
+    private fun <T> computeDiffChunked(a: List<T>, b: List<T>): List<Quadruple> {
+        val chunkSize = 300
         val result = mutableListOf<Quadruple>()
-        var ai = 0
-        var bi = 0
-
+        var ai = 0; var bi = 0
         while (ai < a.size || bi < b.size) {
-            val aChunk = a.subList(ai, minOf(ai + chunkSize, a.size))
-            val bChunk = b.subList(bi, minOf(bi + chunkSize, b.size))
-
-            // 对每个块尝试在对方中寻找最佳匹配位置
-            // 简化：直接用滑动窗口找最佳对齐
-            val chunkOpcodes = computeDiffChunk(aChunk, bChunk, ai, bi)
-            result.addAll(chunkOpcodes)
-
-            // 移动到未覆盖的区域
-            val lastOp = chunkOpcodes.lastOrNull()
-            if (lastOp != null) {
-                ai = lastOp.i2; bi = lastOp.j2
-            } else {
-                ai += chunkSize; bi += chunkSize
+            val aEnd = minOf(ai + chunkSize, a.size)
+            val bEnd = minOf(bi + chunkSize, b.size)
+            val aChunk = a.subList(ai, aEnd)
+            val bChunk = b.subList(bi, bEnd)
+            if (aChunk.isEmpty() && bChunk.isNotEmpty()) {
+                result.add(Quadruple("insert", ai, ai, bi, bEnd)); bi = bEnd; continue
             }
-        }
-
-        return result
-    }
-
-    private fun <T> computeDiffChunk(aChunk: List<T>, bChunk: List<T>, offsetA: Int, offsetB: Int): List<Quadruple> {
-        // 对块使用简化但正确的 diff
-        val a = aChunk.toList()
-        val b = bChunk.toList()
-        val m = a.size; val n = b.size
-        if (m == 0) return if (n == 0) emptyList() else listOf(Quadruple("insert", offsetA, offsetA, offsetB, offsetB + n))
-        if (n == 0) return listOf(Quadruple("delete", offsetA, offsetA + m, offsetB, offsetB))
-
-        val result = mutableListOf<Quadruple>()
-        var i = 0; var j = 0
-
-        while (i < m || j < n) {
-            if (i < m && j < n && a[i] == b[j]) {
-                val si = i; val sj = j
-                while (i < m && j < n && a[i] == b[j]) { i++; j++ }
-                result.add(Quadruple("equal", offsetA + si, offsetA + i, offsetB + sj, offsetB + j))
-            } else {
-                // 不匹配：查找下一个相等点
-                var found = false
-                val lookAhead = minOf(30, m - i, n - j)
-                search@ for (di in 0..lookAhead) {
-                    for (dj in 0..lookAhead) {
-                        if (di == 0 && dj == 0) continue
-                        val ai2 = i + di; val bj2 = j + dj
-                        if (ai2 < m && bj2 < n && a[ai2] == b[bj2]) {
-                            if (dj == 0) {
-                                result.add(Quadruple("delete", offsetA + i, offsetA + ai2, offsetB + j, offsetB + j))
-                                i = ai2
-                            } else if (di == 0) {
-                                result.add(Quadruple("insert", offsetA + i, offsetA + i, offsetB + j, offsetB + bj2))
-                                j = bj2
-                            } else {
-                                result.add(Quadruple("replace", offsetA + i, offsetA + ai2, offsetB + j, offsetB + bj2))
-                                i = ai2; j = bj2
+            if (bChunk.isEmpty() && aChunk.isNotEmpty()) {
+                result.add(Quadruple("delete", ai, aEnd, bi, bi)); ai = aEnd; continue
+            }
+            if (aChunk.isEmpty() && bChunk.isEmpty()) break
+            // 块内贪心匹配
+            var ci = 0; var cji = 0
+            while (ci < aChunk.size || cji < bChunk.size) {
+                if (ci < aChunk.size && cji < bChunk.size && aChunk[ci] == bChunk[cji]) {
+                    val si = ci; val sji = cji
+                    while (ci < aChunk.size && cji < bChunk.size && aChunk[ci] == bChunk[cji]) { ci++; cji++ }
+                    result.add(Quadruple("equal", ai + si, ai + ci, bi + sji, bi + cji))
+                } else {
+                    val lookAhead = minOf(20, aChunk.size - ci, bChunk.size - cji)
+                    var found = false
+                    search@ for (di in 0..lookAhead) {
+                        for (dj in 0..lookAhead) {
+                            if (di == 0 && dj == 0) continue
+                            val ai2 = ci + di; val bj2 = cji + dj
+                            if (ai2 < aChunk.size && bj2 < bChunk.size && aChunk[ai2] == bChunk[bj2]) {
+                                if (dj == 0) { result.add(Quadruple("delete", ai + ci, ai + ai2, bi + cji, bi + cji)); ci = ai2 }
+                                else if (di == 0) { result.add(Quadruple("insert", ai + ci, ai + ci, bi + cji, bi + bj2)); cji = bj2 }
+                                else { result.add(Quadruple("replace", ai + ci, ai + ai2, bi + cji, bi + bj2)); ci = ai2; cji = bj2 }
+                                found = true; break@search
                             }
-                            found = true; break@search
                         }
                     }
-                }
-                if (!found) {
-                    // 剩余全部不匹配
-                    result.add(Quadruple("replace", offsetA + i, offsetA + m, offsetB + j, offsetB + n))
-                    i = m; j = n
+                    if (!found) {
+                        if (ci < aChunk.size || cji < bChunk.size)
+                            result.add(Quadruple("replace", ai + ci, ai + aChunk.size, bi + cji, bi + bChunk.size))
+                        ci = aChunk.size; cji = bChunk.size
+                    }
                 }
             }
+            ai = aEnd; bi = bEnd
         }
-
         return result
     }
+
 
     private fun mergeReplace(opcodes: List<Quadruple>): List<Quadruple> {
         val result = mutableListOf<Quadruple>()
@@ -773,8 +648,7 @@ object DocxComparator {
         val normO = normalizeTokens(toksO, caseSensitive, ignoreWs)
         val normR = normalizeTokens(toksR, caseSensitive, ignoreWs)
 
-        val opcodes = buildOpcodesFromDp(normO.map { it.norm }, normR.map { it.norm },
-            computeDpTable(normO.map { it.norm }, normR.map { it.norm }))
+        val opcodes = computeDiff(normO.map { it.norm }, normR.map { it.norm })
 
         val sb = StringBuilder()
         sb.append("<w:p xmlns:w=\"$W\">")
@@ -810,16 +684,6 @@ object DocxComparator {
         }
         sb.append("</w:p>")
         return Pair(sb.toString(), delRanges)
-    }
-
-    /** 计算 DP 表供回溯使用 */
-    private fun computeDpTable(a: List<String>, b: List<String>): Array<IntArray> {
-        val m = a.size; val n = b.size
-        val dp = Array(m + 1) { IntArray(n + 1) }
-        for (i in 1..m) for (j in 1..n) {
-            dp[i][j] = if (a[i - 1] == b[j - 1]) dp[i - 1][j - 1] + 1 else maxOf(dp[i - 1][j], dp[i][j - 1])
-        }
-        return dp
     }
 
     private fun tokenize(text: String, level: String): List<Token> {

@@ -1766,14 +1766,14 @@ fun CompareScreen(
                     } else {
                         snackbar.showSnackbar("比较失败：${res.error ?: "未知错误"}")
                     }
-                    busy = false
                 }
             } catch (e: Throwable) {
                 withContext(Dispatchers.Main) {
                     val detail = e.message ?: e.javaClass.simpleName
                     snackbar.showSnackbar("比较异常 [${e.javaClass.simpleName}]：${detail.take(300)}")
-                    busy = false
                 }
+            } finally {
+                withContext(Dispatchers.Main) { busy = false }
             }
         }
     }
@@ -1829,10 +1829,10 @@ fun CompareScreen(
         // 结果
         resultJson?.let { rj ->
             val j = org.json.JSONObject(rj)
-            val modChars = j.optInt("modified_sentence_chars", 0)
-            val ins = j.optInt("insertions", 0)
-            val del = j.optInt("deletions", 0)
-            val rep = j.optInt("replacements", 0)
+            val modChars = j.optInt("modifiedChars", 0)
+            val ins = j.optInt("insCount", 0)
+            val del = j.optInt("delCount", 0)
+            val rep = j.optInt("repCount", 0)
             Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("比较完成", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
