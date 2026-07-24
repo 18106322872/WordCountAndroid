@@ -12,7 +12,7 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 /**
- * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.59 修复版）。
+ * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.60 子串优先匹配版）。
  *
  * 设计目标：输出文档与 Word「审阅-比较」结果一致。
  * 核心思路：
@@ -39,7 +39,7 @@ object DocxComparator {
         val summary: String = ""
     )
 
-    /** 对齐后的一次操作。tag: EQ / REP / DEL / INS */
+    /** 对齐后的一次操作。tag: EQ / SUB_EQ / REP / DEL / INS */
     data class CmpOp(
         val tag: String,
         val oi: Int,   // 原文档段落下标（-1 表示无）
@@ -47,6 +47,19 @@ object DocxComparator {
         val pos: Double,
         val gap: String = ""   // SDEL 时承载被删除的原文片段
     )
+
+    /** 跟踪 orig 段落的使用状态（支持部分消耗）*/
+    private data class OrigState(
+        val index: Int,
+        val usedRanges: MutableList<Pair<Int, Int>> = mutableListOf(),
+        var fullyUsed: Boolean = false
+    ) {
+        fun markUsed(start: Int, end: Int) {
+            usedRanges.add(Pair(start, end))
+            val totalUsed = usedRanges.sumOf { it.second - it.first }
+            fullyUsed = (totalUsed >= /* textLen - computed separately */ 0)
+        }
+    }
 
     data class WRun(val start: Int, val end: Int, val runXml: String)
 
@@ -95,10 +108,10 @@ object DocxComparator {
 
         for (op in ops) {
             when (op.tag) {
-                "EQ" -> {
-                    // 完全相同的段落 → 原样输出（黑字不变）
-                    bodyParts.add(origParas[op.oi].xml)
-                    eqBlackChars += origParas[op.oi].text.length
+                "EQ", "SUB_EQ" -> {
+                    // 完全相同/子串匹配的段落 → 按修订档原样输出（黑字不变）
+                    bodyParts.add(revParas[op.rj].xml)
+                    eqBlackChars += revParas[op.rj].text.length
                 }
                 "DEL" -> {
                     // 原档中被删除的段落（仅非空段落）
@@ -155,71 +168,108 @@ object DocxComparator {
     }
 
     // ══════════════════════════════════════════════════════
-    //  段落对齐（exact → greedy REP → DEL/INS → 文档序重排）
+    //  段落对齐（v1.1.60: 子串优先匹配）
+    //  Phase1: Exact EQ → Phase2: Substring EQ → Phase3: REP → Phase4: DEL/INS
     // ══════════════════════════════════════════════════════
 
     private fun alignParagraphs(origParas: List<Para>, revParas: List<Para>): List<CmpOp> {
         val n = origParas.size
         val m = revParas.size
-        val oUsed = BooleanArray(n)
+        val oStates = Array(n) { OrigState(it) }
         val rUsed = BooleanArray(m)
         val ops = mutableListOf<CmpOp>()
 
         // ── Phase 1: Exact matches → EQ（完全相同的段落，黑字不变）──
-        for (i in 0 until n) {
-            if (oUsed[i]) continue
-            val ot = origParas[i].text
-            if (ot.isEmpty()) continue
-            for (j in 0 until m) {
-                if (rUsed[j]) continue
-                if (ot == revParas[j].text) {
+        for (j in 0 until m) {
+            if (rUsed[j]) continue
+            val rt = revParas[j].text
+            if (rt.isEmpty()) continue
+            for (i in 0 until n) {
+                if (oStates[i].fullyUsed) continue
+                if (origParas[i].text == rt) {
                     ops.add(CmpOp("EQ", i, j, 0.0))
-                    oUsed[i] = true
+                    oStates[i].fullyUsed = true
                     rUsed[j] = true
                     break
                 }
             }
         }
 
-        // ── Phase 2: Greedy best-match → REP（相似段落做内联字符级 diff）──
-        val remOIndices = mutableListOf<Int>()
-        val remRIndices = mutableListOf<Int>()
-        for (i in 0 until n) if (!oUsed[i] && origParas[i].text.isNotEmpty()) remOIndices.add(i)
-        for (j in 0 until m) if (!rUsed[j] && revParas[j].text.isNotEmpty()) remRIndices.add(j)
+        // ── Phase 2: Substring EQ（rev段落是某个orig段落的子串 → 输出全黑）──
+        // 关键改进：短的 rev 段落如果完整包含于长 orig 段落中，
+        // 优先匹配为 EQ(全黑)，避免后续把长 orig 整体配为 REP 导致子串内容重复输出。
+        val subEqOps = mutableListOf<CmpOp>()
+        // 按 rev 段落长度排序（短的优先匹配）
+        val revByLen = (0 until m)
+            .filter { !rUsed[it] && revParas[it].text.isNotEmpty() }
+            .sortedBy { revParas[it].text.length }
 
-        // 构建所有候选配对（相似度 ≥ 阈值）
+        for (rj in revByLen) {
+            if (rUsed[rj]) continue
+            val rjText = revParas[rj].text
+            var bestI = -1
+            var bestPos = -1
+            for (i in 0 until n) {
+                if (oStates[i].fullyUsed) continue
+                val oiText = origParas[i].text
+                if (oiText == rjText) continue  // Phase1 已处理
+                val pos = oiText.indexOf(rjText)
+                if (pos >= 0) {
+                    bestI = i
+                    bestPos = pos
+                    break
+                }
+            }
+            if (bestI >= 0) {
+                ops.add(CmpOp("SUB_EQ", bestI, rj, 0.0))
+                oStates[bestI].markUsed(bestPos, bestPos + rjText.length)
+                // 检查是否已完全消耗
+                val totalUsed = oStates[bestI].usedRanges.sumOf { it.second - it.first }
+                oStates[bestI].fullyUsed = (totalUsed >= origParas[bestI].text.length)
+                rUsed[rj] = true
+            }
+        }
+
+        // ── Phase 3: Containment REP + Similarity REP ──
         val candidates = mutableListOf<Triple<Double, Int, Int>>()
         val SIM_THRESHOLD = 0.35
-        for (oi in remOIndices) {
-            for (rj in remRIndices) {
-                val s = similarity(origParas[oi].text, revParas[rj].text)
+        for (i in 0 until n) {
+            if (oStates[i].fullyUsed) continue
+            val oiText = origParas[i].text
+            if (oiText.isEmpty()) continue
+            for (j in 0 until m) {
+                if (rUsed[j]) continue
+                val rjText = revParas[j].text
+                if (rjText.isEmpty()) continue
+                val s = similarity(oiText, rjText)
                 if (s >= SIM_THRESHOLD) {
-                    candidates.add(Triple(s, oi, rj))
+                    val hasContainment = oiText in rjText || rjText in oiText
+                    candidates.add(Triple(s, i, j))
                 }
             }
         }
-        // 按相似度降序排列
         candidates.sortByDescending { it.first }
 
-        // 贪心分配：跳过极端长度比（避免把子串误配为REP）
-        // 但【包含关系】例外：如果一方完全包含另一方，必须配为REP，
-        // 否则拆成 DEL+INS 会导致相同内容重复输出
         for ((s, oi, rj) in candidates) {
-            if (oUsed[oi] || rUsed[rj]) continue
+            if (oStates[oi].fullyUsed || rUsed[rj]) continue
             val otLen = origParas[oi].text.length
             val rtLen = revParas[rj].text.length
             val hasContainment = origParas[oi].text in revParas[rj].text ||
                                   revParas[rj].text in origParas[oi].text
-            val lengthOk = (rtLen >= otLen * 0.4 && otLen >= rtLen * 0.4)
-            if (!lengthOk && !hasContainment) continue  // 无包含关系且长度悬殊 → 跳过
+            val lengthOk = (rtLen >= otLen * 0.4 || otLen >= rtLen * 0.4)
+            if (!lengthOk && !hasContainment) continue
             ops.add(CmpOp("REP", oi, rj, 0.0))
-            oUsed[oi] = true
+            oStates[oi].fullyUsed = true
             rUsed[rj] = true
         }
 
-        // ── Phase 3: 未匹配 → DEL / INS ──
+        // ── Phase 4: DEL / INS ──
+        // 关键修复：被 SUB_EQ 部分消耗的 orig 段落不输出为 DEL，
+        // 因为其有效内容已经以全黑(SUB_EQ)形式输出了，再输出整段DEL会导致重复。
         for (i in 0 until n) {
-            if (!oUsed[i] && origParas[i].text.isNotEmpty()) {
+            if (!oStates[i].fullyUsed && origParas[i].text.isNotEmpty()) {
+                // 跳过已被部分消耗的 orig（有 usedRanges 说明被 SUB_EQ 提取了子串）
+                if (oStates[i].usedRanges.isNotEmpty()) continue
                 ops.add(CmpOp("DEL", i, -1, 0.0))
             }
         }
@@ -229,24 +279,21 @@ object DocxComparator {
             }
         }
 
-        // ── 双指针归并排序（以修订档顺序为骨架）──
-        // 维护 orig(i) / rev(j) 两个指针同步前进，保证输出顺序与 Word 一致
-        val sortedOps = mergeInDocumentOrder(ops, n, m)
-
-        return sortedOps
+        // ── 双指针归并排序（支持一对多：SUB_EQ 按 rj 索引）──
+        return mergeInDocumentOrder(ops, n, m)
     }
 
     /**
      * 双指针归并：按文档逻辑顺序重排操作序列。
-     * 以修订档段落顺序为骨架，DEL 段落在其原文档对应位置穿插。
-     * 核心原则：修订档顺序优先（INS 先于 DEL 输出）。
+     * 以修订档段落顺序为骨架，支持一对多（同一 orig 可匹配多个 SUB_EQ）。
+     * 核心原则：修订档顺序优先（INS/SUB_EQ 先于 DEL 输出）。
      */
     private fun mergeInDocumentOrder(ops: List<CmpOp>, n: Int, m: Int): List<CmpOp> {
         // 构建查找表
-        val opByOi = mutableMapOf<Int, CmpOp>()   // oi → op (含 DEL)
-        val opByRj = mutableMapOf<Int, CmpOp>()   // rj → op (含 EQ/REP/INS)
+        val opByOi = mutableMapOf<Int, CmpOp>()     // oi → op (EQ/REP/DEL, 一对一)
+        val opByRj = mutableMapOf<Int, CmpOp>()      // rj → op (所有类型, 一对一 by rj)
         for (op in ops) {
-            if (op.oi >= 0) opByOi[op.oi] = op
+            if (op.oi >= 0 && op.tag != "SUB_EQ") opByOi[op.oi] = op  // SUB_EQ 不放入 oi 表（可能一对多）
             if (op.rj >= 0) opByRj[op.rj] = op
         }
 
@@ -255,12 +302,18 @@ object DocxComparator {
         var j = 0
         while (i < n || j < m) {
             // 优先检查 Oi ↔ Rj 是否有匹配（EQ 或 REP）
-            val matchedAtIj = if (i < n && j < m) { val op = opByOi[i]; if (op != null && op.rj == j && op.tag in listOf("EQ", "REP")) op else null } else null
+            val matchedAtIj = if (i < n && j < m) {
+                val op = opByOi[i]
+                if (op != null && op.rj == j && op.tag in listOf("EQ", "REP")) op else null
+            } else null
 
             if (matchedAtIj != null) {
-                // 有匹配：输出匹配对，双指针前进
                 result.add(matchedAtIj)
                 i++; j++
+            } else if (j < m && opByRj[j]?.tag == "SUB_EQ") {
+                // 修订档当前位置是子串匹配的全黑段落
+                result.add(opByRj[j]!!)
+                j++
             } else if (j < m && opByRj[j]?.tag == "INS") {
                 // 修订档当前位置是新增段落 → 优先输出（修订档顺序驱动）
                 result.add(opByRj[j]!!)
@@ -270,13 +323,10 @@ object DocxComparator {
                 result.add(opByOi[i]!!)
                 i++
             } else if (i < n && !opByOi.containsKey(i)) {
-                // orig 位置无操作（空段落等），跳过
                 i++
             } else if (j < m && !opByRj.containsKey(j)) {
-                // rev 位置无操作，跳过
                 j++
             } else {
-                // 兜底：任一指针前进防止死循环
                 if (j < m) j++ else if (i < n) i++ else break
             }
         }
