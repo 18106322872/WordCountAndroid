@@ -326,42 +326,12 @@ for _pentry in list(sys.path):
 sys.path[:] = _cleaned_path
 
 
-# ══ 第4层：全局安全 path_hook（重写）══
-# 关键改进：对【所有】路径都返回安全 finder（不仅限于 lxml 路径）。
-# 原因：path-based finder 在扫描目录的子包时，复用的是父目录的 finder，
-#       不会为新子包重新调用 path_hook。
-#       所以必须让每个目录的 finder 都具备 lxml 拦截能力。
-class _SafePathEntryFinder:
-    """安全的 PathEntryFinder：对所有子模块查找进行 lxml 检查。"""
-
-    def find_module(self, fullname, path=None):
-        if _is_lxml_name(fullname):
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
-                "lxml-defender L4: blocked path-based import of %s", fullname)
-            return _BLOCKED_LOADER
-        return None
-
-    def find_spec(self, fullname, target=None):
-        if _is_lxml_name(fullname):
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
-                "lxml-defender L4: blocked path-based spec for %s", fullname)
-            return _im.ModuleSpec(fullname, _BLOCKED_LOADER)
-        return None
-
-    def __repr__(self):
-        return '<SafePathEntryFinder>'
-
-
-def _safe_path_hook(path):
-    """对所有路径都返回安全 finder——在子模块查找时拦截 lxml。"""
-    if not path:
-        raise ImportError()
-    return _SafePathEntryFinder()
-
-
-sys.path_hooks.insert(0, _safe_path_hook)
+# ══ 第4层：已移除（v1.1.33）══
+# v1.1.31 的"全局安全 path_hook"对【所有】路径返回自定义 finder，
+# 替代了系统默认 finder → 导致标准库模块（如 json.decoder）无法加载！
+# ModuleNotFoundError: No module named 'json.decoder'
+# 教训：sys.path_hooks 注入必须精确——只拦截 lxml 路径，不能影响标准库。
+# 当前防御由 L1(meta_path) + L2(sys.modules) + L3(path清理) + L5(__import__) 覆盖。
 
 
 # ══ 第5层：覆盖 builtins.__import__ ══
@@ -391,18 +361,10 @@ def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
 _builtins.__import__ = _safe_import
 
 
-# ══ 第6层：预填充 path_importer_cache ══
-# 清除可能已缓存的 lxml 相关 importer
-_for_removal = [k for k in sys.path_importer_cache if k and 'lxml' in k]
-for _k in _for_removal:
-    del sys.path_importer_cache[_k]
-# 同时为所有当前 sys.path 条目预填充安全 finder
-for _pp in list(sys.path):
-    if _pp and _pp not in sys.path_importer_cache:
-        try:
-            sys.path_importer_cache[_pp] = _SafePathEntryFinder()
-        except Exception:
-            pass
+# ══ 第6层：已移除（v1.1.33）══
+# v1.1.31 的 path_importer_cache 预填充把所有路径的 importer
+# 强制替换为 _SafePathEntryFinder → 标准库无法加载
+# 已随 L4 一起移除。当前四层防御：L1+L2+L3+L5
 
 
 import re
