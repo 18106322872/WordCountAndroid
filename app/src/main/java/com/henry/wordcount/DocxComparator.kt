@@ -344,7 +344,7 @@ object DocxComparator {
                                 // 对于 headerReference/footerReference，提取 r:id
                                 if (kind == "header_footer") {
                                     val rid = parser.getAttributeValue(R, "id") ?: ""
-                                    parts.append("[header:${if (nsTag.contains("footer")) "footer" else "header"}:$rid]")
+                                    parts.add("[header:${if (nsTag.contains("footer")) "footer" else "header"}:$rid]")
                                     inTarget = false
                                 }
                             } else if (inTarget) {
@@ -562,7 +562,7 @@ object DocxComparator {
      */
     private fun tokenize(text: String, level: String): List<Token> {
         if (level == "char") {
-            return text.mapIndexed { i, c -> Token(c, c, i, i + 1) }
+            return text.mapIndexed { i, c -> Token(c.toString(), c.toString(), i, i + 1) }
         }
         val tokens = mutableListOf<Token>()
         var i = 0
@@ -571,7 +571,7 @@ object DocxComparator {
             val ch = text[i]
             when {
                 isCJK(ch) -> {
-                    tokens.add(Token(ch, ch, i, i + 1))
+                    tokens.add(Token(ch.toString(), ch.toString(), i, i + 1))
                     i++
                 }
                 ch.isLetterOrDigit() || ch == '_' -> {
@@ -582,7 +582,7 @@ object DocxComparator {
                     i = j
                 }
                 else -> {
-                    tokens.add(Token(ch, ch, i, i + 1))
+                    tokens.add(Token(ch.toString(), ch.toString(), i, i + 1))
                     i++
                 }
             }
