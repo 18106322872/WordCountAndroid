@@ -2,38 +2,32 @@ package com.henry.wordcount
 
 import android.content.Context
 import android.util.Log
-import org.xmlpull.v1.XmlPullParser
-import org.xmlpull.v1.XmlPullParserFactory
 import java.io.File
-import java.io.StringReader
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.regex.Regex
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 /**
- * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.52 重写版）。
+ * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.53 重写版）。
  *
- * 完全不依赖 Python/lxml，用 Android 标准库（ZipFile + XmlPullParser）实现。
- * 替代原 Python 版 compare_docx（该版本因 Chaquopy lxml C 扩展崩溃无法使用）。
+ * 设计目标：输出文档与 Word「审阅-比较」结果一致。
+ * 核心思路：
+ *   1. 以【原文档 XML 为底板】，保留完整格式。
+ *   2. 段落级对齐：exact 相等 → 黑字(EQ)；rev 段落整体包含于 orig 段落 → rev 黑字(SBLACK)+orig 差值红字(SDEL)；
+ *      相似段落(字符 LCS 比率≥0.5) → 内联字符级 diff(REP)；其余 orig→红字删除(DEL)，rev→蓝字插入(INS)。
+ *   3. 相邻「删除+插入」仅当二者相似时才合并为一段内联修订(REP)，避免无关段落被错误合并。
  *
- * v1.1.52 重写：
- * - 多段落 replace 改为子级 LCS 对齐 + 内联字符级 diff（匹配 Word 原生格式）
- * - 修复 modifiedChars 统计：只算实际变动的字数，不再整段累加
- * - 输出文档格式接近 Word「审阅-比较」结果（内联 w:ins/w:del 标记）
+ * 完全不依赖 Python/lxml，用 Android 标准库（ZipFile + 正则）实现。
  */
 object DocxComparator {
 
     private const val TAG = "DocxCompare"
 
-    // ── OOXML 命名空间 ──
-    private const val W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-    private const val R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-
-    // ── 数据类 ──
-    data class Block(val type: String, val text: String)
+    data class Para(val xml: String, val text: String)
     data class CompareResult(
         val ok: Boolean,
         val error: String? = null,
@@ -44,10 +38,17 @@ object DocxComparator {
         val repCount: Int = 0,
         val summary: String = ""
     )
-    data class Token(val orig: String, val norm: String, val start: Int, val end: Int)
 
-    /** 单段落字符级 diff 最大 token 数 */
-    private const val MAX_DIFF_TOKENS = 2000
+    /** 对齐后的一次操作。tag: EQ / REP / DEL / INS / SBLACK / SDEL */
+    data class CmpOp(
+        val tag: String,
+        val oi: Int,   // 原文档段落下标（-1 表示无）
+        val rj: Int,   // 修订文档段落下标（-1 表示无）
+        val pos: Double,
+        val gap: String = ""   // SDEL 时承载被删除的原文片段
+    )
+
+    data class WRun(val start: Int, val end: Int, val runXml: String)
 
     fun compare(
         context: Context?,
@@ -74,196 +75,69 @@ object DocxComparator {
         if (!revFile.isFile()) return CompareResult(ok = false, error = "修订文档不存在: $revPath")
 
         val opts = try { org.json.JSONObject(optsJson) } catch (_: Exception) { org.json.JSONObject() }
-        val level = opts.optString("level", "word")
-        val caseSensitive = opts.optBoolean("case", true)
-        val ignoreWs = opts.optBoolean("whitespace", false)
-        val useTable = opts.optBoolean("table", true)
-        val useHf = opts.optBoolean("header_footer", true)
-        val useFn = opts.optBoolean("footnote", true)
-        val useTb = opts.optBoolean("textbox", true)
-        val useField = opts.optBoolean("field", true)
-
         val author = "WordCount"
         val date = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).format(Date())
 
-        // ══ 阶段1：读取原文档块 ═══
-        val blocksO = readBlocks(origFile, "orig")
-        Log.d(TAG, "orig blocks: ${blocksO.size} (first=${blocksO.take(3).map { it.text.take(30) }})")
+        val origParas = readParagraphs(origFile, "orig")
+        val revParas = readParagraphs(revFile, "rev")
 
-        // ══ 阶段2：读取修订文档块 ═══
-        val blocksR = readBlocks(revFile, "rev")
-        Log.d(TAG, "rev blocks: ${blocksR.size} (first=${blocksR.take(3).map { it.text.take(30) }})")
+        val ops = alignParagraphs(origParas, revParas)
 
-        // ══ 阶段3：计算 diff ═══
-        val textsO = blocksO.map { it.text }
-        val textsR = blocksR.map { it.text }
-        val opcodes = computeDiff(textsO, textsR)
-        Log.d(TAG, "opcodes: $opcodes")
-
-        val merged = mergeReplace(opcodes)
-
-        // ══ 阶段4：构建输出 ═══
+        // ── 构建输出 body ──
         val ridSeq = intArrayOf(0)
-        fun nextRid(): Int { ridSeq[0]++; return ridSeq[0] }
-
-        var modifiedChars = 0
         var insCount = 0
         var delCount = 0
         var repCount = 0
+        var totalInsChars = 0
+        var totalDelChars = 0
         val bodyParts = mutableListOf<String>()
 
-        for ((tag, i1, i2, j1, j2) in merged) {
-            when (tag) {
-                "equal" -> {
-                    for (k in i1 until i2) {
-                        val el = blocksO[k]
-                        if (el.type == "p") bodyParts.add(buildPlainParagraph(el.text))
-                        else bodyParts.add(buildNoteParagraph("[表格] ${el.text.take(200)}"))
-                    }
+        for (op in ops) {
+            when (op.tag) {
+                "EQ" -> {
+                    bodyParts.add(origParas[op.oi].xml)
                 }
-                "delete" -> {
-                    for (k in i1 until i2) {
-                        val el = blocksO[k]
-                        if (el.type == "p") {
-                            bodyParts.add(buildDeletedParagraph(el.text, author, date, ::nextRid))
-                            modifiedChars += countTextChars(el.text)
-                        } else {
-                            bodyParts.add(buildNoteParagraph("[已删表格] ${el.text.take(200)}"))
-                            modifiedChars += countTextChars(el.text)
-                        }
-                        delCount++
-                    }
+                "SBLACK" -> {
+                    bodyParts.add(revParas[op.rj].xml)
                 }
-                "insert" -> {
-                    for (k in j1 until j2) {
-                        val el = blocksR[k]
-                        if (el.type == "p") bodyParts.add(buildInsertedParagraph(el.text, author, date, ::nextRid))
-                        else bodyParts.add(buildNoteParagraph("[新增表格] ${el.text.take(200)}"))
-                        insCount++
-                    }
+                "SDEL" -> {
+                    bodyParts.add(wrapDeletedText(origParas[op.oi].xml, op.gap, author, date, ridSeq))
+                    delCount++
+                    totalDelChars += op.gap.length
                 }
-                "replace" -> {
-                    // v1.1.52: 多段落 replace 也做子对齐 + 内联字符级 diff
-                    val subOrig = (i1 until i2).map { blocksO[it] }
-                    val subRev = (j1 until j2).map { blocksR[it] }
-
-                    // 只取段落类型的块做子对齐
-                    val subPOrg = subOrig.filter { it.type == "p" }
-                    val subPRev = subRev.filter { it.type == "p" }
-
-                    if (subPOrg.isNotEmpty() || subPRev.isNotEmpty()) {
-                        // 子级段落 LCS 对齐
-                        val subTextsO = subPOrg.map { it.text }
-                        val subTextsR = subPRev.map { it.text }
-                        val subOps = computeDiff(subTextsO, subTextsR)
-                        val subMerged = mergeReplace(subOps)
-
-                        var localRepCount = 0
-                        for ((stag, si1, si2, sj1, sj2) in subMerged) {
-                            when (stag) {
-                                "equal" -> {
-                                    for (k in si1 until si2) {
-                                        bodyParts.add(buildPlainParagraph(subPOrg[k].text))
-                                    }
-                                }
-                                "delete" -> {
-                                    for (k in si1 until si2) {
-                                        bodyParts.add(buildDeletedParagraph(subPOrg[k].text, author, date, ::nextRid))
-                                        modifiedChars += countTextChars(subPOrg[k].text)
-                                    }
-                                    delCount += (si2 - si1)
-                                }
-                                "insert" -> {
-                                    for (k in sj1 until sj2) {
-                                        bodyParts.add(buildInsertedParagraph(subPRev[k].text, author, date, ::nextRid))
-                                    }
-                                    insCount += (sj2 - sj1)
-                                }
-                                "replace" -> {
-                                    // 单对段落：做内联字符级 diff
-                                    for (di in 0 until minOf(si2 - si1, sj2 - sj1)) {
-                                        val bo = subPOrg[si1 + di]
-                                        val br = subPRev[sj1 + di]
-                                        val maxLen = maxOf(bo.text.length, br.text.length)
-                                        if (maxLen > MAX_DIFF_TOKENS) {
-                                            bodyParts.add(buildDeletedParagraph(bo.text, author, date, ::nextRid))
-                                            bodyParts.add(buildInsertedParagraph(br.text, author, date, ::nextRid))
-                                            modifiedChars += countTextChars(bo.text) + countTextChars(br.text)
-                                        } else {
-                                            val (pXml, ranges) = buildDiffParagraph(
-                                                bo.text, br.text, level, author, date, ::nextRid,
-                                                caseSensitive, ignoreWs
-                                            )
-                                            bodyParts.add(pXml)
-                                            // 只算实际被修改的字数（删除范围 + 插入估算）
-                                            modifiedChars += countModifiedSentences(bo.text, ranges)
-                                            // 加上插入部分的净增字数
-                                            val insExtra = maxOf(0, countTextChars(br.text) - countTextChars(bo.text))
-                                            if (insExtra > 0) modifiedChars += insExtra / 2  // 估算一半是新增
-                                        }
-                                        localRepCount++
-                                    }
-                                    // 剩余未配对的原文段落（删除）
-                                    for (di in (si2 - si1) until (sj2 - sj1)) {
-                                        // 不可能到这里
-                                    }
-                                    for (di in minOf(si2 - si1, sj2 - sj1) until (si2 - si1)) {
-                                        bodyParts.add(buildDeletedParagraph(subPOrg[si1 + di].text, author, date, ::nextRid))
-                                        modifiedChars += countTextChars(subPOrg[si1 + di].text)
-                                        delCount++
-                                    }
-                                    for (di in minOf(si2 - si1, sj2 - sj1) until (sj2 - sj1)) {
-                                        bodyParts.add(buildInsertedParagraph(subPRev[sj1 + di].text, author, date, ::nextRid))
-                                        insCount++
-                                    }
-                                }
-                            }
-                        }
-                        repCount += maxOf(localRepCount, 1)
-                    }
-
-                    // 表格类块直接标注
-                    val tblOrg = subOrig.filter { it.type == "tbl" }
-                    val tblRev = subRev.filter { it.type == "tbl" }
-                    for (tbl in tblOrg) {
-                        bodyParts.add(buildNoteParagraph("[原表格] ${tbl.text.take(200)}"))
-                        modifiedChars += countTextChars(tbl.text)
-                    }
-                    for (tbl in tblRev) {
-                        bodyParts.add(buildNoteParagraph("[修订表格] ${tbl.text.take(200)}"))
-                        modifiedChars += countTextChars(tbl.text)
-                    }
+                "DEL" -> {
+                    bodyParts.add(wrapDeletedParagraph(origParas[op.oi].xml, author, date, ridSeq))
+                    delCount++
+                    totalDelChars += origParas[op.oi].text.length
+                }
+                "INS" -> {
+                    bodyParts.add(wrapInsertedParagraph(revParas[op.rj].xml, author, date, ridSeq))
+                    insCount++
+                    totalInsChars += revParas[op.rj].text.length
+                }
+                "REP" -> {
+                    val (pXml, delC, insC) = buildDiffParagraphXml(
+                        origParas[op.oi].xml,
+                        origParas[op.oi].text,
+                        revParas[op.rj].text,
+                        author, date, ridSeq
+                    )
+                    bodyParts.add(pXml)
+                    totalDelChars += delC
+                    totalInsChars += insC
+                    repCount++
                 }
             }
         }
 
-        // 附加区域变更检测
-        val extraKinds = mutableListOf<Triple<String, Boolean, String>>()
-        if (useHf) extraKinds.add(Triple("header_footer", true, "【页眉/页脚变更】"))
-        if (useFn) extraKinds.add(Triple("footnote", true, "【脚注/尾注变更】"))
-        if (useTb) extraKinds.add(Triple("textbox", true, "【文本框变更】"))
-        if (useField) extraKinds.add(Triple("field", true, "【域变更】"))
-
-        for ((kind, _, label) in extraKinds) {
-            val textO = extractExtraTextLight(origFile, kind)
-            val textR = extractExtraTextLight(revFile, kind)
-            if (textO != textR) {
-                bodyParts.add(buildNoteParagraph(label))
-                if (textO.isNotEmpty() || textR.isNotEmpty()) {
-                    modifiedChars += Math.abs(textO.length - textR.length)
-                }
-            }
-        }
-
-        // 写出输出 DOCX
         writeOutputDocx(origFile, outPath, bodyParts)
 
+        val modifiedChars = totalInsChars + totalDelChars
         val summary = buildString {
-            append("插入 $insCount 处 | 删除 $delCount 处 | 修改 $repCount 处")
-            if (modifiedChars > 0) append(" | 修改字数约 $modifiedChars")
+            append("插入 $insCount 处(${totalInsChars}字) | 删除 $delCount 处(${totalDelChars}字) | 修改 $repCount 处")
         }
 
-        Log.d(TAG, "result: ins=$insCount del=$delCount rep=$repCount chars=$modifiedChars")
+        Log.d(TAG, "result: ins=$insCount($totalInsChars字) del=$delCount($totalDelChars字) rep=$repCount chars=$modifiedChars")
 
         return CompareResult(
             ok = true,
@@ -276,318 +150,231 @@ object DocxComparator {
         )
     }
 
-    // ════════════════════════════════════════════════════════
-    //  DOCX 解析（双模式：命名空间感知 + fallback）
-    // ════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════
+    //  段落对齐（exact + SUBEQ 拆分 + 相似 LCS + 受控合并）
+    // ══════════════════════════════════════════════════════
 
-    private fun readBlocks(docx: File, label: String): List<Block> {
-        var result: List<Block>? = null
-        ZipFile(docx).use { zip ->
-            val entry = zip.getEntry("word/document.xml")
-            if (entry == null) {
-                Log.w(TAG, "$label: no document.xml found!")
-                return emptyList()
-            }
-            val xml = zip.getInputStream(entry).bufferedReader().readText()
+    private fun alignParagraphs(origParas: List<Para>, revParas: List<Para>): List<CmpOp> {
+        val n = origParas.size
+        val m = revParas.size
+        val oUsed = BooleanArray(n)
+        val rUsed = BooleanArray(m)
+        val ops = mutableListOf<CmpOp>()
 
-            // 模式1：命名空间感知解析
-            result = parseBlocksNsAware(xml)
-            if (result!!.isEmpty()) {
-                Log.w(TAG, "$label: ns-aware parsing returned 0 blocks, trying non-ns...")
-                // 模式2：非命名空间感知解析（fallback）
-                result = parseBlocksNonNs(xml)
+        // 阶段A：exact
+        for (i in 0 until n) {
+            if (oUsed[i]) continue
+            val ot = origParas[i].text
+            if (ot.isEmpty()) continue
+            for (j in 0 until m) {
+                if (rUsed[j]) continue
+                if (ot == revParas[j].text) {
+                    ops.add(CmpOp("EQ", i, j, i.toDouble()))
+                    oUsed[i] = true
+                    rUsed[j] = true
+                    break
+                }
             }
         }
-        if (result == null) result = emptyList()
-        Log.d(TAG, "$label: parsed ${result!!.size} blocks")
-        return result!!
-    }
 
-    /**
-     * 命名空间感知模式解析 document.xml。
-     */
-    private fun parseBlocksNsAware(xml: String): List<Block> {
-        val blocks = mutableListOf<Block>()
-        try {
-            val factory = XmlPullParserFactory.newInstance()
-            factory.setNamespaceAware(true)
-            val parser = factory.newPullParser()
-            parser.setInput(StringReader(xml))
-
-            var inBody = false
-            var inP = false
-            var inTbl = false
-            var inTc = false
-            var inTr = false
-            var inT = false
-            var pText = StringBuilder()
-            var tblTexts = mutableListOf<String>()
-            var pDepth = 0  // 嵌套深度跟踪
-
-            var eventType = parser.eventType
-            while (eventType != XmlPullParser.END_DOCUMENT) {
-                when (eventType) {
-                    XmlPullParser.START_TAG -> {
-                        val nsTag = getNsTag(parser)
-                        when (nsTag) {
-                            "$W:body" -> { inBody = true; Log.v(TAG, "START <w:body>") }
-                            "$W:p" -> {
-                                if (inBody && !inTbl) {
-                                    inP = true; pDepth = 1; pText = StringBuilder()
-                                } else if (inTc) {
-                                    pText = StringBuilder()
-                                }
-                            }
-                            "$W:tbl" -> if (inBody) { inTbl = true; tblTexts = mutableListOf() }
-                            "$W:tr" -> if (inTbl) inTr = true
-                            "$W:tc" -> if (inTr) inTc = true
-                            "$W:t" -> inT = true
-                            // 追踪嵌套的 w:p（如 w:p 内有 w:hyperlink 包含 w:p）
-                            else -> { if (inP && parser.namespace == W) pDepth++ }
-                        }
-                    }
-                    XmlPullParser.TEXT -> {
-                        if (inT) {
-                            val text = parser.text ?: ""
-                            pText.append(text)
-                        }
-                    }
-                    XmlPullParser.END_TAG -> {
-                        val nsTag = getNsTag(parser)
-                        when (nsTag) {
-                            "$W:t" -> inT = false
-                            "$W:p" -> {
-                                if (inTc) {
-                                    tblTexts.add(pText.toString())
-                                    pText = StringBuilder()
-                                } else if (inP) {
-                                    pDepth--
-                                    if (pDepth <= 0) {
-                                        val txt = pText.toString()
-                                        blocks.add(Block("p", txt))
-                                        inP = false
-                                        pDepth = 0
-                                    }
-                                }
-                            }
-                            "$W:tc" -> if (inTc) inTc = false
-                            "$W:tr" -> if (inTr) inTr = false
-                            "$W:tbl" -> if (inTbl) {
-                                blocks.add(Block("tbl", tblTexts.joinToString("\n")))
-                                inTbl = false
-                            }
-                            "$W:body" -> inBody = false
-                        }
-                    }
-                }
-                eventType = parser.next()
+        // 阶段B：SUBEQ（rev 整体包含于 orig，且 rev 明显更短）
+        for (i in 0 until n) {
+            if (oUsed[i]) continue
+            val ot = origParas[i].text
+            if (ot.isEmpty()) continue
+            val contained = mutableListOf<Pair<Int, Int>>() // (position, revIndex)
+            for (j in 0 until m) {
+                if (rUsed[j]) continue
+                val rt = revParas[j].text
+                if (rt.length < 10) continue
+                if (rt.length >= 0.7 * ot.length) continue
+                val pos = ot.indexOf(rt)
+                if (pos >= 0) contained.add(Pair(pos, j))
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "parseBlocksNsAware error: ${e.javaClass.simpleName}: ${e.message}")
+            if (contained.isEmpty()) continue
+            contained.sortBy { it.first }
+            val segs = mutableListOf<CmpOp>()
+            var prev = 0
+            var frac = 0.0
+            for ((pos, j) in contained) {
+                if (pos > prev) {
+                    segs.add(CmpOp("SDEL", i, -1, i.toDouble() + frac, ot.substring(prev, pos)))
+                    frac += 0.1
+                }
+                segs.add(CmpOp("SBLACK", i, j, i.toDouble() + frac))
+                frac += 0.1
+                prev = pos + revParas[j].text.length
+                rUsed[j] = true
+            }
+            if (prev < ot.length) {
+                segs.add(CmpOp("SDEL", i, -1, i.toDouble() + frac, ot.substring(prev, ot.length)))
+            }
+            oUsed[i] = true
+            ops.addAll(segs)
         }
-        return blocks
-    }
 
-    /**
-     * 非命名空间感知模式解析（fallback）。
-     * 匹配原始标签名如 "w:p"、"w:t"、"w:body" 等。
-     */
-    private fun parseBlocksNonNs(xml: String): List<Block> {
-        val blocks = mutableListOf<Block>()
-        try {
-            val factory = XmlPullParserFactory.newInstance()
-            factory.setNamespaceAware(false)
-            val parser = factory.newPullParser()
-            parser.setInput(StringReader(xml))
+        // 阶段C：相似度感知 LCS（仅对其余段落）
+        val remO = mutableListOf<Int>()
+        val remR = mutableListOf<Int>()
+        for (i in 0 until n) if (!oUsed[i]) remO.add(i)
+        for (j in 0 until m) if (!rUsed[j]) remR.add(j)
 
-            var inBody = false
-            var inP = false
-            var inTbl = false
-            var inTc = false
-            var inTr = false
-            var inT = false
-            var pText = StringBuilder()
-            var tblTexts = mutableListOf<String>()
-
-            var eventType = parser.eventType
-            while (eventType != XmlPullParser.END_DOCUMENT) {
-                when (eventType) {
-                    XmlPullParser.START_TAG -> {
-                        val name = parser.name ?: ""
-                        when (name) {
-                            "w:body", "body" -> inBody = true
-                            "w:p", "p" -> if (inBody && !inTbl) { inP = true; pText = StringBuilder() }
-                            "w:tbl", "tbl" -> if (inBody) { inTbl = true; tblTexts = mutableListOf() }
-                            "w:tr", "tr" -> if (inTbl) inTr = true
-                            "w:tc", "tc" -> if (inTr) inTc = true
-                            "w:t", "t" -> inT = true
-                        }
-                    }
-                    XmlPullParser.TEXT -> {
-                        if (inT) {
-                            val text = parser.text ?: ""
-                            pText.append(text)
-                        }
-                    }
-                    XmlPullParser.END_TAG -> {
-                        val name = parser.name ?: ""
-                        when (name) {
-                            "w:t", "t" -> inT = false
-                            "w:p", "p" -> {
-                                if (inTc) {
-                                    tblTexts.add(pText.toString())
-                                    pText = StringBuilder()
-                                } else if (inP) {
-                                    blocks.add(Block("p", pText.toString()))
-                                    inP = false
-                                }
-                            }
-                            "w:tc", "tc" -> if (inTc) inTc = false
-                            "w:tr", "tr" -> if (inTr) inTr = false
-                            "w:tbl", "tbl" -> if (inTbl) {
-                                blocks.add(Block("tbl", tblTexts.joinToString("\n")))
-                                inTbl = false
-                            }
-                            "w:body", "body" -> inBody = false
-                        }
+        val useSimilarity = (remO.size * remR.size) <= 6000
+        val codes = computeDiffText(
+            remO.map { origParas[it].text },
+            remR.map { revParas[it].text },
+            useSimilarity
+        )
+        val raw = mutableListOf<CmpOp>()
+        for (c in codes) {
+            when (c.tag) {
+                "equal" -> {
+                    for (k in c.i1 until c.i2) {
+                        val oi = remO[k]
+                        val rj = remR[c.j1 + (k - c.i1)]
+                        raw.add(CmpOp("REP", oi, rj, oi.toDouble()))
                     }
                 }
-                eventType = parser.next()
+                "delete" -> {
+                    for (k in c.i1 until c.i2) raw.add(CmpOp("DEL", remO[k], -1, remO[k].toDouble()))
+                }
+                "insert" -> {
+                    for (k in c.j1 until c.j2) raw.add(CmpOp("INS", -1, remR[k], remR[k].toDouble()))
+                }
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "parseBlocksNonNs error: ${e.javaClass.simpleName}: ${e.message}")
         }
-        return blocks
+        // 受控合并：相邻「删除+插入」仅当相似时合并为内联修订(REP)
+        val mergedRaw = mutableListOf<CmpOp>()
+        var ri = 0
+        while (ri < raw.size) {
+            val op = raw[ri]
+            if (op.tag == "DEL" && ri + 1 < raw.size && raw[ri + 1].tag == "INS" &&
+                isAligned(origParas[op.oi].text, revParas[raw[ri + 1].rj].text)
+            ) {
+                mergedRaw.add(CmpOp("REP", op.oi, raw[ri + 1].rj, op.pos))
+                ri += 2
+            } else {
+                mergedRaw.add(op)
+                ri += 1
+            }
+        }
+        ops.addAll(mergedRaw)
+
+        ops.sortWith(compareBy({ it.pos }, { if (it.tag == "SDEL") 0 else 1 }))
+        return ops
     }
 
     /**
-     * 轻量级附加区域文本提取。
+     * 两段落是否应作为「相似配对」参与内联修订：
+     *  - 完全相同 → true
+     *  - rev 整体包含于 orig：rev 近似等于 orig(≥70%) → true(内联)；否则交给 SUBEQ 处理
+     *  - orig 整体包含于 rev：orig 明显更短(<70%) → false(删除+插入)；否则 true(小幅扩写)
+     *  - 否则按字符 LCS 比率 ≥0.5
      */
-    private fun extractExtraTextLight(docx: File, kind: String): String {
-        val parts = mutableListOf<String>()
-        try {
-            ZipFile(docx).use { zip ->
-                val entry = zip.getEntry("word/document.xml") ?: return ""
-                val factory = XmlPullParserFactory.newInstance()
-                factory.setNamespaceAware(true)
-                val parser = factory.newPullParser()
-                parser.setInput(zip.getInputStream(entry), "UTF-8")
+    private fun isAligned(o: String, r: String): Boolean {
+        if (o.isEmpty() || r.isEmpty()) return false
+        if (o == r) return true
+        if (o.contains(r)) {
+            // r 整体包含于 o
+            return r.length >= 0.7 * o.length
+        }
+        if (r.contains(o)) {
+            // o 整体包含于 r
+            if (o.length < 0.7 * r.length) return false
+            return true
+        }
+        return lcsRatio(o, r) >= 0.5
+    }
 
-                var currentText = StringBuilder()
-                var inTarget = false
-                var inWt = false
+    private fun lcsRatio(a: String, b: String): Double {
+        if (a.isEmpty() && b.isEmpty()) return 1.0
+        if (a.isEmpty() || b.isEmpty()) return 0.0
+        return 2.0 * lcsLen(a, b) / (a.length + b.length)
+    }
 
-                val targetStartTags = when (kind) {
-                    "header_footer" -> setOf("$W:headerReference", "$W:footerReference")
-                    "footnote" -> setOf("$W:footnote")
-                    "textbox" -> setOf("$W:txbxContent")
-                    "field" -> setOf("$W:fldSimple")
-                    else -> emptySet()
-                }
-
-                var depth = 0
-                var eventType = parser.eventType
-                while (eventType != XmlPullParser.END_DOCUMENT) {
-                    when (eventType) {
-                        XmlPullParser.START_TAG -> {
-                            val nsTag = getNsTag(parser)
-                            if (nsTag in targetStartTags && !inTarget) {
-                                inTarget = true; depth = 1; currentText = StringBuilder()
-                                if (kind == "header_footer") {
-                                    val rid = parser.getAttributeValue(R, "id") ?: ""
-                                    parts.add("[${if (nsTag.contains("footer")) "footer" else "header"}:$rid]")
-                                    inTarget = false
-                                }
-                            } else if (inTarget) {
-                                depth++
-                                if (nsTag == "$W:t") inWt = true
-                            }
-                        }
-                        XmlPullParser.TEXT -> {
-                            if (inWt) currentText.append(parser.text ?: "")
-                        }
-                        XmlPullParser.END_TAG -> {
-                            val nsTag = getNsTag(parser)
-                            if (nsTag == "$W:t") inWt = false
-                            if (inTarget) {
-                                depth--
-                                if (depth <= 0) {
-                                    val txt = currentText.toString().trim()
-                                    if (txt.isNotEmpty()) parts.add(txt)
-                                    inTarget = false
-                                }
-                            }
-                        }
-                    }
-                    eventType = parser.next()
+    private fun lcsLen(a: String, b: String): Int {
+        val m = a.length
+        val n = b.length
+        if (m == 0 || n == 0) return 0
+        if (m.toLong() * n <= 4_000_000L) {
+            val dp = Array(m + 1) { IntArray(n + 1) }
+            for (i in 1..m) {
+                val ai = a[i - 1]
+                for (j in 1..n) {
+                    dp[i][j] = if (ai == b[j - 1]) dp[i - 1][j - 1] + 1 else kotlin.math.max(dp[i - 1][j], dp[i][j - 1])
                 }
             }
-        } catch (_: Exception) {}
-        return parts.joinToString("\n")
+            return dp[m][n]
+        } else {
+            val dp = IntArray(n + 1)
+            for (i in 0 until m) {
+                val ai = a[i]
+                var prev = 0
+                for (j in 0 until n) {
+                    val tmp = dp[j + 1]
+                    dp[j + 1] = if (ai == b[j]) prev + 1 else kotlin.math.max(dp[j], tmp)
+                    prev = tmp
+                }
+            }
+            return dp[n]
+        }
     }
 
-    // ════════════════════════════════════════════════════════
-    // ════════════════════════════════════════════════════════
-    //  Diff 算法（标准 LCS DP + 回溯 → opcodes）
-    // ════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════
+    //  Diff 算法（标准 LCS DP + 回溯 → opcodes），支持相似度配对
+    // ══════════════════════════════════════════════════════
 
-    /**
-     * 计算两个列表的 diff opcodes。
-     * v1.1.40: 完全重写。标准 LCS DP → 回溯 → 合并 ranges。
-     * 消除 v1.1.39 的多重嵌套/废弃代码路径，确保正确且高效。
-     */
-    private fun <T> computeDiff(a: List<T>, b: List<T>): List<Quadruple> {
+    private data class Quad(val tag: String, val i1: Int, val i2: Int, val j1: Int, val j2: Int)
+
+    private fun computeDiffText(a: List<String>, b: List<String>, useSimilarity: Boolean): List<Quad> {
         val m = a.size
         val n = b.size
-        if (m == 0) return if (n == 0) emptyList() else listOf(Quadruple("insert", 0, 0, 0, n))
-        if (n == 0) return listOf(Quadruple("delete", 0, m, 0, 0))
+        if (m == 0) return if (n == 0) emptyList() else listOf(Quad("insert", 0, 0, 0, n))
+        if (n == 0) return listOf(Quad("delete", 0, m, 0, 0))
 
-        // 大规模输入分块处理（避免 O(m*n) 内存）
-        if (m.toLong() * n.toLong() > 200000L) return computeDiffChunked(a, b)
+        val eq: (String, String) -> Boolean = if (useSimilarity) ({ x, y -> isAligned(x, y) }) else ({ x, y -> x == y })
 
-        // ══ 标准 LCS DP 表 ══
+        if (m.toLong() * n.toLong() > 4_000_000L) return computeDiffChunked(a, b, eq)
+
         val dp = Array(m + 1) { IntArray(n + 1) }
         for (i in 1..m) {
             val ai = a[i - 1]
             for (j in 1..n) {
-                dp[i][j] = if (ai == b[j - 1]) dp[i - 1][j - 1] + 1
-                           else maxOf(dp[i - 1][j], dp[i][j - 1])
+                dp[i][j] = if (eq(ai, b[j - 1])) dp[i - 1][j - 1] + 1
+                else kotlin.math.max(dp[i - 1][j], dp[i][j - 1])
             }
         }
 
-        // ══ 回溯收集反向操作 ══
-        val revOps = mutableListOf<String>() // "eq" / "ins" / "del"
+        val revOps = mutableListOf<String>()
         var i = m; var j = n
         while (i > 0 || j > 0) {
             when {
-                i > 0 && j > 0 && a[i - 1] == b[j - 1] -> { revOps.add("eq"); i--; j-- }
+                i > 0 && j > 0 && eq(a[i - 1], b[j - 1]) -> { revOps.add("eq"); i--; j-- }
                 j > 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) -> { revOps.add("ins"); j-- }
                 else -> { revOps.add("del"); i-- }
             }
         }
 
-        // ══ 反转 + 合并相邻操作为 opcode ranges ══
         revOps.reverse()
-        val result = mutableListOf<Quadruple>()
+        val result = mutableListOf<Quad>()
         var idx = 0
-        var ci = 0; var cj = 0  // 游标
-
+        var ci = 0; var cj = 0
         while (idx < revOps.size) {
             when (revOps[idx]) {
                 "eq" -> {
                     val si = ci; val sj = cj
                     while (idx < revOps.size && revOps[idx] == "eq") { ci++; cj++; idx++ }
-                    result.add(Quadruple("equal", si, ci, sj, cj))
+                    result.add(Quad("equal", si, ci, sj, cj))
                 }
                 "ins" -> {
                     val sj = cj
                     while (idx < revOps.size && revOps[idx] == "ins") { cj++; idx++ }
-                    result.add(Quadruple("insert", ci, ci, sj, cj))
+                    result.add(Quad("insert", ci, ci, sj, cj))
                 }
                 "del" -> {
                     val si = ci
                     while (idx < revOps.size && revOps[idx] == "del") { ci++; idx++ }
-                    result.add(Quadruple("delete", si, ci, cj, cj))
+                    result.add(Quad("delete", si, ci, cj, cj))
                 }
                 else -> idx++
             }
@@ -595,50 +382,46 @@ object DocxComparator {
         return result
     }
 
-    /**
-     * 大规模分块 diff（m*n > 200000 时使用）。
-     */
-    private fun <T> computeDiffChunked(a: List<T>, b: List<T>): List<Quadruple> {
-        val chunkSize = 300
-        val result = mutableListOf<Quadruple>()
+    private fun computeDiffChunked(a: List<String>, b: List<String>, eq: (String, String) -> Boolean): List<Quad> {
+        val chunkSize = 500
+        val result = mutableListOf<Quad>()
         var ai = 0; var bi = 0
         while (ai < a.size || bi < b.size) {
-            val aEnd = minOf(ai + chunkSize, a.size)
-            val bEnd = minOf(bi + chunkSize, b.size)
+            val aEnd = kotlin.math.min(ai + chunkSize, a.size)
+            val bEnd = kotlin.math.min(bi + chunkSize, b.size)
             val aChunk = a.subList(ai, aEnd)
             val bChunk = b.subList(bi, bEnd)
             if (aChunk.isEmpty() && bChunk.isNotEmpty()) {
-                result.add(Quadruple("insert", ai, ai, bi, bEnd)); bi = bEnd; continue
+                result.add(Quad("insert", ai, ai, bi, bEnd)); bi = bEnd; continue
             }
             if (bChunk.isEmpty() && aChunk.isNotEmpty()) {
-                result.add(Quadruple("delete", ai, aEnd, bi, bi)); ai = aEnd; continue
+                result.add(Quad("delete", ai, aEnd, bi, bi)); ai = aEnd; continue
             }
             if (aChunk.isEmpty() && bChunk.isEmpty()) break
-            // 块内贪心匹配
             var ci = 0; var cji = 0
             while (ci < aChunk.size || cji < bChunk.size) {
-                if (ci < aChunk.size && cji < bChunk.size && aChunk[ci] == bChunk[cji]) {
+                if (ci < aChunk.size && cji < bChunk.size && eq(aChunk[ci], bChunk[cji])) {
                     val si = ci; val sji = cji
-                    while (ci < aChunk.size && cji < bChunk.size && aChunk[ci] == bChunk[cji]) { ci++; cji++ }
-                    result.add(Quadruple("equal", ai + si, ai + ci, bi + sji, bi + cji))
+                    while (ci < aChunk.size && cji < bChunk.size && eq(aChunk[ci], bChunk[cji])) { ci++; cji++ }
+                    result.add(Quad("equal", ai + si, ai + ci, bi + sji, bi + cji))
                 } else {
-                    val lookAhead = minOf(20, aChunk.size - ci, bChunk.size - cji)
+                    val lookAhead = kotlin.math.min(25, aChunk.size - ci, bChunk.size - cji)
                     var found = false
                     search@ for (di in 0..lookAhead) {
                         for (dj in 0..lookAhead) {
                             if (di == 0 && dj == 0) continue
                             val ai2 = ci + di; val bj2 = cji + dj
-                            if (ai2 < aChunk.size && bj2 < bChunk.size && aChunk[ai2] == bChunk[bj2]) {
-                                if (dj == 0) { result.add(Quadruple("delete", ai + ci, ai + ai2, bi + cji, bi + cji)); ci = ai2 }
-                                else if (di == 0) { result.add(Quadruple("insert", ai + ci, ai + ci, bi + cji, bi + bj2)); cji = bj2 }
-                                else { result.add(Quadruple("replace", ai + ci, ai + ai2, bi + cji, bi + bj2)); ci = ai2; cji = bj2 }
+                            if (ai2 < aChunk.size && bj2 < bChunk.size && eq(aChunk[ai2], bChunk[bj2])) {
+                                if (dj == 0) { result.add(Quad("delete", ai + ci, ai + ai2, bi + cji, bi + cji)); ci = ai2 }
+                                else if (di == 0) { result.add(Quad("insert", ai + ci, ai + ci, bi + cji, bi + bj2)); cji = bj2 }
+                                else { result.add(Quad("replace", ai + ci, ai + ai2, bi + cji, bi + bj2)); ci = ai2; cji = bj2 }
                                 found = true; break@search
                             }
                         }
                     }
                     if (!found) {
                         if (ci < aChunk.size || cji < bChunk.size)
-                            result.add(Quadruple("replace", ai + ci, ai + aChunk.size, bi + cji, bi + bChunk.size))
+                            result.add(Quad("replace", ai + ci, ai + aChunk.size, bi + cji, bi + bChunk.size))
                         ci = aChunk.size; cji = bChunk.size
                     }
                 }
@@ -648,139 +431,237 @@ object DocxComparator {
         return result
     }
 
+    // ══════════════════════════════════════════════════════
+    //  修改段落：字符级内联 diff（保留原格式）
+    // ══════════════════════════════════════════════════════
 
-    private fun mergeReplace(opcodes: List<Quadruple>): List<Quadruple> {
-        val result = mutableListOf<Quadruple>()
-        var i = 0
-        while (i < opcodes.size) {
-            val op = opcodes[i]
-            if (op.tag == "delete" && i + 1 < opcodes.size && opcodes[i + 1].tag == "insert") {
-                val next = opcodes[i + 1]
-                result.add(Quadruple("replace", op.i1, op.i2, next.j1, next.j2))
-                i += 2; continue
-            }
-            if (op.tag == "insert" && i + 1 < opcodes.size && opcodes[i + 1].tag == "delete") {
-                val next = opcodes[i + 1]
-                result.add(Quadruple("replace", next.i1, next.i2, op.j1, op.j2))
-                i += 2; continue
-            }
-            result.add(op); i++
-        }
-        return result
-    }
+    private fun buildDiffParagraphXml(
+        origXml: String, origText: String, revText: String,
+        author: String, date: String, ridSeq: IntArray
+    ): Triple<String, Int, Int> {
+        val runs = extractWRuns(origXml)
+        val ops = charDiff(origText, revText)
 
-    // ════════════════════════════════════════════════════════
-    //  字符/词级 Diff
-    // ════════════════════════════════════════════════════════
-
-    private fun buildDiffParagraph(
-        textO: String, textR: String, level: String,
-        author: String, date: String, ridFn: () -> Int,
-        caseSensitive: Boolean, ignoreWs: Boolean
-    ): Pair<String, List<Pair<Int, Int>>> {
-        val toksO = tokenize(textO, level)
-        val toksR = tokenize(textR, level)
-
-        if (toksO.size > MAX_DIFF_TOKENS || toksR.size > MAX_DIFF_TOKENS) {
-            val sb = StringBuilder()
-            sb.append("<w:p xmlns:w=\"$W\">")
-            sb.append(makeRun(textO, "del", author, date, ridFn()))
-            sb.append(makeRun(textR, "ins", author, date, ridFn()))
-            sb.append("</w:p>")
-            return Pair(sb.toString(), listOf(Pair(0, textO.length)))
-        }
-
-        val normO = normalizeTokens(toksO, caseSensitive, ignoreWs)
-        val normR = normalizeTokens(toksR, caseSensitive, ignoreWs)
-
-        val opcodes = computeDiff(normO.map { it.norm }, normR.map { it.norm })
-
-        val sb = StringBuilder()
-        sb.append("<w:p xmlns:w=\"$W\">")
-        val delRanges = mutableListOf<Pair<Int, Int>>()
-
-        for ((tag, i1, i2, j1, j2) in opcodes) {
-            when (tag) {
+        val sb = StringBuilder("<w:p>")
+        var delChars = 0
+        var insChars = 0
+        for (op in ops) {
+            when (op.tag) {
                 "equal" -> {
-                    val seg = toksO.subList(i1, i2).joinToString("") { it.orig }
-                    if (seg.isNotEmpty()) sb.append(makeRun(seg, null, author, date, ridFn()))
+                    val seg = extractRunsInRange(runs, op.i1, op.i2)
+                    if (seg.isNotEmpty()) sb.append(seg)
                 }
                 "delete" -> {
-                    val seg = toksO.subList(i1, i2).joinToString("") { it.orig }
+                    val seg = extractRunsInRange(runs, op.i1, op.i2)
                     if (seg.isNotEmpty()) {
-                        sb.append(makeRun(seg, "del", author, date, ridFn()))
-                        delRanges.add(Pair(toksO[i1].start, toksO[i2 - 1].end))
+                        sb.append("<w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">")
+                        sb.append(seg)
+                        sb.append("</w:del>")
+                        delChars += (op.i2 - op.i1)
                     }
                 }
                 "insert" -> {
-                    val seg = toksR.subList(j1, j2).joinToString("") { it.orig }
-                    if (seg.isNotEmpty()) sb.append(makeRun(seg, "ins", author, date, ridFn()))
+                    val seg = revText.substring(op.j1, op.j2)
+                    if (seg.isNotEmpty()) {
+                        sb.append("<w:ins w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\"><w:r><w:rPr><w:color w:val=\"2E74B5\"/><w:u w:val=\"single\"/></w:rPr><w:t xml:space=\"preserve\">${escapeXml(seg)}</w:t></w:r></w:ins>")
+                        insChars += (op.j2 - op.j1)
+                    }
                 }
                 "replace" -> {
-                    val dSeg = toksO.subList(i1, i2).joinToString("") { it.orig }
+                    val dSeg = extractRunsInRange(runs, op.i1, op.i2)
                     if (dSeg.isNotEmpty()) {
-                        sb.append(makeRun(dSeg, "del", author, date, ridFn()))
-                        delRanges.add(Pair(toksO[i1].start, toksO[i2 - 1].end))
+                        sb.append("<w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">")
+                        sb.append(dSeg)
+                        sb.append("</w:del>")
+                        delChars += (op.i2 - op.i1)
                     }
-                    val iSeg = toksR.subList(j1, j2).joinToString("") { it.orig }
-                    if (iSeg.isNotEmpty()) sb.append(makeRun(iSeg, "ins", author, date, ridFn()))
+                    val iSeg = revText.substring(op.j1, op.j2)
+                    if (iSeg.isNotEmpty()) {
+                        sb.append("<w:ins w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\"><w:r><w:rPr><w:color w:val=\"2E74B5\"/><w:u w:val=\"single\"/></w:rPr><w:t xml:space=\"preserve\">${escapeXml(iSeg)}</w:t></w:r></w:ins>")
+                        insChars += (op.j2 - op.j1)
+                    }
                 }
             }
         }
         sb.append("</w:p>")
-        return Pair(sb.toString(), delRanges)
+        return Triple(sb.toString(), delChars, insChars)
     }
 
-    private fun tokenize(text: String, level: String): List<Token> {
-        if (level == "char") {
-            return text.mapIndexed { i, c -> Token(c.toString(), c.toString(), i, i + 1) }
-        }
-        val tokens = mutableListOf<Token>()
-        var i = 0
-        val n = text.length
-        while (i < n) {
-            val ch = text[i]
-            when {
-                isCJK(ch) -> {
-                    tokens.add(Token(ch.toString(), ch.toString(), i, i + 1)); i++
-                }
-                ch.isLetterOrDigit() || ch == '_' -> {
-                    var j = i
-                    while (j < n && (text[j].isLetterOrDigit() || text[j] == '_')) j++
-                    val word = text.substring(i, j)
-                    tokens.add(Token(word, word, i, j)); i = j
-                }
-                else -> {
-                    tokens.add(Token(ch.toString(), ch.toString(), i, i + 1)); i++
+    private fun charDiff(textO: String, textR: String): List<Quad> {
+        val listO = textO.map { it.toString() }
+        val listR = textR.map { it.toString() }
+        return computeDiffText(listO, listR, false)
+    }
+
+    // ══════════════════════════════════════════════════════
+    //  DOCX 段落解析（保留完整 XML）
+    // ══════════════════════════════════════════════════════
+
+    private fun readParagraphs(docx: File, label: String): List<Para> {
+        val paras = mutableListOf<Para>()
+        try {
+            ZipFile(docx).use { zip ->
+                val entry = zip.getEntry("word/document.xml") ?: return emptyList()
+                val xml = zip.getInputStream(entry).bufferedReader().readText()
+                val paraXmls = extractTopLevelParas(xml)
+                for (px in paraXmls) {
+                    val text = extractParaText(px)
+                    paras.add(Para(px, text))
                 }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "readParagraphs($label) error: ${e.javaClass.simpleName}: ${e.message}")
         }
-        return tokens
+        Log.d(TAG, "readParagraphs($label): ${paras.size} 段落")
+        return paras
     }
 
-    private fun isCJK(c: Char): Boolean = c.code in 0x4E00..0x9FFF || c.code in 0x3400..0x4DBF
-
-    private fun normalizeTokens(tokens: List<Token>, caseSensitive: Boolean, ignoreWs: Boolean): List<Token> {
-        return tokens.map { t ->
-            var norm = t.orig
-            if (!caseSensitive) norm = norm.lowercase(Locale.getDefault())
-            if (ignoreWs) norm = norm.replace("\\s+".toRegex(), "")
-            Token(t.orig, norm, t.start, t.end)
+    private fun extractTopLevelParas(xml: String): List<String> {
+        val result = mutableListOf<String>()
+        var i = 0
+        val n = xml.length
+        while (i < n) {
+            val open = xml.indexOf("<w:p", i)
+            if (open < 0) break
+            val after = if (open + 4 < n) xml[open + 4] else '>'
+            if (after != ' ' && after != '>' && after != '/' && after != '\t' && after != '\n') {
+                i = open + 4
+                continue
+            }
+            var depth = 0
+            var k = open
+            var closeIdx = -1
+            while (k < n) {
+                if (k + 4 < n && xml.startsWith("<w:p", k)) {
+                    val a = xml[k + 4]
+                    if (a == ' ' || a == '>' || a == '/' || a == '\t' || a == '\n') {
+                        depth++
+                        val gt = xml.indexOf('>', k)
+                        if (gt < 0) break
+                        k = gt + 1
+                        continue
+                    }
+                }
+                if (xml.startsWith("</w:p>", k)) {
+                    depth--
+                    if (depth == 0) { closeIdx = k + 6; break }
+                    k += 6
+                    continue
+                }
+                k++
+            }
+            if (closeIdx < 0) break
+            result.add(xml.substring(open, closeIdx))
+            i = closeIdx
         }
+        return result
     }
 
-    // ════════════════════════════════════════════════════════
-    //  OOXML XML 构建
-    // ════════════════════════════════════════════════════════
-
-    private fun makeRun(text: String, kind: String?, author: String, date: String, rid: Int): String {
-        val esc = escapeXml(text)
-        return when (kind) {
-            "ins" -> "<w:ins w:id=\"$rid\" w:author=\"$author\" w:date=\"$date\"><w:r><w:rPr><w:color w:val=\"2E74B5\"/><w:u w:val=\"single\"/></w:rPr><w:t xml:space=\"preserve\">$esc</w:t></w:r></w:ins>"
-            "del" -> "<w:del w:id=\"$rid\" w:author=\"$author\" w:date=\"$date\"><w:r><w:rPr><w:strike/><w:color w:val=\"C00000\"/></w:rPr><w:t xml:space=\"preserve\">$esc</w:t></w:r></w:del>"
-            else -> "<w:r><w:t xml:space=\"preserve\">$esc</w:t></w:r>"
-        }
+    private fun extractParaText(paraXml: String): String {
+        val sb = StringBuilder()
+        val m = Regex("<w:t(?![a-zA-Z])[^>]*>(.*?)</w:t>", RegexOption.DOT_MATCHES_ALL).findAll(paraXml)
+        for (it in m) sb.append(it.groupValues[1])
+        return sb.toString()
     }
+
+    private fun extractWRuns(paraXml: String): List<WRun> {
+        val runs = mutableListOf<WRun>()
+        var offset = 0
+        var i = 0
+        val n = paraXml.length
+        while (i < n) {
+            val rIdx = paraXml.indexOf("<w:r", i)
+            if (rIdx < 0) break
+            val endIdx = paraXml.indexOf("</w:r>", rIdx)
+            if (endIdx < 0) break
+            val runXml = paraXml.substring(rIdx, endIdx + 6)
+            val tMatch = Regex("<w:t(?![a-zA-Z])[^>]*>(.*?)</w:t>", RegexOption.DOT_MATCHES_ALL).find(runXml)
+            val text = tMatch?.groupValues?.get(1) ?: ""
+            if (text.isNotEmpty()) {
+                runs.add(WRun(offset, offset + text.length, runXml))
+                offset += text.length
+            }
+            i = endIdx + 6
+        }
+        return runs
+    }
+
+    private fun extractRunsInRange(runs: List<WRun>, start: Int, end: Int): String {
+        if (start >= end) return ""
+        val sb = StringBuilder()
+        for (run in runs) {
+            if (run.end <= start || run.start >= end) continue
+            val overlapStart = kotlin.math.max(run.start, start)
+            val overlapEnd = kotlin.math.min(run.end, end)
+            val runText = extractRunText(run.runXml)
+            if (runText.isEmpty()) continue
+            val sub = runText.substring(overlapStart - run.start, overlapEnd - run.start)
+            if (sub.isEmpty()) continue
+            val rPr = extractRPr(run.runXml)
+            sb.append("<w:r>")
+            if (rPr.isNotEmpty()) sb.append(rPr)
+            sb.append("<w:t xml:space=\"preserve\">${escapeXml(sub)}</w:t>")
+            sb.append("</w:r>")
+        }
+        return sb.toString()
+    }
+
+    private fun extractRunText(runXml: String): String {
+        val m = Regex("<w:t(?![a-zA-Z])[^>]*>(.*?)</w:t>", RegexOption.DOT_MATCHES_ALL).find(runXml)
+        return m?.groupValues?.get(1) ?: ""
+    }
+
+    private fun extractRPr(runXml: String): String {
+        val m = Regex("<w:rPr.*?</w:rPr>", RegexOption.DOT_MATCHES_ALL).find(runXml)
+        return m?.value ?: ""
+    }
+
+    // ══════════════════════════════════════════════════════
+    //  整段 删除/插入 包裹
+    // ══════════════════════════════════════════════════════
+
+    private fun wrapDeletedParagraph(paraXml: String, author: String, date: String, ridSeq: IntArray): String {
+        val pPr = extractPPr(paraXml)
+        val inner = extractParaInner(paraXml)
+        return "<w:p>$pPr<w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">$inner</w:del></w:p>"
+    }
+
+    private fun wrapInsertedParagraph(paraXml: String, author: String, date: String, ridSeq: IntArray): String {
+        val pPr = extractPPr(paraXml)
+        val inner = extractParaInner(paraXml)
+        return "<w:p>$pPr<w:ins w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">$inner</w:ins></w:p>"
+    }
+
+    private fun wrapDeletedText(origXml: String, gap: String, author: String, date: String, ridSeq: IntArray): String {
+        val pPr = extractPPr(origXml)
+        val rPr = extractFirstRPr(origXml)
+        return "<w:p>$pPr<w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\"><w:r>$rPr<w:t xml:space=\"preserve\">${escapeXml(gap)}</w:t></w:r></w:del></w:p>"
+    }
+
+    private fun extractPPr(paraXml: String): String {
+        val m = Regex("<w:pPr.*?</w:pPr>", RegexOption.DOT_MATCHES_ALL).find(paraXml)
+        return m?.value ?: ""
+    }
+
+    private fun extractFirstRPr(paraXml: String): String {
+        return extractRPr(paraXml)
+    }
+
+    private fun extractParaInner(paraXml: String): String {
+        var s = paraXml
+        val openMatch = Regex("<w:p[^>]*>").find(s)
+        if (openMatch != null) s = s.substring(openMatch.range.last + 1)
+        val closeIdx = s.lastIndexOf("</w:p>")
+        if (closeIdx >= 0) s = s.substring(0, closeIdx)
+        s = Regex("<w:pPr.*?</w:pPr>", RegexOption.DOT_MATCHES_ALL).replace(s, "")
+        return s
+    }
+
+    // ══════════════════════════════════════════════════════
+    //  OOXML 工具
+    // ══════════════════════════════════════════════════════
+
+    private fun nextRid(seq: IntArray): Int { seq[0]++; return seq[0] }
 
     private fun escapeXml(text: String): String {
         var last = 0
@@ -802,68 +683,9 @@ object DocxComparator {
         return sb.toString()
     }
 
-    private fun buildPlainParagraph(text: String): String {
-        val esc = escapeXml(text)
-        return if (text.isNotEmpty()) "<w:p xmlns:w=\"$W\"><w:r><w:t xml:space=\"preserve\">$esc</w:t></w:r></w:p>"
-               else "<w:p xmlns:w=\"$W\"/>"
-    }
-
-    private fun buildDeletedParagraph(text: String, author: String, date: String, ridFn: () -> Int): String {
-        val sb = StringBuilder("<w:p xmlns:w=\"$W\">")
-        if (text.isNotEmpty()) sb.append(makeRun(text, "del", author, date, ridFn()))
-        sb.append("</w:p>")
-        return sb.toString()
-    }
-
-    private fun buildInsertedParagraph(text: String, author: String, date: String, ridFn: () -> Int): String {
-        val sb = StringBuilder("<w:p xmlns:w=\"$W\">")
-        if (text.isNotEmpty()) sb.append(makeRun(text, "ins", author, date, ridFn()))
-        sb.append("</w:p>")
-        return sb.toString()
-    }
-
-    private fun buildNoteParagraph(label: String): String {
-        val esc = escapeXml(label)
-        return "<w:p xmlns:w=\"$W\"><w:r><w:rPr><w:b/></w:rPr><w:t xml:space=\"preserve\">$esc</w:t></w:r></w:p>"
-    }
-
-    // ════════════════════════════════════════════════════════
-    //  统计辅助
-    // ════════════════════════════════════════════════════════
-
-    private fun countModifiedSentences(text: String, ranges: List<Pair<Int, Int>>): Int {
-        if (text.isBlank() || ranges.isEmpty()) return 0
-        val sents = splitSentences(text)
-        var total = 0
-        for ((s, e, sent) in sents) {
-            for ((rs, re) in ranges) {
-                if (e > rs && s < re) {
-                    total += sent.replace("\\s".toRegex(), "").length; break
-                }
-            }
-        }
-        return total
-    }
-
-    private fun countTextChars(text: String): Int = text.replace("\\s".toRegex(), "").length
-
-    private fun splitSentences(text: String): List<Triple<Int, Int, String>> {
-        val parts = text.split("(?<=[。！？；\\n\\r])".toRegex())
-        val res = mutableListOf<Triple<Int, Int, String>>()
-        var pos = 0
-        for (part in parts) {
-            val trimmed = part.trim()
-            if (trimmed.isNotEmpty()) {
-                res.add(Triple(pos, pos + part.length, part))
-                pos += part.length
-            }
-        }
-        return res
-    }
-
-    // ════════════════════════════════════════════════════════
-    //  输出 DOCX 写入
-    // ════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════
+    //  输出 DOCX 写入（保留原文档模板）
+    // ══════════════════════════════════════════════════════
 
     private fun writeOutputDocx(origDocx: File, outPath: String, bodyXmlParts: List<String>) {
         val bodyContent = bodyXmlParts.joinToString("\n")
@@ -874,14 +696,16 @@ object DocxComparator {
                     val entry = entries.nextElement()
                     when (entry.name) {
                         "word/document.xml" -> {
+                            val origDoc = zin.getInputStream(entry).bufferedReader().readText()
+                            val newDoc = replaceBody(origDoc, bodyContent)
                             zout.putNextEntry(ZipEntry("word/document.xml"))
-                            zout.write(buildNewDocument(bodyContent).toByteArray(Charsets.UTF_8))
+                            zout.write(newDoc.toByteArray(Charsets.UTF_8))
                             zout.closeEntry()
                         }
                         "word/settings.xml" -> {
                             val settingsXml = zin.getInputStream(entry).bufferedReader().readText()
                             zout.putNextEntry(ZipEntry("word/settings.xml"))
-                            zout.write(buildSettingsWithTrackRevisions(settingsXml).toByteArray(Charsets.UTF_8))
+                            zout.write(ensureTrackRevisions(settingsXml).toByteArray(Charsets.UTF_8))
                             zout.closeEntry()
                         }
                         else -> {
@@ -895,45 +719,21 @@ object DocxComparator {
         }
     }
 
-    private fun buildNewDocument(bodyContent: String): String {
-        return """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="$W" xmlns:r="$R" mc:Ignorable="w14 wp14">
-  <w:body>
-$bodyContent
-    <w:sectPr>
-      <w:pgSz w:w="11906" w:h="16838"/>
-      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>
-      <w:cols w:space="720"/>
-      <w:docGrid w:linePitch="360"/>
-    </w:sectPr>
-  </w:body>
-</w:document>"""
+    private fun replaceBody(origDoc: String, bodyContent: String): String {
+        val bodyOpen = origDoc.indexOf("<w:body")
+        if (bodyOpen < 0) return origDoc
+        val gt = origDoc.indexOf('>', bodyOpen)
+        if (gt < 0) return origDoc
+        val bodyStart = gt + 1
+        val bodyClose = origDoc.lastIndexOf("</w:body>")
+        if (bodyClose < 0) return origDoc
+        val sectPrMatch = Regex("<w:sectPr.*?</w:sectPr>", RegexOption.DOT_MATCHES_ALL).find(origDoc)
+        val sectPr = sectPrMatch?.value ?: ""
+        return origDoc.substring(0, bodyStart) + "\n" + bodyContent + "\n" + sectPr + "\n" + origDoc.substring(bodyClose)
     }
 
-    private fun buildSettingsWithTrackRevisions(originalSettings: String): String {
-        return try {
-            if (originalSettings.contains("trackRevisions")) {
-                originalSettings.replace("<w:trackRevisions[^/]*/>".toRegex(), "<w:trackRevisions w:val=\"true\"/>")
-            } else {
-                originalSettings.replace("</w:settings>", "<w:trackRevisions w:val=\"true\"/></w:settings>")
-            }
-        } catch (_: Exception) {
-            """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:settings xmlns:w="$W">
-  <w:trackRevisions w:val="true"/>
-</w:settings>"""
-        }
+    private fun ensureTrackRevisions(originalSettings: String): String {
+        return if (originalSettings.contains("w:trackRevisions")) originalSettings
+        else originalSettings.replace("</w:settings>", "<w:trackRevisions w:val=\"true\"/></w:settings>")
     }
-
-    // ════════════════════════════════════════════════════════
-    //  工具
-    // ════════════════════════════════════════════════════════
-
-    private fun getNsTag(parser: XmlPullParser): String {
-        val ns = parser.namespace ?: ""
-        val local = parser.name ?: ""
-        return if (ns.isNotEmpty()) "$ns:$local" else local
-    }
-
-    data class Quadruple(val tag: String, val i1: Int, val i2: Int, val j1: Int, val j2: Int)
 }
