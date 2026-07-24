@@ -936,7 +936,7 @@ object DocxComparator {
         return total
     }
 
-    private fun countTextChars(text: String): Int = text.replace("\\s".toRegex(), "".toRegex()).length
+    private fun countTextChars(text: String): Int = text.replace("\\s".toRegex(), "").length
 
     private fun splitSentences(text: String): List<Triple<Int, Int, String>> {
         val parts = text.split("(?<=[。！？；\\n\\r])".toRegex())
