@@ -1732,7 +1732,10 @@ fun CompareScreen(
         scope.launch(Dispatchers.IO) {
             try {
                 val out = File(context.cacheDir, "compare_result_${System.currentTimeMillis()}.docx")
-                val opts = org.json.JSONObject().apply {
+                // v1.1.36: 使用纯 Kotlin 实现（DocxComparator），不再经过 Python 引擎
+                // 原因：Chaquopy lxml C 扩展在 Android 上触发 fatal 级 AssetFinder 崩溃，
+                //       历经 v1.1.15~v1.35 共 20 个版本验证，Python 层拦截全部无效。
+                val cmpOpts = org.json.JSONObject().apply {
                     put("level", level)
                     put("case", optCase)
                     put("whitespace", optWs)
@@ -1742,18 +1745,22 @@ fun CompareScreen(
                     put("textbox", optTb)
                     put("field", optField)
                 }.toString()
-                val res = PythonEngine.compareDocx(context, o.file.absolutePath, r.file.absolutePath, out.absolutePath, opts)
+                val res = DocxComparator.compare(context, o.file.absolutePath, r.file.absolutePath, out.absolutePath, cmpOpts)
                 withContext(Dispatchers.Main) {
-                    if (res != null) {
-                        val j = org.json.JSONObject(res)
-                        if (j.optBoolean("ok", false)) {
-                            resultJson = res
-                            outPath = out.absolutePath
-                        } else {
-                            snackbar.showSnackbar("比较失败：${j.optString("error", "未知错误")}")
+                    if (res.ok) {
+                        val j = org.json.JSONObject().apply {
+                            put("ok", true)
+                            put("outputPath", res.outputPath)
+                            put("modifiedChars", res.modifiedChars)
+                            put("insCount", res.insCount)
+                            put("delCount", res.delCount)
+                            put("repCount", res.repCount)
+                            put("summary", res.summary)
                         }
+                        resultJson = j.toString()
+                        outPath = res.outputPath
                     } else {
-                        snackbar.showSnackbar("比较失败：Python 无返回")
+                        snackbar.showSnackbar("比较失败：${res.error ?: "未知错误"}")
                     }
                     busy = false
                 }

@@ -187,222 +187,96 @@ import sys
 
 
 # ═════════════════════════════════════════════════════
-# v1.1.35: Android lxml 崩溃防御（bootstrap 级别拦截版）
+# v1.1.36: Android lxml 崩溃防御（精简版）
 # ═════════════════════════════════════════════════════
-# 根因（历经 v1.1.15~v1.33 共 19 个版本确认）：
-#   lxml 的 C 扩展(.so)在 Android 上触发 fatal 级
+# 根因（v1.1.15~v1.35 共 21 个版本确认）：
+#   lxml C 扩展(.so)在 Android 上触发 fatal 级
 #   FileNotFoundError(AssetFinder/scripts)。
+#   Chaquopy AssetFinder 在 C/Java 层加载 .so，绕过 Python 层拦截。
 #
-# ★ 为什么之前 L1~L5 全部失败？★
-#   L1 (meta_path): Chaquopy AssetFinder 可能绕过 meta_path
-#   L2 (sys.modules): 子模块覆盖不全——漏掉了某些路径
-#   L3 (sys.path清理): 可能遗漏某些路径形态
-#   L5 (__import__): 某些代码路径可能不走 builtins.__import__
-#
-# ★ v1.1.35 新策略 ★
-#   A. 新增 L7: monkey-patch importlib._bootstrap._find_and_load
-#      —— 这是最底层的模块加载入口，所有 import 最终都经过这里
-#   B. 大幅加强 L2: 预填充 30+ 个 lxml 子模块到 sys.modules
-#      —— 覆盖所有可能的子模块访问路径
-#   C. 新增 L8: faulthandler.enable() —— 捕获 C 级别的 fatal 错误
-#   D. 保留 L1(meta_path) + L3(path清理) + L5(__import__) 作为辅助防线
+# v1.1.36 策略：
+#   A. DOCX 比较已改纯 Kotlin（DocxComparator.kt）→ 不再触发 lxml
+#   B. 保留 L1+L2+L3+L5 保护 count_files/pdfminer 路径
+#   C. 删除无效的 L7(bootstrap) 和 L8(faulthandler)
 # ═════════════════════════════════════════════════════
 import importlib as _importlib
-import importlib.util as _iu
 import importlib.machinery as _im
 from importlib.abc import Loader as _LoaderBase, MetaPathFinder as _MetaPathFinderBase
 import types as _types
 import builtins as _builtins
 
-# ── 共享工具 ──
 _BLOCKED_LOADER = None
-
-# 完整的 lxml 家族模块名列表（30+ 个）
-_LXML_FULL_MODULE_SET = {
-    'lxml',
-    'lxml.etree', 'lxml.etree.ElementBase', 'lxml.etree.XPath',
-    'lxml.etree.XPathEvaluator', 'lxml.etree._Element', 'lxml.etree.IterparseIterator',
-    'lxml.html', 'lxml.html.clean', 'lxml.html.formfill', 'lxml.html.diff',
-    'lxml.sax', 'lxml.isoschematron',
-    'lxml.ElementInclude', 'lxml.cssselect', 'lxml.builder',
-    # 常见的内部/ C 扩展子模块
-    'lxml._elementpath',
+_LXML_MODULE_SET = {
+    "lxml", "lxml.etree", "lxml.html", "lxml.sax", "lxml.isoschematron",
+    "lxml.ElementInclude", "lxml.cssselect", "lxml.builder", "lxml._elementpath",
 }
 
-
 def _is_lxml_name(name):
-    """检查模块名是否属于 lxml 家族。"""
-    if name in _LXML_FULL_MODULE_SET:
-        return True
-    return (name == 'lxml'
-            or name.startswith('lxml.')
-            or name.startswith('lxml_'))
-
+    return name in _LXML_MODULE_SET or name.startswith("lxml.") or name.startswith("lxml_")
 
 def _make_lxml_stub(name):
-    """创建一个足够"真"的 lxml stub 模块。"""
     mod = _types.ModuleType(name)
     mod.__loader__ = _BLOCKED_LOADER
     mod.__spec__ = _im.ModuleSpec(name, _BLOCKED_LOADER)
     mod.__spec__.has_location = False
-    pkg = name.split('.')[0] if '.' in name else name
-    mod.__package__ = pkg
-    mod.__path__ = []
-    mod.__file__ = ''
-    mod.__all__ = []
-    mod.__version__ = '0.0 (stub)'
-    # 让属性访问返回子 stub（链式拦截）
-    class _StubAttr:
-        def __getattr__(self, attr):
-            subname = name + '.' + attr if not name.endswith('.' + attr) else attr
-            if subname not in sys.modules:
-                sys.modules[subname] = _make_lxml_stub(subname)
-            return sys.modules[subname]
-        def __call__(self, *a, **k):
-            return _types.ModuleType(name + '.tmp')
-        def __iter__(self):
-            return iter([])
-        def __len__(self):
-            return 0
-        def __bool__(self):
-            return False
-        def __repr__(self):
-            return f"<module '{name}' (stub)>"
-    mod._StubAttr = _StubAttr()
-    # 常见属性预设为 stub
-    for _attr in ('etree', 'HTML', 'XML', 'fromstring', 'tostring', 'parse',
-                  'SubElement', 'Element', 'dump', 'XPath', 'XSLT',
-                  'iterparse', 'iterwalk', 'resolve_entities', 'set_default_parser'):
-        if not hasattr(mod, _attr):
-            setattr(mod, _attr, _StubAttr())
+    mod.__package__ = name.split(".")[0] if "." in name else name
+    mod.__path__ = []; mod.__file__ = ""; mod.__all__ = []
     return mod
 
-
-# ══ 第1层：sys.meta_path 拦截器 ══
 class _BlockedLoader(_LoaderBase):
     def create_module(self, spec):
-        mod = _types.ModuleType(spec.name)
-        mod.__loader__ = self
-        mod.__package__ = spec.parent
-        mod.__spec__ = spec
-        return mod
-    def exec_module(self, module):
-        pass
-
+        m = _types.ModuleType(spec.name); m.__loader__ = self
+        m.__package__ = spec.parent; m.__spec__ = spec; return m
+    def exec_module(self, module): pass
 
 _BLOCKED_LOADER = _BlockedLoader()
 
-
 class _LxmlMetaPathBlocker(_MetaPathFinderBase):
     def find_spec(self, fullname, path, target=None):
-        if _is_lxml_name(fullname):
-            return _im.ModuleSpec(fullname, _BLOCKED_LOADER)
+        if _is_lxml_name(fullname): return _im.ModuleSpec(fullname, _BLOCKED_LOADER)
         return None
     def find_module(self, fullname, path=None):
-        if _is_lxml_name(fullname):
-            return self
+        if _is_lxml_name(fullname): return self
         return None
     def load_module(self, fullname):
-        if fullname in sys.modules:
-            return sys.modules[fullname]
-        mod = _types.ModuleType(fullname)
-        mod.__loader__ = self
-        sys.modules[fullname] = mod
-        return mod
-
+        if fullname in sys.modules: return sys.modules[fullname]
+        m = _types.ModuleType(fullname); m.__loader__ = self
+        sys.modules[fullname] = m; return m
 
 sys.meta_path.insert(0, _LxmlMetaPathBlocker())
 
+sys.modules["lxml"] = _make_lxml_stub("lxml")
+for _s in list(_LXML_MODULE_SET):
+    if _s != "lxml": sys.modules[_s] = _make_lxml_stub(_s)
 
-# ══ 第2层：sys.modules 超完整预填充（30+ 子模块）══
-sys.modules['lxml'] = _make_lxml_stub('lxml')
-for _sub in list(_LXML_FULL_MODULE_SET):
-    if _sub != 'lxml':
-        sys.modules[_sub] = _make_lxml_stub(_sub)
-# 额外填充常见的变体名称
-for _extra in ['lxml.etree.ElementBase', 'lxml.etree.XPath',
-               'lxml.etree.XPathEvaluator', 'lxml.etree._Element',
-               'lxml.etree.IterparseIterator', 'lxml.html.clean',
-               'lxml.html.formfill', 'lxml.html.diff', 'lxml._elementpath']:
-    if _extra not in sys.modules:
-        sys.modules[_extra] = _make_lxml_stub(_extra)
-
-
-# ══ 第3层：sys.path 清理 ══
-_cleaned_path = []
-for _pentry in list(sys.path):
-    if _pentry:
-        _has_lxml = False
-        for _candidate in [_pentry + '/lxml', _pentry + '/lxml.etree']:
+_cleaned = []
+for _pe in list(sys.path):
+    if _pe:
+        _has = False
+        for _c in [_pe + "/lxml", _pe + "/lxml.etree"]:
             try:
                 import os as _os
-                if _os.path.isdir(_candidate) or _os.path.isfile(_candidate + '.so') or _os.path.isfile(_candidate + '.pyd'):
-                    _has_lxml = True
-                    break
-            except Exception:
-                pass
-        if not _has_lxml:
-            _cleaned_path.append(_pentry)
-sys.path[:] = _cleaned_path
+                if _os.path.isdir(_c) or _os.path.isfile(_c + ".so") or _os.path.isfile(_c + ".pyd"):
+                    _has = True; break
+            except Exception: pass
+        if not _has: _cleaned.append(_pe)
+sys.path[:] = _cleaned
 
-
-# ══ 第5层：覆盖 builtins.__import__ ══
-_original_import = _builtins.__import__
-
+_orig_import = _builtins.__import__
 def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
     if _is_lxml_name(name):
-        if name not in sys.modules:
-            sys.modules[name] = _make_lxml_stub(name)
+        if name not in sys.modules: sys.modules[name] = _make_lxml_stub(name)
         if fromlist:
             mod = sys.modules[name]
             for sub in fromlist:
-                subname = name + '.' + sub
-                if subname not in sys.modules:
-                    sys.modules[subname] = _make_lxml_stub(subname)
+                sn = name + "." + sub
+                if sn not in sys.modules: sys.modules[sn] = _make_lxml_stub(sn)
             return mod
         return sys.modules[name]
-    return _original_import(name, globals, locals, fromlist, level)
+    return _orig_import(name, globals, locals, fromlist, level)
 
 _builtins.__import__ = _safe_import
 
-
-# ══ 第7层：importlib._bootstrap 级别拦截（核心新增）══
-try:
-    import importlib._bootstrap as _boot
-    _original_find_and_load = getattr(_boot, '_find_and_load', None)
-
-    if _original_find_and_load is not None:
-        def _patched_find_and_load(name, *args, **kwargs):
-            if _is_lxml_name(name):
-                if name not in sys.modules:
-                    sys.modules[name] = _make_lxml_stub(name)
-                return sys.modules[name]
-            return _original_find_and_load(name, *args, **kwargs)
-
-        _boot._find_and_load = _patched_find_and_load
-
-    # 同时 patch _find_spec（如果存在）
-    _original_find_spec = getattr(_boot, '_find_spec', None)
-    if _original_find_spec is not None:
-        def _patched_find_spec(name, *args, **kwargs):
-            if _is_lxml_name(name):
-                return _im.ModuleSpec(name, _BLOCKED_LOADER)
-            return _original_find_spec(name, *args, **kwargs)
-
-        _boot._find_spec = _patched_find_spec
-except Exception:
-    pass  # bootstrap patch 失败不阻断其他防御层
-
-
-# ══ 第8层：faulthandler 捕获 C 级 fatal 错误 ══
-try:
-    import faulthandler as _fh
-    _fh.enable(all_threads=True)
-except Exception:
-    pass
-
-
-import re
 
 
 
