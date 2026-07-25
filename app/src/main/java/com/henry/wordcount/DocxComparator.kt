@@ -12,7 +12,7 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 /**
- * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.62 子串改蓝+部分删除版）。
+ * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.63 修复删除渲染+回退SUB_EQ黑字版）。
  *
  * 设计目标：输出文档与 Word「审阅-比较」结果一致。
  * 核心思路：
@@ -115,11 +115,10 @@ object DocxComparator {
                     eqBlackChars += revParas[op.rj].text.length
                 }
                 "SUB_EQ" -> {
-                    // 子串匹配段：修订档里被原文档大段包含、但作为独立新段落出现的内容
-                    // → 按"新增段落"输出(蓝字插入)，与 Word 一致；避免被误标为黑字。
-                    bodyParts.add(wrapInsertedParagraph(revParas[op.rj].xml, author, date, ridSeq))
-                    insCount++
-                    totalInsChars += revParas[op.rj].text.length
+                    // 子串匹配段：修订档段落是原文档某段的子串
+                    // → 按修订档原样输出（黑字），与 Word 原生一致（Word W06/W07 均为黑字）
+                    bodyParts.add(revParas[op.rj].xml)
+                    eqBlackChars += revParas[op.rj].text.length
                 }
                 "DEL" -> {
                     // 原档中被删除的段落（仅非空段落）
@@ -618,8 +617,9 @@ object DocxComparator {
                 "delete" -> {
                     val seg = extractRunsInRange(runs, op.i1, op.i2)
                     if (seg.isNotEmpty()) {
+                        val delSeg = toDelText(seg)
                         sb.append("<w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">")
-                        sb.append(seg)
+                        sb.append(delSeg)
                         sb.append("</w:del>")
                         delChars += (op.i2 - op.i1)
                     }
@@ -634,8 +634,9 @@ object DocxComparator {
                 "replace" -> {
                     val dSeg = extractRunsInRange(runs, op.i1, op.i2)
                     if (dSeg.isNotEmpty()) {
+                        val delDSeg = toDelText(dSeg)
                         sb.append("<w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">")
-                        sb.append(dSeg)
+                        sb.append(delDSeg)
                         sb.append("</w:del>")
                         delChars += (op.i2 - op.i1)
                     }
@@ -787,7 +788,8 @@ object DocxComparator {
     private fun wrapDeletedParagraph(paraXml: String, author: String, date: String, ridSeq: IntArray): String {
         val pPr = extractPPr(paraXml)
         val inner = extractParaInner(paraXml)
-        return "<w:p>$pPr<w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">$inner</w:del></w:p>"
+        val delInner = toDelText(inner)
+        return "<w:p>$pPr<w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">$delInner</w:del></w:p>"
     }
 
     private fun wrapInsertedParagraph(paraXml: String, author: String, date: String, ridSeq: IntArray): String {
@@ -810,11 +812,17 @@ object DocxComparator {
             if (e <= s) continue
             val seg = extractRunsInRange(runs, s, e)
             if (seg.isNotEmpty()) {
-                sb.append("<w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">$seg</w:del>")
+                val delSeg = toDelText(seg)
+                sb.append("<w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">$delSeg</w:del>")
             }
         }
         sb.append("</w:p>")
         return sb.toString()
+    }
+
+    /** 将 <w:t>...</w:t> 转为 <w:delText>...</w:delText>，用于删除标记内部。 */
+    private fun toDelText(xml: String): String {
+        return xml.replace("<w:t", "<w:delText").replace("</w:t>", "</w:delText>")
     }
 
     /** 计算 [0,total) 中排除 exclude 区间后的补集区间（升序、不重叠）。 */
@@ -834,7 +842,7 @@ object DocxComparator {
     private fun wrapDeletedText(origXml: String, gap: String, author: String, date: String, ridSeq: IntArray): String {
         val pPr = extractPPr(origXml)
         val rPr = extractFirstRPr(origXml)
-        return "<w:p>$pPr<w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\"><w:r>$rPr<w:t xml:space=\"preserve\">${escapeXml(gap)}</w:t></w:r></w:del></w:p>"
+        return "<w:p>$pPr<w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\"><w:r>$rPr<w:delText xml:space=\"preserve\">${escapeXml(gap)}</w:delText></w:r></w:del></w:p>"
     }
 
     private fun extractPPr(paraXml: String): String {
