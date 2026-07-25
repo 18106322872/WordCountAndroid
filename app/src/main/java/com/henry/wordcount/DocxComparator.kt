@@ -11,9 +11,13 @@ import kotlin.text.Regex
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
+import org.apache.poi.hwpf.HWPFDocument
+import org.apache.poi.hwpf.usermodel.CharacterRun
+import org.apache.poi.hwpf.usermodel.Paragraph
+import org.apache.poi.hwpf.usermodel.Range
 
 /**
- * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.85：支持旧版 .doc 自动转 .docx）。
+ * 纯 Kotlin 实现的 DOCX 文档比较器（v1.2.1：旧版 .doc 转换保留缩进与字号）。
  *
  * 设计目标：输出文档与 Word「审阅-比较」结果一致。
  * 核心思路：
@@ -630,8 +634,9 @@ object DocxComparator {
         val runs = extractWRuns(origXml)
         val ops = charDiff(origText, revText)
         // 段落缩进/对齐等格式取自【修订后的文档】，使结果文档与修订档外观一致
-        // （仅原文档有、修订档没有的段落才用原文档缩进，由 DEL 分支负责）
-        val pPr = extractPPr(revXml)
+        // （如果修订档该段没有缩进、原文档有，则回退原文档缩进）
+        val revPPr = extractPPr(revXml)
+        val pPr = if (revPPr.isNotEmpty()) revPPr else extractPPr(origXml)
 
         val sb = StringBuilder("<w:p>$pPr")
         var delChars = 0
@@ -1199,46 +1204,86 @@ object DocxComparator {
     }
 
     /**
-     * 将旧版 .doc 文件转换为最简 .docx（纯文本，每段一个 <w:p>）。
-     * 用 POI HWPF 提取文本，再包装成最小有效 DOCX（ZIP + XML）。
+     * 将旧版 .doc 文件转换为最简 .docx，并【保留段落缩进(pPr/w:ind)与字符字号(rPr/w:sz)】。
+     * 用 POI HWPF 的 Range API 逐段/逐字符运行读取格式，再包装成最小有效 DOCX（ZIP + XML）。
+     * 这样比较结果才能沿用「修改后的文件」的缩进与字号（原文件没有的段落才回退原文件）。
      * 返回临时文件路径，调用方负责清理。
      */
     private fun convertDocToMinimalDocx(docPath: String): String? {
         return try {
-            // 1. 用 POI HWPF 提取纯文本
-            val text = OldOfficeEngine.extractText(File(docPath))
-            if (text.isBlank()) null else {
+            val doc = HWPFDocument(FileInputStream(docPath))
+            try {
+                val range = doc.range
+                val sb = StringBuilder()
+                var emitted = 0
+                for (pi in 0 until range.numParagraphs()) {
+                    val para: Paragraph = runCatching { range.getParagraph(pi) }.getOrNull() ?: continue
+                    val sbRuns = StringBuilder()
+                    var paraLen = 0
+                    for (ri in 0 until para.numCharacterRuns()) {
+                        val run: CharacterRun = runCatching { para.getCharacterRun(ri) }.getOrNull() ?: continue
+                        var runText = run.text() ?: ""
+                        // 去掉段落标记/分节符等控制字符
+                        runText = runText.replace("\r", "").replace("\u0007", "")
+                            .replace("\u000c", "").replace("\u000b", "").replace("\f", "")
+                        if (runText.isEmpty()) continue
+                        val fontSize = runCatching { run.fontSize }.getOrElse { 0 }
+                        val fontName = runCatching { run.fontName }.getOrNull() ?: ""
+                        sbRuns.append("<w:r>${buildRunRPr(fontSize, fontName)}<w:t xml:space=\"preserve\">${escapeXml(runText)}</w:t></w:r>")
+                        paraLen += runText.length
+                    }
+                    if (paraLen == 0) continue
+                    val pPr = runCatching { buildParagraphPPr(para) }.getOrElse { "" }
+                    sb.append("<w:p>$pPr$sbRuns</w:p>\n")
+                    emitted++
+                }
+                if (emitted == 0) {
+                    // 退化：Range 解析失败 → 退回纯文本转换
+                    val txt = OldOfficeEngine.extractText(File(docPath))
+                    if (txt.isBlank()) null else writeMinimalDocx(buildPlainParas(txt))
+                } else {
+                    writeMinimalDocx(sb.toString())
+                }
+            } finally {
+                runCatching { doc.close() }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "convertDocToMinimalDocx error: ${e.javaClass.simpleName}: ${e.message}")
+            // 防御：任何异常都退回纯文本转换
+            try {
+                val txt = OldOfficeEngine.extractText(File(docPath))
+                if (txt.isBlank()) null else writeMinimalDocx(buildPlainParas(txt))
+            } catch (_: Exception) { null }
+        }
+    }
 
-                // 2. 构建最小 docx 的 [Content_Types].xml
-                val contentTypes = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    /** 纯文本（按行）构建最小段落 XML（无格式，作为 .doc 解析失败时的退化路径）。 */
+    private fun buildPlainParas(text: String): String {
+        val escaped = escapeXml(text)
+        return escaped.lines().filter { it.isNotBlank() }.joinToString("\n") { line ->
+            "<w:p><w:r><w:t xml:space=\"preserve\">$line</w:t></w:r></w:p>"
+        }
+    }
+
+    /** 把段落集合写入最小有效 DOCX，返回临时文件路径。 */
+    private fun writeMinimalDocx(bodyParasXml: String): String {
+        val contentTypes = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="xml" ContentType="application/xml"/>
   <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
 </Types>"""
 
-                // 3. _rels/.rels
-                val rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        val rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
 </Relationships>"""
 
-                // 4. word/_rels/document.xml.rels
-                val docRels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        val docRels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 </Relationships>"""
 
-                // 5. word/document.xml — 将文本按行分割为段落
-                val escaped = text
-                    .replace("&", "&amp;")
-                    .replace("<", "&lt;")
-                    .replace(">", "&gt;")
-                    .replace("\"", "&quot;")
-                    .replace("'", "&apos;")
-                val paragraphs = escaped.lines().filter { it.isNotBlank() }.joinToString("\n") { line ->
-                    "<w:p><w:r><w:t xml:space=\"preserve\">$line</w:t></w:r></w:p>"
-                }
-                val documentXml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        val documentXml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas"
             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
             xmlns:o="urn:schemas-microsoft-com:office:office"
@@ -1255,7 +1300,7 @@ object DocxComparator {
             xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
             mc:Ignorable="w14 wp14">
   <w:body>
-$paragraphs
+$bodyParasXml
     <w:sectPr>
       <w:pgSz w:w="11906" w:h="16838"/>
       <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="851" w:footer="992" w:gutter="0"/>
@@ -1263,31 +1308,54 @@ $paragraphs
   </w:body>
 </w:document>"""
 
-                // 6. 写入 ZIP (docx 本质是 ZIP)
-                val tmpFile = File.createTempFile("wc_convert_", ".docx")
-                ZipOutputStream(tmpFile.outputStream()).use { zout ->
-                    zout.putNextEntry(ZipEntry("[Content_Types].xml"))
-                    zout.write(contentTypes.toByteArray(Charsets.UTF_8))
-                    zout.closeEntry()
+        val tmpFile = File.createTempFile("wc_convert_", ".docx")
+        ZipOutputStream(tmpFile.outputStream()).use { zout ->
+            zout.putNextEntry(ZipEntry("[Content_Types].xml"))
+            zout.write(contentTypes.toByteArray(Charsets.UTF_8))
+            zout.closeEntry()
 
-                    zout.putNextEntry(ZipEntry("_rels/.rels"))
-                    zout.write(rels.toByteArray(Charsets.UTF_8))
-                    zout.closeEntry()
+            zout.putNextEntry(ZipEntry("_rels/.rels"))
+            zout.write(rels.toByteArray(Charsets.UTF_8))
+            zout.closeEntry()
 
-                    zout.putNextEntry(ZipEntry("word/document.xml"))
-                    zout.write(documentXml.toByteArray(Charsets.UTF_8))
-                    zout.closeEntry()
+            zout.putNextEntry(ZipEntry("word/document.xml"))
+            zout.write(documentXml.toByteArray(Charsets.UTF_8))
+            zout.closeEntry()
 
-                    zout.putNextEntry(ZipEntry("word/_rels/document.xml.rels"))
-                    zout.write(docRels.toByteArray(Charsets.UTF_8))
-                    zout.closeEntry()
-                }
-
-                tmpFile.absolutePath
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "convertDocToMinimalDocx error: ${e.javaClass.simpleName}: ${e.message}")
-            null
+            zout.putNextEntry(ZipEntry("word/_rels/document.xml.rels"))
+            zout.write(docRels.toByteArray(Charsets.UTF_8))
+            zout.closeEntry()
         }
+        return tmpFile.absolutePath
+    }
+
+    /** 从 HWPF 段落读取缩进，生成 <w:pPr><w:ind .../></w:pPr>（twips 与 docx 单位一致）。
+     *  firstLine>0 → 首行缩进；firstLine<0 → 悬挂缩进。无缩进返回空串。 */
+    private fun buildParagraphPPr(para: Paragraph): String {
+        val left = para.indentFromLeft
+        val right = para.indentFromRight
+        val first = para.firstLineIndent
+        if (left == 0 && right == 0 && first == 0) return ""
+        val ind = StringBuilder("<w:ind")
+        if (left != 0) ind.append(" w:left=\"$left\"")
+        if (right != 0) ind.append(" w:right=\"$right\"")
+        if (first > 0) ind.append(" w:firstLine=\"$first\"")
+        else if (first < 0) ind.append(" w:hanging=\"${-first}\"")
+        ind.append("/>")
+        return "<w:pPr>$ind</w:pPr>"
+    }
+
+    /** 生成字符运行属性：保留字号(w:sz/w:szCs)与字体名(w:rFonts)。fontSize 为半磅(与 docx 一致)。 */
+    private fun buildRunRPr(fontSize: Int, fontName: String): String {
+        val sb = StringBuilder("<w:rPr>")
+        if (fontName.isNotBlank()) {
+            val safe = fontName.replace("\"", "&quot;")
+            sb.append("<w:rFonts w:ascii=\"$safe\" w:hAnsi=\"$safe\" w:eastAsia=\"$safe\" w:cs=\"$safe\"/>")
+        }
+        if (fontSize > 0) {
+            sb.append("<w:sz w:val=\"$fontSize\"/><w:szCs w:val=\"$fontSize\"/>")
+        }
+        sb.append("</w:rPr>")
+        return sb.toString()
     }
 }
