@@ -472,9 +472,10 @@ fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEnt
  * 返回 (words, fe, nc, chars)
  */
 fun countTextKotlin(text: String): Quadruple<Int, Int, Int, Int> {
-    // FarEast 正则：CJK + 朝鲜语 + 全角（与 Python 端 _FAR 完全一致）
-    val farEastRegex = Regex("[\\u1100-\\u11FF\\u3000-\\u303F\\u3130-\\u318F\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uA960-\\uA97C\\uAC00-\\uD7A3\\uD7B0-\\uD7FF\\uF900-\\uFAFF\\uFF00-\\uFFEF]")
-    val nonCjkRegex = Regex("[^\\s\\u1100-\\u11FF\\u3000-\\u303F\\u3130-\\u318F\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uA960-\\uA97C\\uAC00-\\uD7A3\\uD7B0-\\uD7FF\\uF900-\\uFAFF\\uFF00-\\uFFEF]+")
+    // FarEast 正则：CJK + 朝鲜语 + 全角 + 通用标点（与 Word「中文字符和朝鲜语单词」口径对齐）
+    // v1.2.2 新增 \u2000-\u206F：覆盖弯引号""''、破折号—、省略号…等中文文档常用通用标点
+    val farEastRegex = Regex("[\\u1100-\\u11FF\\u2000-\\u206F\\u3000-\\u303F\\u3130-\\u318F\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uA960-\\uA97C\\uAC00-\\uD7A3\\uD7B0-\\uD7FF\\uF900-\\uFAFF\\uFF00-\\uFFEF]")
+    val nonCjkRegex = Regex("[^\\s\\u1100-\\u11FF\\u2000-\\u206F\\u3000-\\u303F\\u3130-\\u318F\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uA960-\\uA97C\\uAC00-\\uD7A3\\uD7B0-\\uD7FF\\uF900-\\uFAFF\\uFF00-\\uFFEF]+")
 
     // 按段落分割（与 Python 端 re.split(r"\n\s*\n") 一致）
     val paragraphs = text.split(Regex("\\n\\s*\\n"))
