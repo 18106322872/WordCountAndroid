@@ -1225,7 +1225,7 @@ object DocxComparator {
                         var runText = run.text() ?: ""
                         // 去掉段落标记/分节符等控制字符
                         runText = runText.replace("\r", "").replace("\u0007", "")
-                            .replace("\u000c", "").replace("\u000b", "").replace("\f", "")
+                            .replace("\u000c", "").replace("\u000b", "")
                         if (runText.isEmpty()) continue
                         val fontSize = runCatching { run.fontSize }.getOrElse { 0 }
                         val fontName = runCatching { run.fontName }.getOrNull() ?: ""
