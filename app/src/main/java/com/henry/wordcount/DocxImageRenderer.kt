@@ -10,9 +10,10 @@ import java.util.zip.ZipFile
 import kotlin.math.max
 
 /**
- * 把比较结果（或任意）DOCX 渲染成长图 PNG。
+ * 把比较结果（或任意）DOCX 渲染成长图 PNG（v1.1.81：支持有序列表编号 + 纯删除段红色安全网）。
  * 纯 Kotlin + Android Canvas 实现，零第三方依赖（不触碰 Chaquopy/lxml）。
  * 颜色规则：纯黑=未改动；蓝色=插入(ins)；红色删除线=删除(del)。
+ * 编号：从 &lt;w:numPr&gt; 提取 numId/ilvl，自动递增渲染 "1. " "2. "... 前缀。
  */
 object DocxImageRenderer {
 
@@ -55,13 +56,18 @@ object DocxImageRenderer {
         val segs: List<Seg>,
         val firstLineTwips: Int,
         val leftTwips: Int,
-        val hangingTwips: Int
+        val hangingTwips: Int,
+        val numPrefix: String = ""         // 编号前缀，如 "1. " "2. "
     )
+
+    /** 编号计数器：key=(numId, ilvl) → value=当前序号 */
+    private data class NumKey(val numId: Int, val ilvl: Int)
 
     fun render(docxPath: String, outPngPath: String): Boolean {
         return try {
             val xml = readDocumentXml(docxPath) ?: return false
-            val blocks = parseBody(xml)
+            val numCounters = mutableMapOf<NumKey, Int>()
+            val blocks = parseBody(xml, numCounters)
             val lines = layout(blocks)
             val totalH = computeHeight(lines)
             if (totalH <= MARGIN * 2 + 1) return false
@@ -102,7 +108,7 @@ object DocxImageRenderer {
         }
     }
 
-    private fun parseBody(xml: String): List<Block> {
+    private fun parseBody(xml: String, numCounters: MutableMap<NumKey, Int>): List<Block> {
         val blocks = mutableListOf<Block>()
         val body = Regex("""<w:body.*?>(.*?)</w:body>""", RegexOption.DOT_MATCHES_ALL)
             .find(xml)?.groupValues?.get(1) ?: xml
@@ -129,7 +135,7 @@ object DocxImageRenderer {
                     val last = body.lastIndexOf("</w:p>")
                     if (last >= 0) close = last + 6
                 }
-                blocks.add(parseParagraphBlock(body.substring(next, close)))
+                blocks.add(parseParagraphBlock(body.substring(next, close), numCounters))
                 i = close
             } else {
                 var close = findCloseTag(body, next, "<w:tbl", "</w:tbl>")
@@ -137,14 +143,14 @@ object DocxImageRenderer {
                     val last = body.lastIndexOf("</w:tbl>")
                     if (last >= 0) close = last + 6
                 }
-                blocks.addAll(parseTable(body.substring(next, close)))
+                blocks.addAll(parseTable(body.substring(next, close), numCounters))
                 i = close
             }
         }
         return blocks
     }
 
-    private fun parseTable(tx: String): List<Block> {
+    private fun parseTable(tx: String, numCounters: MutableMap<NumKey, Int>): List<Block> {
         val res = mutableListOf<Block>()
         var i = 0
         while (i < tx.length) {
@@ -153,24 +159,89 @@ object DocxImageRenderer {
             val after = tx.getOrElse(p + 4) { '>' }
             if (after !in " >/\t\n") { i = p + 5; continue }
             val close = findCloseTag(tx, p, "<w:p", "</w:p>")
-            res.add(parseParagraphBlock(tx.substring(p, close)))
+            res.add(parseParagraphBlock(tx.substring(p, close), numCounters))
             i = close
         }
         return res
     }
 
-    private fun parseParagraphBlock(px: String): Block {
-        val segs = parseParagraphSegs(px)
+    private fun parseParagraphBlock(px: String, numCounters: MutableMap<NumKey, Int>): Block {
+        val rawSegs = parseParagraphSegs(px)
         val pPr = Regex("""<w:pPr.*?</w:pPr>""", RegexOption.DOT_MATCHES_ALL).find(px)?.value
         var firstLine = 0
         var left = 0
         var hanging = 0
+        var numPrefix = ""
+        // 检测是否为纯删除段落（pPr 的 rPr 中含 <w:del> 标记，或段落内容几乎全在 <w:del> 内）
+        val isDelParagraph = detectDelParagraph(px)
         pPr?.let {
             firstLine = Regex("""<w:ind[^>]*w:firstLine="(\d+)""").find(it)?.groupValues?.get(1)?.toIntOrNull() ?: 0
             left = Regex("""<w:ind[^>]*w:left="(\d+)""").find(it)?.groupValues?.get(1)?.toIntOrNull() ?: 0
             hanging = Regex("""<w:ind[^>]*w:hanging="(\d+)""").find(it)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            // 提取编号 <w:numPr><w:ilvl w:val="X"/><w:numId w:val="Y"/></w:numPr>
+            val numM = Regex("""<w:numPr>\s*<w:ilvl\s+w:val="(\d+)"/?>\s*<w:numId\s+w:val="(\d+)"/>.*?</w:numPr>""",
+                RegexOption.DOT_MATCHES_ALL).find(it)
+            if (numM != null) {
+                val ilvl = numM.groupValues[1].toIntOrNull() ?: 0
+                val numId = numM.groupValues[2].toIntOrNull() ?: 0
+                val key = NumKey(numId, ilvl)
+                val nextNum = (numCounters[key] ?: 0) + 1
+                numCounters[key] = nextNum
+                // 根据层级生成编号格式：ilvl=0 → "1. " ; ilvl=1 → "a) " 等（简化为数字+句点）
+                numPrefix = when (ilvl) {
+                    0 -> "$nextNum. "
+                    1 -> "$nextNum. "
+                    else -> "$nextNum. "
+                }
+            } else {
+                // 无 numPr 时重置所有计数器（Word 在非列表段落处不重置，
+                // 但为安全起见不做自动重置，仅不生成前缀）
+            }
         }
-        return Block(segs, firstLine, left, hanging)
+
+        // 对纯删除段强制修正颜色为红色+删除线（安全网）
+        val segs = if (isDelParagraph) {
+            rawSegs.map { seg ->
+                if (seg.text.isEmpty()) seg
+                else seg.copy(color = COLOR_DEL, strike = true)
+            }
+        } else {
+            rawSegs
+        }
+
+        // 如果有编号前缀，把它作为黑色 Seg 段插入到最前面（编号本身不应该是红色）
+        val finalSegs = if (numPrefix.isNotEmpty()) {
+            listOf(Seg(numPrefix, Color.BLACK, false, false, DEFAULT_SZ)) + segs
+        } else {
+            segs
+        }
+
+        return Block(finalSegs, firstLine, left, hanging, numPrefix)
+    }
+
+    /** 检测段落是否为纯删除段（整个段落内容都是被删除的）。 */
+    private fun detectDelParagraph(px: String): Boolean {
+        // 先统计文本量：正常 <w:t> 文本 vs <w:delText> 删除文本
+        val normalTextLen = Regex("""<w:t(?![a-zA-Z])[^>]*>(.*?)</w:t>""", RegexOption.DOT_MATCHES_ALL)
+            .findAll(px).sumOf { it.groupValues[1].replace(Regex("\\s"), "").length }
+        val delTextLen = Regex("""<w:delText[^>]*>(.*?)</w:delText>""", RegexOption.DOT_MATCHES_ALL)
+            .findAll(px).sumOf { it.groupValues[1].length }
+
+        // 如果没有实质删除内容，不是删除段
+        if (delTextLen <= 0) return false
+
+        // 方法1：pPr 的 rPr 中包含 <w:del> 段落级删除标记（Word 原生比较格式）
+        // 仅当正常文本很少时才判定为纯删除段
+        val pprM = Regex("""<w:pPr.*?</w:pPr>""", RegexOption.DOT_MATCHES_ALL).find(px)
+        if (pprM != null && Regex("""<w:del\b(?![Tt])""").containsMatchIn(pprM.value)) {
+            if (normalTextLen <= delTextLen * 0.15) return true  // 正常文本 ≤ 删除文本的 15%
+        }
+
+        // 方法2：顶层 <w:del> 包裹且正常文本极少（我们的比较器输出格式）
+        val hasTopLevelDel = Regex("""<w:del\b(?![Tt])[^>]*>""").find(px) != null
+        if (hasTopLevelDel && normalTextLen <= 2) return true
+
+        return false
     }
 
     private fun parseParagraphSegs(px: String): List<Seg> {
