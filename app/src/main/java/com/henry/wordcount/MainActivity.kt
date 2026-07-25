@@ -1289,12 +1289,36 @@ private fun addFiles(
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = dName, cachePath = f.absolutePath, error = "无法解析此 OOXML 文件（可能损坏或非标准格式）"))
                         } else {
                             val stats = countTextKotlin(res.text)
+                            // v1.2.3: 优先用 docProps/app.xml 的权威统计（与 Word 完全一致），否则用现算
+                            val outWords: Int
+                            val outFe: Int
+                            val outNc: Int
+                            val outChars: Int
+                            val outPages: Int
+                            val outReason: String?
+                            if (res.metaWords > 0) {
+                                // 字数(总)取元数据；非中文(nc)现算；中文 = 字数 - 非中文（保证中文+非中文=字数）
+                                outNc = stats.third
+                                outFe = maxOf(0, res.metaWords - outNc)
+                                outWords = res.metaWords
+                                outChars = if (res.metaChars > 0) res.metaChars else stats.fourth
+                                outPages = if (res.metaPages > 0) res.metaPages else res.pages
+                                outReason = if (res.metaPages > 0) "doc_app_props" else (if (res.pagesReason.isNotBlank()) res.pagesReason else null)
+                                Log.d("WordCount", "docx 用元数据: words=${res.metaWords} chars=${res.metaChars} pages=${res.metaPages}")
+                            } else {
+                                outWords = stats.first
+                                outFe = stats.second
+                                outNc = stats.third
+                                outChars = stats.fourth
+                                outPages = res.pages
+                                outReason = if (res.pagesReason.isNotBlank()) res.pagesReason else null
+                            }
                             val resMap = mapOf(
                                 "name" to dName, "ext" to ".${f.extension.lowercase()}",
-                                "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
+                                "stats" to mapOf("words" to outWords, "fe" to outFe, "nc" to outNc, "chars" to outChars),
                                 "meta" to mapOf("sheets" to res.sheets),
-                                "pages" to res.pages,
-                                "pages_reason" to (if (res.pagesReason.isNotBlank()) res.pagesReason else null)
+                                "pages" to outPages,
+                                "pages_reason" to outReason
                             )
                             val fr = toFileResult(resMap, f.absolutePath)
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
@@ -1465,12 +1489,17 @@ private fun addFiles(
                     try {
                         val extLower = f.extension.lowercase()
                         // v1.1.10: DOC 用 extractDocFull 获取完整文本+页数元数据
+                        // v1.2.3: extractDocFull 额外返回 SummaryInformation 的 words/chars 权威统计
                         val text: String
                         var docPages: Int = 0  // 0 = 未知
+                        var docWords: Int = 0  // 0 = 无元数据
+                        var docChars: Int = 0  // 0 = 无元数据
                         if (extLower == "doc") {
                             val docRes = OldOfficeEngine.extractDocFull(f)
                             text = docRes.text
                             docPages = docRes.pages
+                            docWords = docRes.words
+                            docChars = docRes.chars
                         } else {
                             text = OldOfficeEngine.extractText(f)
                         }
@@ -1481,9 +1510,26 @@ private fun addFiles(
                             val extDot = ".$extLower"
                             // 构造 pages：DOC 有元数据页数就用，否则留 null 让 toFileResult 走 estimatePages 兜底
                             val pagesValue = if (docPages > 0) docPages else null
+                            // v1.2.3: 优先用 SummaryInformation 的权威统计（与 Word 完全一致）
+                            val outWords: Int
+                            val outFe: Int
+                            val outNc: Int
+                            val outChars: Int
+                            if (docWords > 0) {
+                                outNc = stats.third
+                                outFe = maxOf(0, docWords - outNc)
+                                outWords = docWords
+                                outChars = if (docChars > 0) docChars else stats.fourth
+                                Log.d("WordCount", "doc 用元数据: words=$docWords chars=$docChars pages=$docPages")
+                            } else {
+                                outWords = stats.first
+                                outFe = stats.second
+                                outNc = stats.third
+                                outChars = stats.fourth
+                            }
                             val resMap = mutableMapOf<String, Any?>(
                                 "name" to dName, "ext" to extDot,
-                                "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
+                                "stats" to mapOf("words" to outWords, "fe" to outFe, "nc" to outNc, "chars" to outChars),
                                 "meta" to emptyMap<String, Any?>()
                             )
                             if (pagesValue != null) {

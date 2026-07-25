@@ -23,7 +23,12 @@ object OoXmlEngine {
         val pages: Int,
         val kind: String, // "docx" | "xlsx" | "pptx"
         val sheets: List<String> = emptyList(),
-        val pagesReason: String = ""
+        val pagesReason: String = "",
+        // v1.2.3: docProps/app.xml 中的权威统计（Word/WPS 保存时写入，与 Word 字数统计完全一致）
+        // 0 表示无此元数据（如 POI 生成的文件），由调用方退回现算
+        val metaPages: Int = 0,
+        val metaWords: Int = 0,
+        val metaChars: Int = 0
     )
 
     fun extract(file: File): OoxmlResult? {
@@ -129,7 +134,23 @@ object OoXmlEngine {
             // 格式化文档（含表格/图片）的内容估算会严重偏高（15749字→15~21页 vs 实际5页）
             // 有分页标记时，信任分页信号（已加安全边距），不做覆盖
         }
-        return OoxmlResult(text, pages, "docx", pagesReason = pagesReason)
+        // ── v1.2.3: 读取 docProps/app.xml 的权威统计（Word/WPS 保存时写入）──
+        // Word 的「字数统计」对话框数值即来源于此：Pages=页数、Words=字数(不计空格)、
+        // Characters=字符数(不计空格)。POI 生成的文件无这些字段（仅 <Application>），退回现算。
+        val appXml = readEntry(zip, "docProps/app.xml") ?: ""
+        val metaPages = extractAppInt(appXml, "Pages")
+        val metaWords = extractAppInt(appXml, "Words")
+        val metaChars = extractAppInt(appXml, "Characters")
+
+        return OoxmlResult(
+            text = text,
+            pages = pages,
+            kind = "docx",
+            pagesReason = pagesReason,
+            metaPages = metaPages,
+            metaWords = metaWords,
+            metaChars = metaChars
+        )
     }
 
     /**
@@ -466,6 +487,13 @@ object OoXmlEngine {
             val bytes = `is`.readBytes()
             return String(bytes, StandardCharsets.UTF_8)
         }
+    }
+
+    // v1.2.3: 从 docProps/app.xml 提取整数型统计字段（Pages/Words/Characters 等）
+    private fun extractAppInt(xml: String, tag: String): Int {
+        if (xml.isBlank()) return 0
+        val m = """<$tag>(\d+)</$tag>""".toRegex().find(xml)
+        return m?.groupValues?.get(1)?.toIntOrNull() ?: 0
     }
 
     private fun decodeXml(s: String): String {

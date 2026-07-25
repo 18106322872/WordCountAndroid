@@ -30,7 +30,11 @@ object OldOfficeEngine {
 
     data class DocResult(
         val text: String,
-        val pages: Int = 0  // 0 表示未知，由调用方估算
+        val pages: Int = 0,  // 0 表示未知，由调用方估算
+        // v1.2.3: SummaryInformation 中的权威统计（Word/WPS 保存时写入）
+        // 0 表示无此元数据，由调用方退回现算
+        val words: Int = 0,  // PID 15 WordCount = 字数(不计空格)
+        val chars: Int = 0   // PID 16 CharCount = 字符数(不计空格)
     )
 
     fun extractText(file: File): String {
@@ -68,19 +72,25 @@ object OldOfficeEngine {
             val extractor = WordExtractor(doc)
             val text = extractor.text ?: ""
 
-            // 尝试从文档属性获取页数（Word 保存时写入，不一定准确但比没有好）
+            // 尝试从文档属性获取统计信息（Word/WPS 保存时写入，与「字数统计」完全一致）
             var pages = 0
+            var words = 0
+            var chars = 0
             try {
                 val si = doc.summaryInformation
                 if (si != null) {
-                    // SummaryInformation 的 PAGE_COUNT 属性（如果 Word 保存过的话）
+                    // SummaryInformation 标准属性：PAGE_COUNT(14)/WORD_COUNT(15)/CHAR_COUNT(16)
                     val pc = si.pageCount
                     if (pc > 0) pages = pc
+                    val wc = si.wordCount
+                    if (wc > 0) words = wc
+                    val cc = si.charCount
+                    if (cc > 0) chars = cc
                 }
             } catch (_: Throwable) {}
 
             runCatching { extractor.close() }
-            return DocResult(text = text, pages = pages)
+            return DocResult(text = text, pages = pages, words = words, chars = chars)
         } finally {
             runCatching { doc.close() }
         }
