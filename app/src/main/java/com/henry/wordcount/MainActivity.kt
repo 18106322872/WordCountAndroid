@@ -1703,6 +1703,8 @@ fun CompareScreen(
     var busy by remember { mutableStateOf(false) }
     var resultJson by remember { mutableStateOf<String?>(null) }
     var outPath by remember { mutableStateOf<String?>(null) }
+    var imgPath by remember { mutableStateOf<String?>(null) }   // 长图 PNG 路径（与 outPath 对应）
+    var rendering by remember { mutableStateOf(false) }          // 正生成/打开长图
 
     // 比较设置（对应 Word 比较对话框）
     var level by remember { mutableStateOf("word") }   // 'char' 字符级别 | 'word' 字词级别
@@ -1777,6 +1779,7 @@ fun CompareScreen(
                         }
                         resultJson = j.toString()
                         outPath = res.outputPath
+                        imgPath = res.outputPath.removeSuffix(".docx") + ".png"
                     } else {
                         snackbar.showSnackbar("比较失败：${res.error ?: "未知错误"}")
                     }
@@ -1855,11 +1858,27 @@ fun CompareScreen(
                     Text("插入 $ins 处 ｜ 删除 $del 处 ｜ 修改 $rep 处", color = MaterialTheme.colorScheme.onPrimaryContainer)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(onClick = {
-                            outPath?.let { openDocxFile(context, it, docxMime) }
-                        }, modifier = Modifier.weight(1f)) { Text("打开结果") }
+                            val docx = outPath
+                            val png = imgPath
+                            if (docx != null && png != null && !rendering) {
+                                rendering = true
+                                scope.launch {
+                                    val ok = withContext(Dispatchers.IO) {
+                                        DocxImageRenderer.render(docx, png)
+                                    }
+                                    withContext(Dispatchers.Main) {
+                                        rendering = false
+                                        if (ok) openImageFile(context, png)
+                                        else snackbar.showSnackbar("生成长图失败，可改用「分享Word」")
+                                    }
+                                }
+                            }
+                        }, modifier = Modifier.weight(1f), enabled = !rendering) {
+                            Text(if (rendering) "生成中…" else "打开结果")
+                        }
                         OutlinedButton(onClick = {
                             outPath?.let { shareDocxFile(context, it, docxMime) }
-                        }, modifier = Modifier.weight(1f)) { Text("分享") }
+                        }, modifier = Modifier.weight(1f)) { Text("分享Word") }
                     }
                 }
             }
@@ -1937,7 +1956,21 @@ private fun openDocxFile(context: android.content.Context, path: String, mime: S
     }
 }
 
-private fun shareDocxFile(context: android.content.Context, path: String, mime: String) {
+/** 打开比对结果的长图 PNG（把 WORD 截成长图后用图片查看器打开）。 */
+private fun openImageFile(context: android.content.Context, path: String) {
+    try {
+        val file = File(path)
+        if (!file.exists()) return
+        val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "image/png")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(intent, "打开长图"))
+    } catch (e: Throwable) {
+        Log.w("WordCount", "打开长图失败: ${e.message}")
+    }
+}
     try {
         val file = File(path)
         if (!file.exists()) return

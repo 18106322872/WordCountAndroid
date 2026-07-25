@@ -1,0 +1,399 @@
+package com.henry.wordcount
+
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.util.Log
+import java.io.File
+import java.util.zip.ZipFile
+import kotlin.math.max
+
+/**
+ * 把比较结果（或任意）DOCX 渲染成长图 PNG。
+ * 纯 Kotlin + Android Canvas 实现，零第三方依赖（不触碰 Chaquopy/lxml）。
+ * 颜色规则：纯黑=未改动；蓝色=插入(ins)；红色删除线=删除(del)。
+ */
+object DocxImageRenderer {
+
+    private const val TAG = "DocxImageRenderer"
+
+    // 渲染比例（每 point 对应的像素）。A4 宽 595pt。
+    private const val PT = 1.6f
+    private const val PAGE_W = (595 * PT).toInt()          // A4 宽
+    private const val MARGIN = (54 * PT).toInt()           // 0.75 英寸页边距
+    private const val DEFAULT_SZ = 21                      // 默认字号（半磅，10.5pt）
+    private const val LINE_FACTOR = 1.5f                   // 行距
+    private const val PARA_GAP = (6 * PT).toInt()          // 段落间距
+    private const val COLOR_INS = 0xFF0000FF.toInt()       // 蓝（插入）
+    private const val COLOR_DEL = 0xFFFF0000.toInt()       // 红（删除）
+    private const val MAX_H = 30000                        // 长图高度上限，避免 OOM
+
+    private const val MARK_NONE = 0
+    private const val MARK_INS = 1
+    private const val MARK_DEL = 2
+
+    private data class Seg(
+        val text: String,
+        val color: Int,
+        val strike: Boolean,
+        val underline: Boolean,
+        val sizeHalf: Int,
+        val breakLine: Boolean = false
+    )
+
+    private data class RawLine(val segs: List<Seg>, val x: Float, val maxSz: Int)
+
+    private data class LayoutLine(
+        val segs: List<Seg>,
+        val x: Float,
+        val baselineY: Float,
+        val height: Float
+    )
+
+    private data class Block(
+        val segs: List<Seg>,
+        val firstLineTwips: Int,
+        val leftTwips: Int,
+        val hangingTwips: Int
+    )
+
+    fun render(docxPath: String, outPngPath: String): Boolean {
+        return try {
+            val xml = readDocumentXml(docxPath) ?: return false
+            val blocks = parseBody(xml)
+            val lines = layout(blocks)
+            val totalH = computeHeight(lines)
+            if (totalH <= MARGIN * 2 + 1) return false
+            val safeH = max(MARGIN * 2, minOf(totalH, MAX_H))
+            val bmp = Bitmap.createBitmap(PAGE_W, safeH, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bmp)
+            canvas.drawColor(Color.WHITE)
+            drawLines(canvas, lines)
+            val out = File(outPngPath)
+            out.parentFile?.mkdirs()
+            val os = out.outputStream()
+            val ok = bmp.compress(Bitmap.CompressFormat.PNG, 100, os)
+            os.close()
+            bmp.recycle()
+            ok
+        } catch (e: Throwable) {
+            Log.w(TAG, "render failed: ${e.message}")
+            false
+        }
+    }
+
+    // ---------- 解析 ----------
+
+    private fun readDocumentXml(path: String): String? {
+        return try {
+            val zf = ZipFile(path)
+            val entry = zf.getEntry("word/document.xml")
+            if (entry == null) {
+                zf.close()
+                null
+            } else {
+                zf.getInputStream(entry).bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    .also { zf.close() }
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "readDocumentXml failed: ${e.message}")
+            null
+        }
+    }
+
+    private fun parseBody(xml: String): List<Block> {
+        val blocks = mutableListOf<Block>()
+        val body = Regex("""<w:body.*?>(.*?)</w:body>""", RegexOption.DOT_MATCHES_ALL)
+            .find(xml)?.groupValues?.get(1) ?: xml
+        var i = 0
+        val n = body.length
+        while (i < n) {
+            val p = body.indexOf("<w:p", i)
+            val t = body.indexOf("<w:tbl", i)
+            val next = when {
+                p < 0 && t < 0 -> -1
+                p < 0 -> t
+                t < 0 -> p
+                else -> minOf(p, t)
+            }
+            if (next < 0) break
+            // "<w:p" 长 4；"<w:tbl" 长 6。检查标签后的字符是否为空白/结束符，
+            // 避免把 <w:pPr> / <w:tblStyle> 等误判为段落/表格。
+            val tagLen = if (p >= 0 && next == p) 4 else 6
+            val after = body.getOrElse(next + tagLen) { '>' }
+            if (after !in " >/\t\n") { i = next + tagLen + 1; continue }
+            if (next == p) {
+                var close = findCloseTag(body, next, "<w:p", "</w:p>")
+                if (close >= body.length) {
+                    val last = body.lastIndexOf("</w:p>")
+                    if (last >= 0) close = last + 6
+                }
+                blocks.add(parseParagraphBlock(body.substring(next, close)))
+                i = close
+            } else {
+                var close = findCloseTag(body, next, "<w:tbl", "</w:tbl>")
+                if (close >= body.length) {
+                    val last = body.lastIndexOf("</w:tbl>")
+                    if (last >= 0) close = last + 6
+                }
+                blocks.addAll(parseTable(body.substring(next, close)))
+                i = close
+            }
+        }
+        return blocks
+    }
+
+    private fun parseTable(tx: String): List<Block> {
+        val res = mutableListOf<Block>()
+        var i = 0
+        while (i < tx.length) {
+            val p = tx.indexOf("<w:p", i)
+            if (p < 0) break
+            val after = tx.getOrElse(p + 4) { '>' }
+            if (after !in " >/\t\n") { i = p + 5; continue }
+            val close = findCloseTag(tx, p, "<w:p", "</w:p>")
+            res.add(parseParagraphBlock(tx.substring(p, close)))
+            i = close
+        }
+        return res
+    }
+
+    private fun parseParagraphBlock(px: String): Block {
+        val segs = parseParagraphSegs(px)
+        val pPr = Regex("""<w:pPr.*?</w:pPr>""", RegexOption.DOT_MATCHES_ALL).find(px)?.value
+        var firstLine = 0
+        var left = 0
+        var hanging = 0
+        pPr?.let {
+            firstLine = Regex("""<w:ind[^>]*w:firstLine="(\d+)""").find(it)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            left = Regex("""<w:ind[^>]*w:left="(\d+)""").find(it)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            hanging = Regex("""<w:ind[^>]*w:hanging="(\d+)""").find(it)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        }
+        return Block(segs, firstLine, left, hanging)
+    }
+
+    private fun parseParagraphSegs(px: String): List<Seg> {
+        val segs = mutableListOf<Seg>()
+        var insDepth = 0
+        var delDepth = 0
+        var i = 0
+        val n = px.length
+        while (i < n) {
+            val lt = px.indexOf('<', i)
+            if (lt < 0) break
+            val gt = px.indexOf('>', lt)
+            if (gt < 0) break
+            val tag = px.substring(lt, gt + 1)
+            when {
+                tag.startsWith("<w:ins") -> insDepth++
+                tag == "</w:ins>" -> insDepth--
+                tag.startsWith("<w:del") && !tag.startsWith("<w:delText") -> delDepth++
+                tag == "</w:del>" -> delDepth--
+                tag.startsWith("<w:r") && !tag.startsWith("<w:rPr") -> {
+                    val re = px.indexOf("</w:r>", gt)
+                    if (re < 0) { i = gt + 1; continue }
+                    val runXml = px.substring(gt + 1, re)
+                    val (rColor, rSz, rStrike, rUnderline) = parseRunRPr(runXml)
+                    val mark = if (delDepth > 0) MARK_DEL else if (insDepth > 0) MARK_INS else MARK_NONE
+                    val tokRe = Regex(
+                        """<(w:t|w:delText)(?![a-zA-Z])[^>]*>(.*?)</\1>|<w:tab\s*/?>|<w:br\s*/?>|<w:cr\s*/?>""",
+                        RegexOption.DOT_MATCHES_ALL
+                    )
+                    for (m in tokRe.findAll(runXml)) {
+                        when {
+                            m.groupValues[1].isNotEmpty() -> {
+                                val isDelText = m.groupValues[1] == "w:delText"
+                                val text = unescape(m.groupValues[2])
+                                if (text.isNotEmpty()) {
+                                    val c = when {
+                                        isDelText || mark == MARK_DEL -> COLOR_DEL
+                                        mark == MARK_INS -> COLOR_INS
+                                        else -> (rColor ?: Color.BLACK)
+                                    }
+                                    segs.add(
+                                        Seg(
+                                            text, c,
+                                            rStrike || isDelText || mark == MARK_DEL,
+                                            rUnderline, rSz
+                                        )
+                                    )
+                                }
+                            }
+                            m.value.startsWith("<w:tab") ->
+                                segs.add(Seg("    ", rColor ?: Color.BLACK, rStrike, rUnderline, rSz))
+                            else ->
+                                segs.add(Seg("", rColor ?: Color.BLACK, rStrike, rUnderline, rSz, breakLine = true))
+                        }
+                    }
+                    i = re + 6
+                    continue
+                }
+            }
+            i = gt + 1
+        }
+        return segs
+    }
+
+    private fun parseRunRPr(runXml: String): Quad<Int?, Int, Boolean, Boolean> {
+        val colorM = Regex("""<w:color[^>]*w:val="([0-9A-Fa-f]{6})""").find(runXml)
+        val color = colorM?.groupValues?.get(1)?.let {
+            if (it.equals("auto", true)) null else try {
+                Color.parseColor("#$it")
+            } catch (e: Throwable) { null }
+        }
+        val sz = Regex("""<w:sz[^>]*w:val="(\d+)""").find(runXml)?.groupValues?.get(1)?.toIntOrNull() ?: DEFAULT_SZ
+        val strike = runXml.contains("<w:strike")
+        val underline = Regex("""<w:u[^>]*w:val="""").containsMatchIn(runXml) &&
+                !Regex("""w:val="none"""").containsMatchIn(runXml)
+        return Quad(color, sz, strike, underline)
+    }
+
+    private data class Quad<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)
+
+    private fun findCloseTag(s: String, openIdx: Int, openTag: String, closeTag: String): Int {
+        var depth = 0
+        var i = openIdx
+        val n = s.length
+        val openLen = openTag.length
+        while (i < n) {
+            val o = s.indexOf(openTag, i)
+            val c = s.indexOf(closeTag, i)
+            if (c < 0) return n
+            if (o in 0 until c) {
+                // 必须是真正的标签开始（"<w:p" 后接空白或 '>'），避免把 <w:pPr> 等误判为段落
+                val after = s.getOrElse(o + openLen) { '>' }
+                if (after in " >/\t\n") {
+                    depth++
+                    i = o + openLen
+                } else {
+                    i = o + openLen
+                }
+            } else {
+                depth--
+                i = c + closeTag.length
+                if (depth == 0) return i
+            }
+        }
+        return n
+    }
+
+    private fun unescape(s: String): String = s
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+
+    // ---------- 布局 ----------
+
+    private fun layout(blocks: List<Block>): List<LayoutLine> {
+        val out = mutableListOf<LayoutLine>()
+        var y = MARGIN.toFloat()
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        for (block in blocks) {
+            val leftPx = block.leftTwips * PT / 20f
+            val firstExtra = if (block.hangingTwips > 0) -(block.hangingTwips * PT / 20f)
+            else (block.firstLineTwips * PT / 20f)
+            val leftX = MARGIN + leftPx
+            val firstLineX = leftX + firstExtra
+            val lineMaxW = (PAGE_W - MARGIN) - leftX
+            val rawLines = wrapParagraph(block.segs, firstLineX, leftX, lineMaxW, paint)
+            for (raw in rawLines) {
+                val h = raw.maxSz / 2f * PT * LINE_FACTOR
+                val baseline = y + h * 0.82f
+                out.add(LayoutLine(raw.segs, raw.x, baseline, h))
+                y += h
+            }
+            y += PARA_GAP
+        }
+        return out
+    }
+
+    private fun wrapParagraph(
+        segs: List<Seg>, firstLineX: Float, leftX: Float, lineMaxW: Float, paint: Paint
+    ): List<RawLine> {
+        val raw = mutableListOf<RawLine>()
+        if (segs.isEmpty()) {
+            raw.add(RawLine(emptyList(), leftX, DEFAULT_SZ))
+            return raw
+        }
+        var curSegs = mutableListOf<Seg>()
+        var curW = 0f
+        var x = firstLineX
+        var maxSz = DEFAULT_SZ
+        fun flush() {
+            if (curSegs.isNotEmpty()) {
+                raw.add(RawLine(curSegs.toList(), x, maxSz))
+                curSegs = mutableListOf()
+                curW = 0f
+                maxSz = DEFAULT_SZ
+                x = leftX
+            }
+        }
+        for (seg in segs) {
+            if (seg.breakLine) {
+                flush()
+                x = leftX
+                continue
+            }
+            var remaining = seg.text
+            while (remaining.isNotEmpty()) {
+                val avail = lineMaxW - curW
+                var fit = fitChars(paint, seg, remaining, avail)
+                if (fit <= 0) {
+                    flush()
+                    val avail2 = lineMaxW - curW
+                    fit = fitChars(paint, seg, remaining, avail2)
+                    if (fit <= 0) fit = 1
+                }
+                val piece = remaining.substring(0, fit)
+                curSegs.add(seg.copy(text = piece))
+                curW += measure(paint, seg, piece)
+                if (seg.sizeHalf > maxSz) maxSz = seg.sizeHalf
+                remaining = remaining.substring(fit)
+                if (remaining.isNotEmpty()) flush()
+            }
+        }
+        flush()
+        return raw
+    }
+
+    private fun fitChars(paint: Paint, seg: Seg, text: String, avail: Float): Int {
+        if (avail <= 0f) return 0
+        paint.textSize = seg.sizeHalf / 2f * PT
+        var best = 0
+        for (k in 1..text.length) {
+            if (paint.measureText(text.substring(0, k)) <= avail) best = k else break
+        }
+        return best
+    }
+
+    private fun measure(paint: Paint, seg: Seg, s: String): Float {
+        paint.textSize = seg.sizeHalf / 2f * PT
+        return paint.measureText(s)
+    }
+
+    private fun computeHeight(lines: List<LayoutLine>): Int {
+        if (lines.isEmpty()) return 0
+        return (lines.last().baselineY + lines.last().height * 0.2f + MARGIN).toInt()
+    }
+
+    // ---------- 绘制 ----------
+
+    private fun drawLines(canvas: Canvas, lines: List<LayoutLine>) {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        for (line in lines) {
+            var x = line.x
+            for (seg in line.segs) {
+                if (seg.text.isEmpty()) continue
+                paint.textSize = seg.sizeHalf / 2f * PT
+                paint.color = seg.color
+                paint.isStrikeThruText = seg.strike
+                paint.isUnderlineText = seg.underline
+                canvas.drawText(seg.text, x, line.baselineY, paint)
+                x += paint.measureText(seg.text)
+            }
+        }
+    }
+}
