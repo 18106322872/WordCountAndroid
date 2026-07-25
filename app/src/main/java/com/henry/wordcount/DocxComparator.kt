@@ -3,6 +3,7 @@ package com.henry.wordcount
 import android.content.Context
 import android.util.Log
 import java.io.File
+import java.io.FileInputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -12,7 +13,7 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 /**
- * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.69 修订档视角字数统计+段落缩进对齐版）。
+ * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.85：支持旧版 .doc 自动转 .docx）。
  *
  * 设计目标：输出文档与 Word「审阅-比较」结果一致。
  * 核心思路：
@@ -88,12 +89,28 @@ object DocxComparator {
         if (!origFile.isFile()) return CompareResult(ok = false, error = "原文档不存在: $origPath")
         if (!revFile.isFile()) return CompareResult(ok = false, error = "修订文档不存在: $revPath")
 
-        val opts = try { org.json.JSONObject(optsJson) } catch (_: Exception) { org.json.JSONObject() }
-        val author = "WordCount"
-        val date = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).format(Date())
+        // ── .doc (OLE2) 自动转 .docx ──
+        val tempFiles = mutableListOf<String>()
+        try {
+            val actualOrig = if (isOle2File(origPath)) {
+                val converted = convertDocToMinimalDocx(origPath)
+                    ?: return CompareResult(ok = false, error = "无法读取原文档(旧版.doc格式转换失败): $origPath")
+                tempFiles.add(converted)
+                converted
+            } else origPath
+            val actualRev = if (isOle2File(revPath)) {
+                val converted = convertDocToMinimalDocx(revPath)
+                    ?: return CompareResult(ok = false, error = "无法读取修订文档(旧版.doc格式转换失败): $revPath")
+                tempFiles.add(converted)
+                converted
+            } else revPath
 
-        val origParas = readParagraphs(origFile, "orig")
-        val revParas = readParagraphs(revFile, "rev")
+            val opts = try { org.json.JSONObject(optsJson) } catch (_: Exception) { org.json.JSONObject() }
+            val author = "WordCount"
+            val date = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).format(Date())
+
+            val origParas = readParagraphs(File(actualOrig), "orig")
+            val revParas = readParagraphs(File(actualRev), "rev")
 
         val ops = alignParagraphs(origParas, revParas)
 
@@ -154,7 +171,7 @@ object DocxComparator {
             }
         }
 
-        writeOutputDocx(origFile, outPath, bodyParts)
+        writeOutputDocx(File(actualOrig), outPath, bodyParts)
 
         // 涉及修改的句子总字数 = 修订档总字数 − 黑色整句字数（修订档视角，与 Word 字符数不计空格一致）
         // 从结果文档直接解析：修订侧总字数（黑字+蓝字插入，不含删除红字、不含空格）
@@ -166,6 +183,11 @@ object DocxComparator {
         }
 
         Log.d(TAG, "result: ins=$insCount(${totalInsChars}字) del=$delCount(${totalDelChars}字) rep=$repCount chars=$modifiedChars (total=${resultStats.totalChars} blackWhole=${resultStats.blackWholeSentenceChars})")
+
+        // 清理 .doc 转换产生的临时 .docx 文件
+        for (tp in tempFiles) {
+            runCatching { File(tp).delete() }
+        }
 
         return CompareResult(
             ok = true,
@@ -1158,5 +1180,115 @@ object DocxComparator {
     private fun ensureTrackRevisions(originalSettings: String): String {
         return if (originalSettings.contains("w:trackRevisions")) originalSettings
         else originalSettings.replace("</w:settings>", "<w:trackRevisions w:val=\"true\"/></w:settings>")
+    }
+
+    // ══════════════════════════════════════════════════════
+    //  .doc (OLE2) → 最简 .docx 转换
+    // ══════════════════════════════════════════════════════
+
+    /** 检测文件是否为 OLE2 / Compound Document 格式（旧版 .doc） */
+    private fun isOle2File(path: String): Boolean {
+        return try {
+            val fis = FileInputStream(path)
+            val magic = ByteArray(8)
+            fis.read(magic)
+            fis.close()
+            // OLE2 magic: D0 CF 11 E0 A1 B1 1A E1
+            magic[0] == 0xD0.toByte() && magic[1] == 0xCF.toByte() &&
+            magic[2] == 0x11.toByte() && magic[3] == 0xE0.toByte()
+        } catch (_: Exception) { false }
+    }
+
+    /**
+     * 将旧版 .doc 文件转换为最简 .docx（纯文本，每段一个 <w:p>）。
+     * 用 POI HWPF 提取文本，再包装成最小有效 DOCX（ZIP + XML）。
+     * 返回临时文件路径，调用方负责清理。
+     */
+    private fun convertDocToMinimalDocx(docPath: String): String? {
+        return try {
+            // 1. 用 POI HWPF 提取纯文本
+            val text = OldOfficeEngine.extractText(File(docPath))
+            if (text.isBlank()) null else {
+
+                // 2. 构建最小 docx 的 [Content_Types].xml
+                val contentTypes = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>"""
+
+                // 3. _rels/.rels
+                val rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"""
+
+                // 4. word/_rels/document.xml.rels
+                val docRels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+</Relationships>"""
+
+                // 5. word/document.xml — 将文本按行分割为段落
+                val escaped = text
+                    .replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+                    .replace("\"", "&quot;")
+                    .replace("'", "&apos;")
+                val paragraphs = escaped.lines().filter { it.isNotBlank() }.joinToString("\n") { line ->
+                    "<w:p><w:r><w:t xml:space=\"preserve\">$line</w:t></w:r></w:p>"
+                }
+                val documentXml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:o="urn:schemas-microsoft-com:office:office"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"
+            xmlns:v="urn:schemas-microsoft-com:vml"
+            xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:w10="urn:schemas-microsoft-com:office:word"
+            xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"
+            xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"
+            xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk"
+            xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml"
+            xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+            mc:Ignorable="w14 wp14">
+  <w:body>
+$paragraphs
+    <w:sectPr>
+      <w:pgSz w:w="11906" w:h="16838"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="851" w:footer="992" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>"""
+
+                // 6. 写入 ZIP (docx 本质是 ZIP)
+                val tmpFile = File.createTempFile("wc_convert_", ".docx")
+                ZipOutputStream(tmpFile.outputStream()).use { zout ->
+                    zout.putNextEntry(ZipEntry("[Content_Types].xml"))
+                    zout.write(contentTypes.toByteArray(Charsets.UTF_8))
+                    zout.closeEntry()
+
+                    zout.putNextEntry(ZipEntry("_rels/.rels"))
+                    zout.write(rels.toByteArray(Charsets.UTF_8))
+                    zout.closeEntry()
+
+                    zout.putNextEntry(ZipEntry("word/document.xml"))
+                    zout.write(documentXml.toByteArray(Charsets.UTF_8))
+                    zout.closeEntry()
+
+                    zout.putNextEntry(ZipEntry("word/_rels/document.xml.rels"))
+                    zout.write(docRels.toByteArray(Charsets.UTF_8))
+                    zout.closeEntry()
+                }
+
+                tmpFile.absolutePath
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "convertDocToMinimalDocx error: ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
     }
 }
