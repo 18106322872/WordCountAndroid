@@ -91,26 +91,25 @@ object DocxComparator {
 
         // ── .doc (OLE2) 自动转 .docx ──
         val tempFiles = mutableListOf<String>()
-        try {
-            val actualOrig = if (isOle2File(origPath)) {
-                val converted = convertDocToMinimalDocx(origPath)
-                    ?: return CompareResult(ok = false, error = "无法读取原文档(旧版.doc格式转换失败): $origPath")
-                tempFiles.add(converted)
-                converted
-            } else origPath
-            val actualRev = if (isOle2File(revPath)) {
-                val converted = convertDocToMinimalDocx(revPath)
-                    ?: return CompareResult(ok = false, error = "无法读取修订文档(旧版.doc格式转换失败): $revPath")
-                tempFiles.add(converted)
-                converted
-            } else revPath
+        val actualOrig = if (isOle2File(origPath)) {
+            val converted = convertDocToMinimalDocx(origPath)
+                ?: return CompareResult(ok = false, error = "无法读取原文档(旧版.doc格式转换失败): $origPath")
+            tempFiles.add(converted)
+            converted
+        } else origPath
+        val actualRev = if (isOle2File(revPath)) {
+            val converted = convertDocToMinimalDocx(revPath)
+                ?: return CompareResult(ok = false, error = "无法读取修订文档(旧版.doc格式转换失败): $revPath")
+            tempFiles.add(converted)
+            converted
+        } else revPath
 
-            val opts = try { org.json.JSONObject(optsJson) } catch (_: Exception) { org.json.JSONObject() }
-            val author = "WordCount"
-            val date = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).format(Date())
+        val opts = try { org.json.JSONObject(optsJson) } catch (_: Exception) { org.json.JSONObject() }
+        val author = "WordCount"
+        val date = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).format(Date())
 
-            val origParas = readParagraphs(File(actualOrig), "orig")
-            val revParas = readParagraphs(File(actualRev), "rev")
+        val origParas = readParagraphs(File(actualOrig), "orig")
+        val revParas = readParagraphs(File(actualRev), "rev")
 
         val ops = alignParagraphs(origParas, revParas)
 
