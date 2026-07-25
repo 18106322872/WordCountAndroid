@@ -12,7 +12,7 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 /**
- * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.63 修复删除渲染+回退SUB_EQ黑字版）。
+ * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.65 字体统一+句子级字数统计版）。
  *
  * 设计目标：输出文档与 Word「审阅-比较」结果一致。
  * 核心思路：
@@ -98,36 +98,38 @@ object DocxComparator {
         val ops = alignParagraphs(origParas, revParas)
 
         // ── 构建输出 body ──
+        // 修订档字体/大小作为统一规范：所有结果文字使用修订档的字体与字号
+        val fontRPr = buildFontRPr(revParas)
         val ridSeq = intArrayOf(0)
         var insCount = 0
         var delCount = 0
         var repCount = 0
         var totalInsChars = 0       // 新增字符（计入修改字数）
         var totalDelChars = 0       // 删除字符（仅统计，不计入modifiedChars）
-        var eqBlackChars = 0        // 未改动字符（EQ 段落全字数 + REP 段落中 equal 部分）
+        var blackWholeSentenceChars = 0  // 未改动（黑色整句）字符：EQ/SUB_EQ 全段 + REP 中完整黑色句子
         val bodyParts = mutableListOf<String>()
 
         for (op in ops) {
             when (op.tag) {
                 "EQ" -> {
-                    // 完全相同段落 → 黑字不变
+                    // 完全相同段落 → 黑字不变（整段未改动，计入黑色整句）
                     bodyParts.add(revParas[op.rj].xml)
-                    eqBlackChars += revParas[op.rj].text.length
+                    blackWholeSentenceChars += revParas[op.rj].text.length
                 }
                 "SUB_EQ" -> {
                     // 子串匹配段：修订档段落是原文档某段的子串
                     // → 按修订档原样输出（黑字），与 Word 原生一致（Word W06/W07 均为黑字）
                     bodyParts.add(revParas[op.rj].xml)
-                    eqBlackChars += revParas[op.rj].text.length
+                    blackWholeSentenceChars += revParas[op.rj].text.length
                 }
                 "DEL" -> {
                     // 原档中被删除的段落（仅非空段落）
                     if (origParas[op.oi].text.isNotEmpty()) {
                         if (op.delExclude != null) {
                             // 部分消耗的 orig：只输出未被子串提取的剩余片段为红字删除
-                            bodyParts.add(wrapPartialDeletedParagraph(origParas[op.oi].xml, op.delExclude, author, date, ridSeq))
+                            bodyParts.add(wrapPartialDeletedParagraph(origParas[op.oi].xml, op.delExclude, author, date, ridSeq, fontRPr))
                         } else {
-                            bodyParts.add(wrapDeletedParagraph(origParas[op.oi].xml, author, date, ridSeq))
+                            bodyParts.add(wrapDeletedParagraph(origParas[op.oi].xml, author, date, ridSeq, fontRPr))
                         }
                         delCount++
                         totalDelChars += origParas[op.oi].text.length
@@ -141,16 +143,17 @@ object DocxComparator {
                 }
                 "REP" -> {
                     // 相似段落 → 内联字符级 diff（蓝字插入+红字删除）
-                    val (pXml, delC, insC, eqC) = buildDiffParagraphXml(
+                    val diff = buildDiffParagraphXml(
                         origParas[op.oi].xml,
                         origParas[op.oi].text,
                         revParas[op.rj].text,
-                        author, date, ridSeq
+                        author, date, ridSeq, fontRPr
                     )
-                    bodyParts.add(pXml)
-                    totalDelChars += delC
-                    totalInsChars += insC
-                    eqBlackChars += eqC   // REP 段落中未修改的部分也是"黑字"
+                    bodyParts.add(diff.xml)
+                    totalDelChars += diff.delChars
+                    totalInsChars += diff.insChars
+                    // 仅「完整黑色句子」计入未改动；句子内有任意红/蓝则整句算修改
+                    blackWholeSentenceChars += diff.blackWholeSentenceChars
                     repCount++
                 }
             }
@@ -158,10 +161,11 @@ object DocxComparator {
 
         writeOutputDocx(origFile, outPath, bodyParts)
 
-        // 修改字数 = 修订档总字数 - 未改动的字数（仅 EQ）
-        // 保证 ≤ 修订档总字数（用户要求：最高=修订档字数）
+        // 涉及修改的句子总字数 = 修订档总字数 - 黑色整句字数
+        // （黑色整句 = 整段未改动(EQ/SUB_EQ) 或 REP 中完整无修订的句子；
+        //   句子内若有任意红/蓝标记则不计入减法，整句算作修改）
         val revTotalChars = revParas.sumOf { it.text.length }
-        val modifiedChars = kotlin.math.max(0, revTotalChars - eqBlackChars)
+        val modifiedChars = kotlin.math.max(0, revTotalChars - blackWholeSentenceChars)
         val summary = buildString {
             append("插入 $insCount 处(${totalInsChars}字) | 删除 $delCount 处(${totalDelChars}字) | 修改 $repCount 处")
         }
@@ -484,8 +488,14 @@ object DocxComparator {
 
     private data class Quad(val tag: String, val i1: Int, val i2: Int, val j1: Int, val j2: Int)
 
-    /** 四元组，用于 buildDiffParagraphXml 返回 (xml, delChars, insChars, equalChars) */
-    private data class Quadruple<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
+    /** buildDiffParagraphXml 的返回：xml + 各类字符数 + 黑色整句字数 */
+    private data class DiffOut(
+        val xml: String,
+        val delChars: Int,
+        val insChars: Int,
+        val eqChars: Int,
+        val blackWholeSentenceChars: Int
+    )
 
     private fun computeDiffText(a: List<String>, b: List<String>, useSimilarity: Boolean): List<Quad> {
         val m = a.size
@@ -598,8 +608,8 @@ object DocxComparator {
 
     private fun buildDiffParagraphXml(
         origXml: String, origText: String, revText: String,
-        author: String, date: String, ridSeq: IntArray
-    ): Quadruple<String, Int, Int, Int> {
+        author: String, date: String, ridSeq: IntArray, fontRPr: String
+    ): DiffOut {
         val runs = extractWRuns(origXml)
         val ops = charDiff(origText, revText)
 
@@ -649,7 +659,13 @@ object DocxComparator {
             }
         }
         sb.append("</w:p>")
-        return Quadruple(sb.toString(), delChars, insChars, equalChars)
+        // 收集「黑色」范围（rev 坐标）：equal 段在结果中为黑字
+        val blackRanges = mutableListOf<Pair<Int, Int>>()
+        for (op in ops) {
+            if (op.tag == "equal") blackRanges.add(Pair(op.j1, op.j2))
+        }
+        val blackWhole = computeBlackWholeSentences(revText, blackRanges)
+        return DiffOut(restampFont(sb.toString(), fontRPr), delChars, insChars, equalChars, blackWhole)
     }
 
     private fun charDiff(textO: String, textR: String): List<Quad> {
@@ -785,11 +801,12 @@ object DocxComparator {
     //  整段 删除/插入 包裹
     // ══════════════════════════════════════════════════════
 
-    private fun wrapDeletedParagraph(paraXml: String, author: String, date: String, ridSeq: IntArray): String {
+    private fun wrapDeletedParagraph(paraXml: String, author: String, date: String, ridSeq: IntArray, fontRPr: String): String {
         val pPr = extractPPr(paraXml)
         val inner = extractParaInner(paraXml)
         val delInner = toDelText(inner)
-        return "<w:p>$pPr<w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">$delInner</w:del></w:p>"
+        val xml = "<w:p>$pPr<w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">$delInner</w:del></w:p>"
+        return restampFont(xml, fontRPr)
     }
 
     private fun wrapInsertedParagraph(paraXml: String, author: String, date: String, ridSeq: IntArray): String {
@@ -802,7 +819,7 @@ object DocxComparator {
      * 部分删除：原文档大段被拆出若干子段(SUB_EQ)后，剩余片段按红字删除输出。
      * exclude 标记已被子段占用的区间，只输出其补集区间为红字。
      */
-    private fun wrapPartialDeletedParagraph(paraXml: String, exclude: List<Pair<Int, Int>>, author: String, date: String, ridSeq: IntArray): String {
+    private fun wrapPartialDeletedParagraph(paraXml: String, exclude: List<Pair<Int, Int>>, author: String, date: String, ridSeq: IntArray, fontRPr: String): String {
         val pPr = extractPPr(paraXml)
         val runs = extractWRuns(paraXml)
         val totalLen = extractParaText(paraXml).length
@@ -817,12 +834,111 @@ object DocxComparator {
             }
         }
         sb.append("</w:p>")
-        return sb.toString()
+        return restampFont(sb.toString(), fontRPr)
     }
 
     /** 将 <w:t>...</w:t> 转为 <w:delText>...</w:delText>，用于删除标记内部。 */
     private fun toDelText(xml: String): String {
         return xml.replace("<w:t", "<w:delText").replace("</w:t>", "</w:delText>")
+    }
+
+    /**
+     * 从修订档提取统一字体规范（rFonts + sz + szCs）：取出现频率最高的运行属性，
+     * 仅保留字体与字号（去掉颜色/下划线/加粗等），用于让结果全文使用修订档字体。
+     */
+    private fun buildFontRPr(revParas: List<Para>): String {
+        val freq = mutableMapOf<String, Int>()
+        for (p in revParas) {
+            for (r in extractWRuns(p.xml)) {
+                val rPr = extractRPr(r.runXml)
+                if (rPr.isEmpty()) continue
+                val sb = StringBuilder()
+                for (tag in listOf("w:rFonts", "w:sz", "w:szCs")) {
+                    val m = Regex("<$tag\\b[^>]*/>").find(rPr)
+                        ?: Regex("<$tag\\b[^>]*>.*?</$tag>", RegexOption.DOT_MATCHES_ALL).find(rPr)
+                    if (m != null) sb.append(m.value)
+                }
+                if (sb.isNotEmpty()) {
+                    val key = sb.toString()
+                    freq[key] = (freq[key] ?: 0) + 1
+                }
+            }
+        }
+        if (freq.isEmpty()) return ""
+        return "<w:rPr>${freq.maxByOrNull { it.value }?.key ?: ""}</w:rPr>"
+    }
+
+    /**
+     * 将 xml 内所有 <w:r> 的运行属性统一为修订档字体(fontRPr)，
+     * 同时保留原运行中的颜色/下划线/加粗/斜体（如红字删除、蓝字插入的标记）。
+     */
+    private fun restampFont(xml: String, fontRPr: String): String {
+        if (fontRPr.isEmpty()) return xml
+        return Regex("(<w:r>)(.*?)(</w:r>)", RegexOption.DOT_MATCHES_ALL).replace(xml) { m ->
+            val inner = m.groupValues[2]
+            val rPrMatch = Regex("<w:rPr.*?</w:rPr>", RegexOption.DOT_MATCHES_ALL).find(inner)
+            val newRPr = if (rPrMatch != null) mergeFontRPr(rPrMatch.value, fontRPr) else fontRPr
+            val newInner = if (rPrMatch != null) inner.replace(rPrMatch.value, newRPr) else "$newRPr$inner"
+            "<w:r>$newInner</w:r>"
+        }
+    }
+
+    /** 合并：以 fontRPr 的字体/字号为主，保留原 rPr 中的颜色/下划线/加粗/斜体。 */
+    private fun mergeFontRPr(origRPr: String, fontRPr: String): String {
+        val extras = StringBuilder()
+        for (tag in listOf("w:color", "w:u", "w:b", "w:i", "w:highlight")) {
+            val m = Regex("<$tag\\b[^>]*/>").find(origRPr)
+                ?: Regex("<$tag\\b[^>]*>.*?</$tag>", RegexOption.DOT_MATCHES_ALL).find(origRPr)
+            if (m != null) extras.append(m.value)
+        }
+        val fontInner = fontRPr.removePrefix("<w:rPr>").removeSuffix("</w:rPr>")
+        return "<w:rPr>$fontInner$extras</w:rPr>"
+    }
+
+    /**
+     * 计算段落中「完整黑色句子」的字符数。
+     * blackRanges 为 rev 坐标下结果为黑字的区间（来自 equal 段）。
+     * 仅当某个句子整体落在黑字区间内（无任何红/蓝标记）才计入，
+     * 否则整句视为修改、不计入减法。
+     */
+    private fun computeBlackWholeSentences(text: String, blackRanges: List<Pair<Int, Int>>): Int {
+        if (blackRanges.isEmpty() || text.isEmpty()) return 0
+        val merged = mergeRanges(blackRanges.sortedBy { it.first })
+        val delim = setOf('。', '！', '？', '；', '\n')
+        var count = 0
+        var s = 0
+        for (idx in text.indices) {
+            if (text[idx] in delim) {
+                val e = idx + 1
+                if (e > s && fullyCovered(s, e, merged)) count += (e - s)
+                s = e
+            }
+        }
+        if (text.length > s && fullyCovered(s, text.length, merged)) count += (text.length - s)
+        return count
+    }
+
+    private fun mergeRanges(ranges: List<Pair<Int, Int>>): List<Pair<Int, Int>> {
+        val res = mutableListOf<Pair<Int, Int>>()
+        var cs = ranges[0].first
+        var ce = ranges[0].second
+        for (k in 1 until ranges.size) {
+            if (ranges[k].first <= ce) ce = kotlin.math.max(ce, ranges[k].second)
+            else { res.add(cs to ce); cs = ranges[k].first; ce = ranges[k].second }
+        }
+        res.add(cs to ce)
+        return res
+    }
+
+    private fun fullyCovered(s: Int, e: Int, merged: List<Pair<Int, Int>>): Boolean {
+        if (e <= s) return false
+        var pos = s
+        for ((a, b) in merged) {
+            if (a > pos) return false
+            if (b >= e) return true
+            if (b > pos) pos = b
+        }
+        return false
     }
 
     /** 计算 [0,total) 中排除 exclude 区间后的补集区间（升序、不重叠）。 */
