@@ -12,7 +12,7 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 /**
- * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.66 结果文档直接统计字数版）。
+ * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.68 修订档视角字数统计版）。
  *
  * 设计目标：输出文档与 Word「审阅-比较」结果一致。
  * 核心思路：
@@ -155,10 +155,9 @@ object DocxComparator {
 
         writeOutputDocx(origFile, outPath, bodyParts)
 
-        // 涉及修改的句子总字数 = 结果文档总字数 − 真正无标记的黑色整句字数
-        // 直接从结果文档 XML 统计（与用户在 Word 中看到的完全一致）：
-        //   1. 结果文档总字数 = 所有 <w:t>+<w:delText> 的文本长度（即 Word 显示的全部可见字）
-        //   2. 黑色整句 = 完全不含 <w:ins>/<w:del> 标记的句子（按 。！？； 切句）
+        // 涉及修改的句子总字数 = 修订档总字数 − 黑色整句字数（修订档视角，与 Word 字符数不计空格一致）
+        // 从结果文档直接解析：修订侧总字数（黑字+蓝字插入，不含删除红字、不含空格）
+        //   − 完全无 <w:ins> 的句子中黑字字数（<w:del> 删除不破坏黑色整句判定）
         val resultStats = computeResultDocStats(outPath)
         val modifiedChars = kotlin.math.max(0, resultStats.totalChars - resultStats.blackWholeSentenceChars)
         val summary = buildString {
@@ -1006,8 +1005,8 @@ object DocxComparator {
     // ══════════════════════════════════════════════════════
 
     private data class ResultDocStats(
-        val totalChars: Int,           // 结果文档全部可见字数（<w:t> + <w:delText>）
-        val blackWholeSentenceChars: Int  // 完全无 ins/del 标记的黑色整句字数
+        val totalChars: Int,                 // 修订侧总字数（<w:t> 黑+蓝，不含删除、不含空格）
+        val blackWholeSentenceChars: Int     // 无 <w:ins> 句子中的黑字(<w:t>非插入)字数（不含空格）
     )
 
     private fun computeResultDocStats(outPath: String): ResultDocStats {
@@ -1023,87 +1022,86 @@ object DocxComparator {
         }
     }
 
-    /** Simplified result stats: extract text with markup awareness */
+    /**
+     * 结果文档字数统计（与 Word「字符数(不计空格)」口径一致，等价于修订档视角）。
+     *
+     * 口径定义（用户指定：涉及修改句字数 = 修订档总字数 − 黑色整句字数）：
+     *   1. 修订侧总字数 totalChars = 所有 <w:t>（黑字 + 蓝字插入）的字符数，排除空格；
+     *      <w:delText>（红色删除）是「原文档独有、修订档没有」的文字，不计入修订侧总数。
+     *   2. 黑色整句 blackWhole = 完全不含 <w:ins> 的句子中，黑字(<w:t> 非插入)的字符数，排除空格。
+     *      <w:del>（红色删除）表示原文档比修订档多出的文字 —— 修订档该句本身未改动，
+     *      因此删除标记【不破坏】黑色整句判定（只以蓝色 <w:ins> 插入作为“修改”依据）。
+     *   3. 涉及修改的句子总字数 = totalChars − blackWhole。
+     *
+     * 注：空格不计入，与 Word 默认「字符数(不计空格)」一致；数字/英文字母正常计入。
+     */
     private fun computeResultDocStatsSimple(xml: String): ResultDocStats {
-        var totalChars = 0
-        var blackWhole = 0
-        
+        var totalChars = 0       // 修订侧总字数（<w:t> 黑+蓝，不含空格，不含删除）
+        var blackWhole = 0       // 无 <w:ins> 句子中的黑字(<w:t> 非插入)字数，不含空格
+        val delim = setOf('。', '！', '？', '；', '\n')
+
         for (px in extractTopLevelParas(xml)) {
-            // Collect text segments with their markup context
-            data class Seg(val text: String, val isMarked: Boolean)  // true if inside ins/del
-            val segs = mutableListOf<Seg>()
-            
-            // Find all ins/del block ranges
+            // 仅收集 <w:ins> 块范围（删除块不影响黑色整句判定，故忽略）
             val insBlocks = mutableListOf<IntRange>()
-            val delBlocks = mutableListOf<IntRange>()
-            for (m in Regex("<w:ins[^>]*>.*?</w:ins>").findAll(px)) {
+            for (m in Regex("<w:ins[^>]*>.*?</w:ins>", RegexOption.DOT_MATCHES_ALL).findAll(px)) {
                 insBlocks.add(m.range)
             }
-            for (m in Regex("<w:del[^>]*>.*?</w:del>").findAll(px)) {
-                val tagStart = px.substring(m.range.first, kotlin.math.min(m.range.first + 9, px.length))
-                if (!tagStart.startsWith("<w:delText")) {
-                    delBlocks.add(m.range)
-                }
-            }
-            
-            fun isMarked(pos: Int): Boolean {
-                for (r in insBlocks) { if (pos in r) return true }
-                for (r in delBlocks) { if (pos in r) return true }
-                return false
-            }
-            
-            // Extract all text nodes in order
-            for (tm in Regex("<w:(t|delText)[^>]*>(.*?)</w:\\1>").findAll(px)) {
+            fun inIns(pos: Int): Boolean = insBlocks.any { pos in it }
+
+            data class Seg(val text: String, val isIns: Boolean, val isBlack: Boolean)
+            val segs = mutableListOf<Seg>()
+            for (tm in Regex("<w:(t|delText)[^>]*>(.*?)</w:\\1>", RegexOption.DOT_MATCHES_ALL).findAll(px)) {
+                val tag = tm.groupValues[1]
                 val txt = tm.groupValues[2]
                 if (txt.isEmpty()) continue
-                val marked = isMarked(tm.range.first)
-                segs.add(Seg(txt, marked))
-                totalChars += txt.length
+                val isDel = (tag == "delText")
+                val isIns = !isDel && inIns(tm.range.first)
+                val isBlack = !isDel && !isIns
+                segs.add(Seg(txt, isIns, isBlack))
+                // 修订侧总数：黑字 + 蓝字插入（不含删除，不含空格）
+                if (!isDel) {
+                    for (ch in txt) if (ch != ' ') totalChars++
+                }
             }
-            
-            // Find sentences that are entirely unmarked (BLK)
+
             val fullText = segs.joinToString("") { it.text }
             if (fullText.isEmpty()) continue
-            
-            // Build a map: char index → isMarked
-            val markedArr = BooleanArray(fullText.length) { false }
+
+            // char 级标记数组
+            val insArr = BooleanArray(fullText.length)
+            val blackArr = BooleanArray(fullText.length)
             var idx = 0
             for (seg in segs) {
                 for (i in 0 until seg.text.length) {
-                    if (idx + i < markedArr.size) {
-                        markedArr[idx + i] = seg.isMarked
+                    val p = idx + i
+                    if (p < fullText.length) {
+                        insArr[p] = seg.isIns
+                        blackArr[p] = seg.isBlack
                     }
                 }
                 idx += seg.text.length
             }
-            
-            // Sentence splitting
-            val delim = setOf('。', '！', '？', '；', '\n')
+
+            // 切句：无 <w:ins> 的句子计为黑色整句，累加其中的黑字（不含空格）
             var sStart = 0
             for (ci in fullText.indices) {
                 if (fullText[ci] in delim) {
                     val sEnd = ci + 1
-                    if (sEnd > sStart) {
-                        // Check if entire sentence is unmarked
-                        var allBlack = true
+                    if (sEnd > sStart && !insArr.sliceArray(sStart until sEnd).any { it }) {
                         for (i in sStart until sEnd) {
-                            if (markedArr[i]) { allBlack = false; break }
+                            if (blackArr[i] && fullText[i] != ' ') blackWhole++
                         }
-                        if (allBlack) blackWhole += (sEnd - sStart)
                     }
                     sStart = sEnd
                 }
             }
-            // Last partial sentence
-            if (sStart < fullText.length) {
-                var allBlack = true
+            if (sStart < fullText.length && !insArr.sliceArray(sStart until fullText.length).any { it }) {
                 for (i in sStart until fullText.length) {
-                    if (markedArr[i]) { allBlack = false; break }
+                    if (blackArr[i] && fullText[i] != ' ') blackWhole++
                 }
-                if (allBlack) blackWhole += (fullText.length - sStart)
             }
         }
-        
+
         return ResultDocStats(totalChars, blackWhole)
     }
 
