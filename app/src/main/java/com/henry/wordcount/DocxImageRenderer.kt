@@ -264,7 +264,9 @@ object DocxImageRenderer {
                 tag == "</w:ins>" -> insDepth--
                 isOpenTag(tag, "w:del") && !tag.startsWith("<w:delText") -> delDepth++
                 tag == "</w:del>" -> delDepth--
-                tag.startsWith("<w:r") && !tag.startsWith("<w:rPr") -> {
+                // v1.1.82 修复：精确匹配 <w:r> 开标签（非自闭合），排除 <w:rFonts>/<w:rStyle> 等
+                // 假 run 标签被误判后，</w:r> 搜索会跳过大量 XML（含 <w:ins>/<w:del>）
+                isOpenTag(tag, "w:r") -> {
                     val re = px.indexOf("</w:r>", gt)
                     if (re < 0) { i = gt + 1; continue }
                     val runXml = px.substring(gt + 1, re)
