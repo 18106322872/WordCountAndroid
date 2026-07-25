@@ -12,7 +12,7 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 /**
- * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.65 字体统一+句子级字数统计版）。
+ * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.66 结果文档直接统计字数版）。
  *
  * 设计目标：输出文档与 Word「审阅-比较」结果一致。
  * 核心思路：
@@ -106,21 +106,17 @@ object DocxComparator {
         var repCount = 0
         var totalInsChars = 0       // 新增字符（计入修改字数）
         var totalDelChars = 0       // 删除字符（仅统计，不计入modifiedChars）
-        var blackWholeSentenceChars = 0  // 未改动（黑色整句）字符：EQ/SUB_EQ 全段 + REP 中完整黑色句子
         val bodyParts = mutableListOf<String>()
 
         for (op in ops) {
             when (op.tag) {
                 "EQ" -> {
-                    // 完全相同段落 → 黑字不变（整段未改动，计入黑色整句）
+                    // 完全相同段落 → 黑字不变
                     bodyParts.add(revParas[op.rj].xml)
-                    blackWholeSentenceChars += revParas[op.rj].text.length
                 }
                 "SUB_EQ" -> {
-                    // 子串匹配段：修订档段落是原文档某段的子串
-                    // → 按修订档原样输出（黑字），与 Word 原生一致（Word W06/W07 均为黑字）
+                    // 子串匹配段 → 按修订档原样输出（黑字）
                     bodyParts.add(revParas[op.rj].xml)
-                    blackWholeSentenceChars += revParas[op.rj].text.length
                 }
                 "DEL" -> {
                     // 原档中被删除的段落（仅非空段落）
@@ -152,8 +148,6 @@ object DocxComparator {
                     bodyParts.add(diff.xml)
                     totalDelChars += diff.delChars
                     totalInsChars += diff.insChars
-                    // 仅「完整黑色句子」计入未改动；句子内有任意红/蓝则整句算修改
-                    blackWholeSentenceChars += diff.blackWholeSentenceChars
                     repCount++
                 }
             }
@@ -161,16 +155,17 @@ object DocxComparator {
 
         writeOutputDocx(origFile, outPath, bodyParts)
 
-        // 涉及修改的句子总字数 = 修订档总字数 - 黑色整句字数
-        // （黑色整句 = 整段未改动(EQ/SUB_EQ) 或 REP 中完整无修订的句子；
-        //   句子内若有任意红/蓝标记则不计入减法，整句算作修改）
-        val revTotalChars = revParas.sumOf { it.text.length }
-        val modifiedChars = kotlin.math.max(0, revTotalChars - blackWholeSentenceChars)
+        // 涉及修改的句子总字数 = 结果文档总字数 − 真正无标记的黑色整句字数
+        // 直接从结果文档 XML 统计（与用户在 Word 中看到的完全一致）：
+        //   1. 结果文档总字数 = 所有 <w:t>+<w:delText> 的文本长度（即 Word 显示的全部可见字）
+        //   2. 黑色整句 = 完全不含 <w:ins>/<w:del> 标记的句子（按 。！？； 切句）
+        val resultStats = computeResultDocStats(outPath)
+        val modifiedChars = kotlin.math.max(0, resultStats.totalChars - resultStats.blackWholeSentenceChars)
         val summary = buildString {
             append("插入 $insCount 处(${totalInsChars}字) | 删除 $delCount 处(${totalDelChars}字) | 修改 $repCount 处")
         }
 
-        Log.d(TAG, "result: ins=$insCount(${totalInsChars}字) del=$delCount(${totalDelChars}字) rep=$repCount chars=$modifiedChars")
+        Log.d(TAG, "result: ins=$insCount(${totalInsChars}字) del=$delCount(${totalDelChars}字) rep=$repCount chars=$modifiedChars (total=${resultStats.totalChars} blackWhole=${resultStats.blackWholeSentenceChars})")
 
         return CompareResult(
             ok = true,
@@ -1007,8 +1002,110 @@ object DocxComparator {
     }
 
     // ══════════════════════════════════════════════════════
-    //  输出 DOCX 写入（保留原文档模板）
+    //  结果文档字数统计（直接从输出 XML 解析，与用户看到的一致）
     // ══════════════════════════════════════════════════════
+
+    private data class ResultDocStats(
+        val totalChars: Int,           // 结果文档全部可见字数（<w:t> + <w:delText>）
+        val blackWholeSentenceChars: Int  // 完全无 ins/del 标记的黑色整句字数
+    )
+
+    private fun computeResultDocStats(outPath: String): ResultDocStats {
+        try {
+            ZipFile(outPath).use { zip ->
+                val entry = zip.getEntry("word/document.xml") ?: return ResultDocStats(0, 0)
+                val xml = zip.getInputStream(entry).bufferedReader().readText()
+                return computeResultDocStatsSimple(xml)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to compute result doc stats", e)
+            return ResultDocStats(0, 0)
+        }
+    }
+
+    /** Simplified result stats: extract text with markup awareness */
+    private fun computeResultDocStatsSimple(xml: String): ResultDocStats {
+        var totalChars = 0
+        var blackWhole = 0
+        
+        for (px in extractTopLevelParas(xml)) {
+            // Collect text segments with their markup context
+            data class Seg(val text: String, val isMarked: Boolean)  // true if inside ins/del
+            val segs = mutableListOf<Seg>()
+            
+            // Find all ins/del block ranges
+            val insBlocks = mutableListOf<IntRange>()
+            val delBlocks = mutableListOf<IntRange>()
+            for (m in Regex("<w:ins[^>]*>.*?</w:ins>").findAll(px)) {
+                insBlocks.add(m.range)
+            }
+            for (m in Regex("<w:del[^>]*>.*?</w:del>").findAll(px)) {
+                val tagStart = px.substring(m.range.first, kotlin.math.min(m.range.first + 9, px.length))
+                if (!tagStart.startsWith("<w:delText")) {
+                    delBlocks.add(m.range)
+                }
+            }
+            
+            fun isMarked(pos: Int): Boolean {
+                for (r in insBlocks) { if (pos in r) return true }
+                for (r in delBlocks) { if (pos in r) return true }
+                return false
+            }
+            
+            // Extract all text nodes in order
+            for (tm in Regex("<w:(t|delText)[^>]*>(.*?)</w:\\1>").findAll(px)) {
+                val txt = tm.groupValues[2]
+                if (txt.isEmpty()) continue
+                val marked = isMarked(tm.range.first)
+                segs.add(Seg(txt, marked))
+                totalChars += txt.length
+            }
+            
+            // Find sentences that are entirely unmarked (BLK)
+            val fullText = segs.joinToString("") { it.text }
+            if (fullText.isEmpty()) continue
+            
+            // Build a map: char index → isMarked
+            val markedArr = BooleanArray(fullText.length) { false }
+            var idx = 0
+            for (seg in segs) {
+                for (i in 0 until seg.text.length) {
+                    if (idx + i < markedArr.size) {
+                        markedArr[idx + i] = seg.isMarked
+                    }
+                }
+                idx += seg.text.length
+            }
+            
+            // Sentence splitting
+            val delim = setOf('。', '！', '？', '；', '\n')
+            var sStart = 0
+            for (ci in fullText.indices) {
+                if (fullText[ci] in delim) {
+                    val sEnd = ci + 1
+                    if (sEnd > sStart) {
+                        // Check if entire sentence is unmarked
+                        var allBlack = true
+                        for (i in sStart until sEnd) {
+                            if (markedArr[i]) { allBlack = false; break }
+                        }
+                        if (allBlack) blackWhole += (sEnd - sStart)
+                    }
+                    sStart = sEnd
+                }
+            }
+            // Last partial sentence
+            if (sStart < fullText.length) {
+                var allBlack = true
+                for (i in sStart until fullText.length) {
+                    if (markedArr[i]) { allBlack = false; break }
+                }
+                if (allBlack) blackWhole += (fullText.length - sStart)
+            }
+        }
+        
+        return ResultDocStats(totalChars, blackWhole)
+    }
 
     private fun writeOutputDocx(origDocx: File, outPath: String, bodyXmlParts: List<String>) {
         val bodyContent = bodyXmlParts.joinToString("\n")
