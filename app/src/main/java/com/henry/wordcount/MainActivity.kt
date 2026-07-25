@@ -1779,7 +1779,7 @@ fun CompareScreen(
                         }
                         resultJson = j.toString()
                         outPath = res.outputPath
-                        imgPath = res.outputPath.removeSuffix(".docx") + ".png"
+                        imgPath = res.outputPath?.removeSuffix(".docx")?.plus(".png")
                     } else {
                         snackbar.showSnackbar("比较失败：${res.error ?: "未知错误"}")
                     }
@@ -1971,6 +1971,9 @@ private fun openImageFile(context: android.content.Context, path: String) {
         Log.w("WordCount", "打开长图失败: ${e.message}")
     }
 }
+
+/** 分享比对结果 WORD（仍分享 .docx，内容不变）。 */
+private fun shareDocxFile(context: android.content.Context, path: String, mime: String) {
     try {
         val file = File(path)
         if (!file.exists()) return
