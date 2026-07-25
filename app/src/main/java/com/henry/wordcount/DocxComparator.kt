@@ -12,7 +12,7 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 /**
- * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.68 修订档视角字数统计版）。
+ * 纯 Kotlin 实现的 DOCX 文档比较器（v1.1.69 修订档视角字数统计+段落缩进对齐版）。
  *
  * 设计目标：输出文档与 Word「审阅-比较」结果一致。
  * 核心思路：
@@ -142,6 +142,7 @@ object DocxComparator {
                     val diff = buildDiffParagraphXml(
                         origParas[op.oi].xml,
                         origParas[op.oi].text,
+                        revParas[op.rj].xml,
                         revParas[op.rj].text,
                         author, date, ridSeq, fontRPr
                     )
@@ -601,13 +602,17 @@ object DocxComparator {
     // ══════════════════════════════════════════════════════
 
     private fun buildDiffParagraphXml(
-        origXml: String, origText: String, revText: String,
+        origXml: String, origText: String,
+        revXml: String, revText: String,
         author: String, date: String, ridSeq: IntArray, fontRPr: String
     ): DiffOut {
         val runs = extractWRuns(origXml)
         val ops = charDiff(origText, revText)
+        // 段落缩进/对齐等格式取自【修订后的文档】，使结果文档与修订档外观一致
+        // （仅原文档有、修订档没有的段落才用原文档缩进，由 DEL 分支负责）
+        val pPr = extractPPr(revXml)
 
-        val sb = StringBuilder("<w:p>")
+        val sb = StringBuilder("<w:p>$pPr")
         var delChars = 0
         var insChars = 0
         var equalChars = 0
