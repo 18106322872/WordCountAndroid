@@ -10,7 +10,7 @@ import java.util.zip.ZipFile
 import kotlin.math.max
 
 /**
- * 把比较结果（或任意）DOCX 渲染成长图 PNG（v1.1.81：支持有序列表编号 + 纯删除段红色安全网）。
+ * 把比较结果（或任意）DOCX 渲染成长图 PNG（v1.1.82：修复 ins/del 深度计数器被自闭合标签/误匹配污染）。
  * 纯 Kotlin + Android Canvas 实现，零第三方依赖（不触碰 Chaquopy/lxml）。
  * 颜色规则：纯黑=未改动；蓝色=插入(ins)；红色删除线=删除(del)。
  * 编号：从 &lt;w:numPr&gt; 提取 numId/ilvl，自动递增渲染 "1. " "2. "... 前缀。
@@ -257,9 +257,12 @@ object DocxImageRenderer {
             if (gt < 0) break
             val tag = px.substring(lt, gt + 1)
             when {
-                tag.startsWith("<w:ins") -> insDepth++
+                // v1.1.82 修复：精确匹配 <w:ins>/<w:del> 开标签，排除：
+                //   1) 自闭合标签（pPr/rPr 中的 <w:ins ../> / <w:del ../> 属性标记）
+                //   2) 以 "ins" 开头的其他标签如 <w:instrText>
+                isOpenTag(tag, "w:ins") -> insDepth++
                 tag == "</w:ins>" -> insDepth--
-                tag.startsWith("<w:del") && !tag.startsWith("<w:delText") -> delDepth++
+                isOpenTag(tag, "w:del") && !tag.startsWith("<w:delText") -> delDepth++
                 tag == "</w:del>" -> delDepth--
                 tag.startsWith("<w:r") && !tag.startsWith("<w:rPr") -> {
                     val re = px.indexOf("</w:r>", gt)
@@ -355,6 +358,20 @@ object DocxImageRenderer {
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
+
+    /**
+     * 精确匹配 OOXML 开标签（非自闭合）。
+     * 要求 tag 以 "<name" 开头，且下一字符是空格、> 或 /（排除 <w:instrText> 被误匹配为 <w:ins），
+     * 同时排除自闭合标签（以 "/>" 结尾），如 pPr/rPr 中的 <w:ins ../> / <w:del ../>。
+     */
+    private fun isOpenTag(tag: String, name: String): Boolean {
+        if (!tag.startsWith("<$name")) return false
+        val afterName = tag.getOrElse(name.length + 1) { return false }
+        // 下一字符必须是空格、> 或 /（确保标签名精确匹配，不把 <w:instrText 当 <w:ins）
+        if (afterName !in " />") return false
+        // 排除自闭合标签
+        return !tag.endsWith("/>")
+    }
 
     // ---------- 布局 ----------
 
