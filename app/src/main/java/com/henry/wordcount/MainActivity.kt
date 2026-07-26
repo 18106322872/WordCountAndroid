@@ -472,52 +472,55 @@ fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEnt
  * 返回 (words, fe, nc, chars)
  */
 /**
- * 纯 Kotlin 字数统计，严格对齐中文 Word「字数统计」对话框口径（v1.2.4 重写）。
+ * 纯 Kotlin 字数统计，严格对齐桌面版 wordcount.py 的 count_unit 算法（v1.2.6 回退修正）。
  *
- * Word 中文版口径：
- *  - 中文（中文字符和朝鲜语单词）= 所有「非拉丁字母/数字单词」的非空白字符。
- *    包括：汉字、中文标点、弯引号“”‘’、破折号—、省略号…、西文标点,.!?()、各类符号。
- *    即——除了下面「非中文单词」以外的每个非空白字符都算 1 个中文字符。
- *  - 非中文（非中文单词）= 连续拉丁字母/数字组成的「词」数量。
- *    连字符/撇号出现在词内部时并入同一词（如 state-of-the-art、don't 各算 1 个）；
- *    西文标点（,.!?() 等）与空格不计入单词。
- *  - 字数 = 中文 + 非中文
- *  - 字符数（不计空格）= 所有非空白字符总数
+ * 口径与桌面版 wordcount.py 完全一致（该算法已用 Word COM 校验）：
+ *   fe（中文字符和朝鲜语单词）= 落在 FarEast Unicode 区间内的每个字符各算 1 个
+ *   nc（非中文单词）           = 连续的「非空白、非 FarEast」字符串算 1 个词
+ *   chars（字符数不计空格）    = 所有非空白字符总数
+ *   words = fe + nc
  *
- * 之前版本把「西文标点/符号」误判为「非中文单词」，导致中文偏少、非中文偏多；
- * 本版按 Word 口径将西文标点归入中文，与 Word 完全一致。
+ * FarEast 区间定义（与桌面版 _FAR 完全一致 + v1.2.2 新增通用标点）：
+ *   \u1100-\u11FF   Hangul Jamo
+ *   \u2000-\u206F   通用标点（弯引号、破折号、省略号等，v1.2.2新增）
+ *   \u3000-\u303F   CJK 符号与标点
+ *   \u3130-\u318F   Hangul 兼容 Jamo
+ *   \u3400-\u4DBF   CJK 扩展 A
+ *   \u4E00-\u9FFF   CJK 基本平面
+ *   \uA960-\uA97C   Hangul Jamo 扩展 A
+ *   \uAC00-\uD7A3   Hangul 音节
+ *   \uD7B0-\uD7FF   Hangul Jamo 扩展 B
+ *   \uF900-\uFAFF   CJK 兼容
+ *   \uFF00-\uFFEF   全角字符
+ *
+ * 重要：ASCII 标点（,.!?()等）不在 FarEast 区间内，会被归入 nc 连续段
+ * （这是正确行为——与 Word COM 的 FarEastCharacters 定义一致）
  *
  * 返回 (words, fe, nc, chars)
  */
 fun countTextKotlin(text: String): Quadruple<Int, Int, Int, Int> {
-    var fe = 0      // 中文字符和朝鲜语单词
-    var nc = 0      // 非中文单词数
-    var chars = 0   // 字符数（不计空格）
-    var inLatin = false
-    for (ch in text) {
-        if (ch.isWhitespace()) { inLatin = false; continue }
-        chars++
-        if (isLatinAlnum(ch)) {
-            // 拉丁字母/数字：开始或延续一个「非中文单词」
-            if (!inLatin) { nc++; inLatin = true }
-        } else if (ch == '\'' || ch == '\u2019' || ch == '-' || ch == '\u00AD' ||
-                   ch == '\u2010' || ch == '\u2011' || ch == '\u2012' || ch == '\u2013') {
-            // 撇号/连字符：在拉丁词内部时延续该词（不计入中文、也不新增单词）；
-            // 单独出现（不在词内）时视为普通字符，计入中文。
-            if (!inLatin) { fe++; inLatin = false }
-        } else {
-            // 其余一切字符（汉字、中文标点、弯引号、西文标点、符号）= 中文字符
-            fe++
-            inLatin = false
+    // FarEast 正则：与桌面版 wordcount.py 的 _FAR 完全一致（含 v1.2.2 新增的 \u2000-\u206F）
+    val farEastRegex = Regex("[\\u1100-\\u11FF\\u2000-\\u206F\\u3000-\\u303F\\u3130-\\u318F\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uA960-\\uA97C\\uAC00-\\uD7A3\\uD7B0-\\uD7FF\\uF900-\\uFAFF\\uFF00-\\uFFEF]")
+    // 非 CJK 词：连续的非空白、非 FarEast 字符串
+    val nonCjkRegex = Regex("[^\\s\\u1100-\\u11FF\\u2000-\\u206F\\u3000-\\u303F\\u3130-\\u318F\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uA960-\\uA97C\\uAC00-\\uD7A3\\uD7B0-\\uD7FF\\uF900-\\uFAFF\\uFF00-\\uFFEF]+")
+
+    // 按段落分割（与 Python 端 re.split(r"\n\s*\n") 一致）
+    val paragraphs = text.split(Regex("\\n\\s*\\n"))
+    var totalFe = 0
+    var totalNc = 0
+    var totalChars = 0
+
+    for (para in paragraphs) {
+        val trimmed = para.trim()
+        if (trimmed.isNotEmpty()) {
+            totalFe += farEastRegex.findAll(trimmed).count()
+            totalNc += nonCjkRegex.findAll(trimmed).count()
+            totalChars += trimmed.replace(Regex("\\s"), "").length
         }
     }
-    val words = fe + nc
-    return Quadruple(words, fe, nc, chars)
-}
 
-/** 半角拉丁字母或数字（A-Z a-z 0-9）。重音拉丁字母/全角字母视作非拉丁，归入中文类。 */
-private fun isLatinAlnum(ch: Char): Boolean {
-    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')
+    val words = totalFe + totalNc
+    return Quadruple(words, totalFe, totalNc, totalChars)
 }
 
 /** 简单四元组（避免引入额外依赖）*/

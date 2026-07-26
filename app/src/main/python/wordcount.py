@@ -548,37 +548,10 @@ NON_CJK = re.compile("[^" + r"\s" + _FAR + "]+")
 
 
 def count_unit(s):
-
-
-
-    """Return (fe, nc, chars) for a single text unit (paragraph or cell)."""
-
-
-
-    # v1.2.4 重写：对齐中文 Word「字数统计」口径
-    # nc = 连续拉丁字母/数字组成的「非中文单词」数量（连字符/撇号在词内并入同一词）
-    # fe = 其余所有非空白字符（汉字、中文标点、弯引号、西文标点、符号）的中文字符数
-    # 旧逻辑用 NON_CJK 正则把西文标点也误判为非中文，导致中文偏少、非中文偏多
-    fe = 0
-    nc = 0
-    chars = 0
-    in_latin = False
-    for ch in s:
-        if ch.isspace():
-            in_latin = False
-            continue
-        chars += 1
-        if ('a' <= ch <= 'z') or ('A' <= ch <= 'Z') or ('0' <= ch <= '9'):
-            if not in_latin:
-                nc += 1
-                in_latin = True
-        elif ch in ("'", '’', '-', '­', '‐', '‑', '‒', '–'):
-            if not in_latin:
-                fe += 1
-                in_latin = False
-        else:
-            fe += 1
-            in_latin = False
+    """Return (fe, nc, chars) - v1.2.6: FarEast regex (aligned with desktop wordcount.py)."""
+    fe = len(FAR_EAST.findall(s))
+    nc = len(NON_CJK.findall(s))
+    ch = len(re.sub(r"\s", "", s))
     return fe, nc, chars
 
 
