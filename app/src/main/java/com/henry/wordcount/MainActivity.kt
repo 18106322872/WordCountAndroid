@@ -358,6 +358,8 @@ fun WordCountApp(initialUris: List<Uri>) {
                             color = Color.Gray, modifier = Modifier.padding(horizontal = 8.dp))
                         Text("或点下方「选择文件」从本机选取",
                             color = Color.Gray, modifier = Modifier.padding(horizontal = 8.dp))
+                        Text("页数想跟 Word 核对？点文件右侧蓝色「Word」按钮直接在 Word 里打开",
+                            color = Color(0xFF2B579A), modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp))
                     }
                 }
                 LazyColumn(
@@ -374,7 +376,8 @@ fun WordCountApp(initialUris: List<Uri>) {
                                 val i = entries.indexOf(e)
                                 if (i >= 0) entries.removeAt(i)
                             },
-                            onOpen = { e -> openWithOtherApp(context, e) }
+                            onOpen = { e -> openWithOtherApp(context, e) },
+                            onOpenWord = { e -> openWithWord(context, e) }
                         )
                     }
                     if (busy) item {
@@ -401,7 +404,7 @@ private fun TabToggle(label: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEntry) -> Unit, onOpen: (FileEntry) -> Unit) {
+fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEntry) -> Unit, onOpen: (FileEntry) -> Unit, onOpenWord: (FileEntry) -> Unit) {
     Card(
         Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
@@ -443,6 +446,13 @@ fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEnt
                 // 用其它应用打开
                 IconButton(onClick = { onOpen(entry) }) {
                     Text("打开", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                }
+                // v1.2.9: 用 Word 打开（仅对 Word 可打开的格式显示）
+                val wordExts = setOf(".doc", ".docx", ".pdf", ".txt", ".rtf")
+                if (wordExts.contains((entry.result?.ext ?: "").lowercase())) {
+                    IconButton(onClick = { onOpenWord(entry) }) {
+                        Text("Word", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2B579A))
+                    }
                 }
                 // 删除按钮
                 IconButton(onClick = { onDelete(entry) }) {
@@ -543,6 +553,35 @@ private fun openWithOtherApp(context: android.content.Context, entry: FileEntry)
         context.startActivity(Intent.createChooser(intent, "用其他应用打开"))
     } catch (e: Throwable) {
         Log.w("WordCount", "打开文件失败 ${entry.displayName}: ${e.message}")
+    }
+}
+
+/** v1.2.9: 直接拉起手机 Microsoft Word 打开文件（用于核对 Word 显示的页数和字数）。
+ *  若未安装 Word，退回系统选择器。 */
+private fun openWithWord(context: android.content.Context, entry: FileEntry) {
+    try {
+        val file = File(entry.cachePath)
+        if (!file.exists()) {
+            Log.w("WordCount", "用Word打开失败：缓存文件不存在 ${entry.displayName}")
+            return
+        }
+        val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
+        val mime = mimeForExt(entry.result?.ext ?: "")
+        val wordPkg = "com.microsoft.office.word"
+        val base = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mime)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        // 优先尝试直接拉起 Word
+        val wordIntent = Intent(base).apply { `package` = wordPkg }
+        if (wordIntent.resolveActivity(context.packageManager) != null) {
+            context.startActivity(wordIntent)
+        } else {
+            // 没装 Word，退回系统选择器
+            context.startActivity(Intent.createChooser(base, "用其他应用打开"))
+        }
+    } catch (e: Throwable) {
+        Log.w("WordCount", "用Word打开失败 ${entry.displayName}: ${e.message}")
     }
 }
 
