@@ -499,10 +499,10 @@ fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEnt
  * 返回 (words, fe, nc, chars)
  */
 fun countTextKotlin(text: String): Quadruple<Int, Int, Int, Int> {
-    // FarEast 正则：与桌面版 wordcount.py 的 _FAR 完全一致（含 v1.2.2 新增的 \u2000-\u206F）
-    val farEastRegex = Regex("[\\u1100-\\u11FF\\u2000-\\u206F\\u3000-\\u303F\\u3130-\\u318F\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uA960-\\uA97C\\uAC00-\\uD7A3\\uD7B0-\\uD7FF\\uF900-\\uFAFF\\uFF00-\\uFFEF]")
+    // FarEast 正则：与桌面版 wordcount.py 的 _FAR 完全一致（v1.2.8: 去掉 v1.2.2 误加的 \u2000-\u206F）
+    val farEastRegex = Regex("[\\u1100-\\u11FF\\u3000-\\u303F\\u3130-\\u318F\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uA960-\\uA97C\\uAC00-\\uD7A3\\uD7B0-\\uD7FF\\uF900-\\uFAFF\\uFF00-\\uFFEF]")
     // 非 CJK 词：连续的非空白、非 FarEast 字符串
-    val nonCjkRegex = Regex("[^\\s\\u1100-\\u11FF\\u2000-\\u206F\\u3000-\\u303F\\u3130-\\u318F\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uA960-\\uA97C\\uAC00-\\uD7A3\\uD7B0-\\uD7FF\\uF900-\\uFAFF\\uFF00-\\uFFEF]+")
+    val nonCjkRegex = Regex("[^\\s\\u1100-\\u11FF\\u3000-\\u303F\\u3130-\\u318F\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uA960-\\uA97C\\uAC00-\\uD7A3\\uD7B0-\\uD7FF\\uF900-\\uFAFF\\uFF00-\\uFFEF]+")
 
     // 按段落分割（与 Python 端 re.split(r"\n\s*\n") 一致）
     val paragraphs = text.split(Regex("\\n\\s*\\n"))

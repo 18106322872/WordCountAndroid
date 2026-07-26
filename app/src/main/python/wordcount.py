@@ -487,8 +487,7 @@ _FAR = (
     r"\u1100-\u11FF"   # Hangul Jamo
 
 
-    r"\u2000-\u206F"   # 通用标点（v1.2.2新增：弯引号、破折号、省略号等，与Word口径对齐）
-
+    # v1.2.8: 去掉 \u2000-\u206F（通用标点），与桌面版 wordcount.py 对齐（之前误加导致中文偏多）
 
 
     r"\u3000-\u303F"   # CJK 符号与标点
@@ -548,11 +547,11 @@ NON_CJK = re.compile("[^" + r"\s" + _FAR + "]+")
 
 
 def count_unit(s):
-    """Return (fe, nc, chars) - v1.2.6: FarEast regex (aligned with desktop wordcount.py)."""
+    """Return (fe, nc, chars) - v1.2.8: FarEast regex (aligned with desktop wordcount.py, no  -206F)."""
     fe = len(FAR_EAST.findall(s))
     nc = len(NON_CJK.findall(s))
     ch = len(re.sub(r"\s", "", s))
-    return fe, nc, chars
+    return fe, nc, ch
 
 
 
