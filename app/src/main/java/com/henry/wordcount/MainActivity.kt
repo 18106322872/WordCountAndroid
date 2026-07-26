@@ -358,7 +358,7 @@ fun WordCountApp(initialUris: List<Uri>) {
                             color = Color.Gray, modifier = Modifier.padding(horizontal = 8.dp))
                         Text("或点下方「选择文件」从本机选取",
                             color = Color.Gray, modifier = Modifier.padding(horizontal = 8.dp))
-                        Text("页数想跟 Word 核对？点文件右侧蓝色「Word」按钮直接在 Word 里打开",
+                        Text("页数想跟 Word 核对？点文件名右侧「Word」直接在 Word 里打开",
                             color = Color(0xFF2B579A), modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp))
                     }
                 }
@@ -410,53 +410,58 @@ fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEnt
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
     ) {
         Column(Modifier.padding(12.dp)) {
+            // 第一行：文件名横跨全宽（方便显示长文件名和点击打开）
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(checked = entry.selected, onCheckedChange = { onToggle(entry) })
+                Text(
+                    entry.displayName, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { onOpen(entry) }
+                )
+                // 删除按钮
+                IconButton(onClick = { onDelete(entry) }, modifier = Modifier.size(32.dp)) {
+                    Icon(imageVector = Icons.Default.Close, contentDescription = "删除", tint = Color.Gray)
+                }
+            }
+            // 第二行：左边统计信息（占更多空间）+ 右边文件类型/Word按钮（上下排列）
+            Row(verticalAlignment = Alignment.Top) {
                 Column(Modifier.weight(1f)) {
-                    // 文件名可点击：用其它应用打开
-                    Text(
-                        entry.displayName, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.clickable { onOpen(entry) }
-                    )
                     val r = entry.result
                     if (r != null) {
-                        // v1.1.16: 估算页数标注"(估)"——当 pagesReason 含 estimate/layout 时
                         val isEstimated = r.pagesReason?.contains("estimate") == true ||
                             r.pagesReason?.contains("layout") == true
                         val pageLabel = if (isEstimated) "页 ${r.pages ?: estimatePages(r.chars)}(估)"
                             else "页 ${r.pages ?: estimatePages(r.chars)}"
-                    Text(
-                        "字数 ${r.words} ｜ 中文 ${r.fe} ｜ 非中文 ${r.nc} ｜ $pageLabel" +
-                                (if (r.pagesReason != null && !isEstimated) " ｜ ${r.pagesReason}" else ""),
-                        style = MaterialTheme.typography.bodySmall, color = Color.Gray
-                    )
+                        Text(
+                            "字数 ${r.words} ｜ 中文 ${r.fe} ｜ 非中文 ${r.nc} ｜ $pageLabel" +
+                                    (if (r.pagesReason != null && !isEstimated) " ｜ ${r.pagesReason}" else ""),
+                            style = MaterialTheme.typography.bodySmall, color = Color.Gray
+                        )
                         if (r.hasUnreliable) Text("含无法准确统计的内容（可导出）", style = MaterialTheme.typography.bodySmall, color = Color(0xFFB26A00))
                     } else if (entry.error != null) {
-                        // 截取首行/前200字，避免满屏 traceback；改前缀为"处理出错"
                         val shortErr = entry.error!!.substringBefore('\n').take(200)
                         Text("处理出错：$shortErr", style = MaterialTheme.typography.bodySmall, color = Color(0xFFB00020))
                     } else {
                         Text("统计中…", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                     }
                 }
-                Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.small) {
-                    Text(" ${entry.result?.ext?.uppercase() ?: "?"} ", Modifier.padding(6.dp, 2.dp), style = MaterialTheme.typography.labelSmall)
-                }
-                // 用其它应用打开
-                IconButton(onClick = { onOpen(entry) }) {
-                    Text("打开", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                }
-                // v1.2.9: 用 Word 打开（仅对 Word 可打开的格式显示）
-                val wordExts = setOf(".doc", ".docx", ".pdf", ".txt", ".rtf")
-                if (wordExts.contains((entry.result?.ext ?: "").lowercase())) {
-                    IconButton(onClick = { onOpenWord(entry) }) {
-                        Text("Word", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2B579A))
+                // 右侧：文件类型标签 + Word 按钮（上下排列）
+                Column(horizontalAlignment = Alignment.End) {
+                    Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.small) {
+                        Text(" ${entry.result?.ext?.uppercase() ?: "?"} ", Modifier.padding(6.dp, 2.dp), style = MaterialTheme.typography.labelSmall)
                     }
-                }
-                // 删除按钮
-                IconButton(onClick = { onDelete(entry) }) {
-                    Icon(imageVector = Icons.Default.Close, contentDescription = "删除", tint = Color.Gray)
+                    // v1.3.0: 用 Word 打开（仅对 Word 可打开的格式显示，紧凑文字按钮）
+                    val wordExts = setOf(".doc", ".docx", ".pdf", ".txt", ".rtf")
+                    if (wordExts.contains((entry.result?.ext ?: "").lowercase())) {
+                        Text("Word",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF2B579A),
+                            modifier = Modifier
+                                .padding(top = 4.dp)
+                                .clickable { onOpenWord(entry) })
+                    }
                 }
             }
             entry.result?.inner?.forEach { inner ->
@@ -556,8 +561,8 @@ private fun openWithOtherApp(context: android.content.Context, entry: FileEntry)
     }
 }
 
-/** v1.2.9: 直接拉起手机 Microsoft Word 打开文件（用于核对 Word 显示的页数和字数）。
- *  若未安装 Word，退回系统选择器。 */
+/** v1.3.0: 直接拉起手机 Microsoft Word 打开文件（用于核对 Word 显示的页数和字数）。
+ *  若未安装 Word 或打开失败，退回系统选择器。 */
 private fun openWithWord(context: android.content.Context, entry: FileEntry) {
     try {
         val file = File(entry.cachePath)
@@ -567,18 +572,22 @@ private fun openWithWord(context: android.content.Context, entry: FileEntry) {
         }
         val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
         val mime = mimeForExt(entry.result?.ext ?: "")
-        val wordPkg = "com.microsoft.office.word"
-        val base = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, mime)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        // 优先尝试直接拉起 Word
-        val wordIntent = Intent(base).apply { `package` = wordPkg }
-        if (wordIntent.resolveActivity(context.packageManager) != null) {
+        // 直接指定 Word 包名，不经过 resolveActivity 检查（该检查在某些设备上误判）
+        try {
+            val wordIntent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, mime)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                `package` = "com.microsoft.office.word"
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
             context.startActivity(wordIntent)
-        } else {
-            // 没装 Word，退回系统选择器
-            context.startActivity(Intent.createChooser(base, "用其他应用打开"))
+        } catch (e: android.content.ActivityNotFoundException) {
+            // 未安装 Word，退回系统选择器
+            val fallback = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, mime)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(Intent.createChooser(fallback, "用其他应用打开"))
         }
     } catch (e: Throwable) {
         Log.w("WordCount", "用Word打开失败 ${entry.displayName}: ${e.message}")
