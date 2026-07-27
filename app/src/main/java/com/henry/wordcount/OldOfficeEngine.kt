@@ -102,6 +102,8 @@ object OldOfficeEngine {
         val sb = StringBuilder()
         try {
             for (i in 0 until wb.numberOfSheets) {
+                // v1.3.0: 跳过隐藏工作表（与 .xlsx 的 OoXmlEngine 行为一致）
+                if (wb.isSheetHidden(i)) continue
                 val sheet = wb.getSheetAt(i) ?: continue
                 sb.append("\n[工作表: ${sheet.sheetName}]\n")
                 for (row in sheet) {

@@ -409,9 +409,11 @@ object OoXmlEngine {
         tRe: Regex
     ): String {
         if (inner.isEmpty()) return ""
-        // inlineStr：<is>...<t>..</t></is>
+        // inlineStr：<is>...<t>..</t></is>（v1.3.0修复：用 findAll 拼接所有段，与 readSharedStrings 一致）
         if (attrs.contains("t=\"inlineStr\"")) {
-            return tRe.find(inner)?.let { decodeXml(it.groupValues[1]) } ?: ""
+            val sb = StringBuilder()
+            tRe.findAll(inner).forEach { sb.append(decodeXml(it.groupValues[1])) }
+            return sb.toString()
         }
         val v = vRe.find(inner)?.groupValues?.get(1)?.trim() ?: ""
         // 共享字符串：t="s"，<v> 是索引
