@@ -446,6 +446,8 @@ fun FileCard(
     hiddenSelected: Map<String, Boolean>,
     onToggleHidden: (String, String) -> Unit
 ) {
+    val expanded = remember { mutableStateOf(false) }
+
     Card(
         Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
@@ -480,6 +482,18 @@ fun FileCard(
                                     (if (r.pagesReason != null && !isEstimated) " ｜ ${r.pagesReason}" else ""),
                             style = MaterialTheme.typography.bodySmall, color = Color.Gray
                         )
+                        // v1.3.6: 明细折叠/展开切换（点击统计行展开）
+                        val detailCount = (r.inner?.size ?: 0) + (r.sheets?.size ?: 0) + (r.hiddenSheets?.size ?: 0)
+                        if (detailCount > 0) {
+                            Text(
+                                if (expanded.value) "▲ 收起明细" else "▶ 展开${detailCount}项明细",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier
+                                    .padding(top = 2.dp)
+                                    .clickable { expanded.value = !expanded.value }
+                            )
+                        }
                         if (r.hasUnreliable) Text("含无法准确统计的内容（可导出）", style = MaterialTheme.typography.bodySmall, color = Color(0xFFB26A00))
                     } else if (entry.error != null) {
                         val shortErr = entry.error!!.substringBefore('\n').take(200)
@@ -520,6 +534,8 @@ fun FileCard(
                     }
                 }
             }
+            // v1.3.6: 明细区默认折叠，点击"展开N项明细"才显示
+            if (expanded.value) {
             entry.result?.inner?.forEach { inner ->
                 Row(Modifier.padding(start = 40.dp, top = 2.dp)) {
                     Text("└ ${inner.name}", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -539,6 +555,7 @@ fun FileCard(
                     Text("字 ${hs.words} 中 ${hs.fe} 非 ${hs.nc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
             }
+            } // end expanded
         }
     }
 }
