@@ -140,20 +140,6 @@ object OldOfficeEngine {
                             collectShapeText(shape, sb)
                         }
                     }
-                    // 图表文字：HSSFChart 的标题/轴标签/数据标签（多为英文零件号/标注）
-                    try {
-                        val charts = org.apache.poi.hssf.usermodel.HSSFChart.getSheetCharts(sheet)
-                        for (chart in charts) {
-                            for (ti in chart.getChartTitleTexts()) {
-                                val t = ti?.getString()?.string
-                                if (!t.isNullOrBlank()) sb.append(t).append("\n")
-                            }
-                            for (ai in chart.getAxisTitleTexts()) {
-                                val t = ai?.getString()?.string
-                                if (!t.isNullOrBlank()) sb.append(t).append("\n")
-                            }
-                        }
-                    } catch (_: Throwable) { /* 某些 POI 版本 HSSFChart API 可能不可用 */ }
                 } catch (_: Throwable) { }
                 if (hiddenFlag) hidden.add(Pair(name, sb.toString()))
                 else {
