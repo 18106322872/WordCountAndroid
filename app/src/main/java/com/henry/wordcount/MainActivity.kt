@@ -51,6 +51,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -123,6 +124,12 @@ data class InnerResult(
     val pages: Int?
 )
 
+/** 单个工作表统计（含隐藏表）：名称 + 字数 */
+data class SheetStat(
+    val name: String,
+    val words: Int, val fe: Int, val nc: Int, val chars: Int
+)
+
 data class FileResult(
     val name: String,
     val ext: String,
@@ -131,6 +138,8 @@ data class FileResult(
     val pages: Int?,
     val pagesReason: String?,
     val sheets: List<String>,
+    // v1.3.3: 隐藏工作表列表（默认不计入文件字数与合计，由 UI 勾选后才并入）
+    val hiddenSheets: List<SheetStat> = emptyList(),
     val inner: List<InnerResult>,
     val hasUnreliable: Boolean,
 )
@@ -261,12 +270,21 @@ fun WordCountApp(initialUris: List<Uri>) {
         }
     }
 
+    // v1.3.3: 隐藏工作表的勾选状态（key = "${entry.id}::${sheetName}"）
+    val hiddenSelected = remember { mutableStateMapOf<String, Boolean>() }
+
     val totals = run {
         val sel = entries.filter { it.selected && it.result != null }
         var w = 0; var fe = 0; var nc = 0; var ch = 0; var pg = 0
         sel.forEach { r ->
             w += r.result!!.words; fe += r.result!!.fe; nc += r.result!!.nc; ch += r.result!!.chars
             pg += r.result!!.pages ?: estimatePages(r.result!!.chars)
+            // 勾选的隐藏工作表计入合计（页数不另计，沿用文件级页数）
+            r.result!!.hiddenSheets.forEach { hs ->
+                if (hiddenSelected["${r.id}::${hs.name}"] == true) {
+                    w += hs.words; fe += hs.fe; nc += hs.nc; ch += hs.chars
+                }
+            }
         }
         mapOf("words" to w, "fe" to fe, "nc" to nc, "chars" to ch, "pages" to pg)
     }
@@ -360,6 +378,8 @@ fun WordCountApp(initialUris: List<Uri>) {
                             color = Color.Gray, modifier = Modifier.padding(horizontal = 8.dp))
                         Text("页数想跟 Word 核对？点文件名右侧「Word」直接在 Word 里打开",
                             color = Color(0xFF2B579A), modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp))
+                        Text("Excel 页数想核对？点文件右侧「Excel」直接在 WPS/Excel 里打开（WPS 逐页导出无文件级页数，只能手动看）",
+                            color = Color(0xFF217346), modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp))
                     }
                 }
                 LazyColumn(
@@ -377,7 +397,13 @@ fun WordCountApp(initialUris: List<Uri>) {
                                 if (i >= 0) entries.removeAt(i)
                             },
                             onOpen = { e -> openWithOtherApp(context, e) },
-                            onOpenWord = { e -> openWithWord(context, e) }
+                            onOpenWord = { e -> openWithWord(context, e) },
+                            onOpenExcel = { e -> openWithExcel(context, e) },
+                            hiddenSelected = hiddenSelected,
+                            onToggleHidden = { id, name ->
+                                val k = "$id::$name"
+                                hiddenSelected[k] = !(hiddenSelected[k] ?: false)
+                            }
                         )
                     }
                     if (busy) item {
@@ -404,7 +430,16 @@ private fun TabToggle(label: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEntry) -> Unit, onOpen: (FileEntry) -> Unit, onOpenWord: (FileEntry) -> Unit) {
+fun FileCard(
+    entry: FileEntry,
+    onToggle: (FileEntry) -> Unit,
+    onDelete: (FileEntry) -> Unit,
+    onOpen: (FileEntry) -> Unit,
+    onOpenWord: (FileEntry) -> Unit,
+    onOpenExcel: (FileEntry) -> Unit,
+    hiddenSelected: Map<String, Boolean>,
+    onToggleHidden: (String, String) -> Unit
+) {
     Card(
         Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
@@ -425,7 +460,7 @@ fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEnt
                     Icon(imageVector = Icons.Default.Close, contentDescription = "删除", tint = Color.Gray)
                 }
             }
-            // 第二行：左边统计信息（占更多空间）+ 右边文件类型/Word按钮（上下排列）
+            // 第二行：左边统计信息（占更多空间）+ 右边文件类型/Word/Excel按钮（上下排列）
             Row(verticalAlignment = Alignment.Top) {
                 Column(Modifier.weight(1f)) {
                     val r = entry.result
@@ -447,12 +482,17 @@ fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEnt
                         Text("统计中…", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                     }
                 }
-                // 右侧：文件类型标签 + Word 按钮（上下排列）
+                // 右侧：文件类型标签 + 隐藏表标记 + Word/Excel 按钮（上下排列）
                 Column(horizontalAlignment = Alignment.End) {
+                    // v1.3.3: 有隐藏工作表的文件，在右列顶部显示红色小"隐"字
+                    if (entry.result?.hiddenSheets?.isNotEmpty() == true) {
+                        Text("隐", style = MaterialTheme.typography.labelSmall, color = Color(0xFFB00020),
+                            modifier = Modifier.padding(bottom = 2.dp))
+                    }
                     Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.small) {
                         Text(" ${entry.result?.ext?.uppercase() ?: "?"} ", Modifier.padding(6.dp, 2.dp), style = MaterialTheme.typography.labelSmall)
                     }
-                    // v1.3.0: 用 Word 打开（仅对 Word 可打开的格式显示，紧凑文字按钮）
+                    // v1.3.0: 用 Word 打开（仅对 Word 可打开的格式显示）
                     val wordExts = setOf(".doc", ".docx", ".pdf", ".txt", ".rtf")
                     if (wordExts.contains((entry.result?.ext ?: "").lowercase())) {
                         Text("Word",
@@ -461,6 +501,16 @@ fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEnt
                             modifier = Modifier
                                 .padding(top = 4.dp)
                                 .clickable { onOpenWord(entry) })
+                    }
+                    // v1.3.3: 用 Excel 打开（仅对 xls/xlsx 显示）
+                    val excelExts = setOf(".xls", ".xlsx")
+                    if (excelExts.contains((entry.result?.ext ?: "").lowercase())) {
+                        Text("Excel",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF217346),
+                            modifier = Modifier
+                                .padding(top = 4.dp)
+                                .clickable { onOpenExcel(entry) })
                     }
                 }
             }
@@ -472,6 +522,16 @@ fun FileCard(entry: FileEntry, onToggle: (FileEntry) -> Unit, onDelete: (FileEnt
             }
             entry.result?.sheets?.forEach { s ->
                 Text("▪ 工作表：$s", Modifier.padding(start = 40.dp, top = 2.dp), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+            }
+            // v1.3.3: 隐藏工作表（红"隐" + 勾选框 + 名称 + 字数），勾选后并入合计
+            entry.result?.hiddenSheets?.forEach { hs ->
+                val checked = hiddenSelected["${entry.id}::${hs.name}"] ?: false
+                Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("隐", style = MaterialTheme.typography.labelSmall, color = Color(0xFFB00020))
+                    Checkbox(checked = checked, onCheckedChange = { onToggleHidden(entry.id, hs.name) }, modifier = Modifier.size(24.dp))
+                    Text(hs.name, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("字 ${hs.words} 中 ${hs.fe} 非 ${hs.nc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                }
             }
         }
     }
@@ -591,6 +651,45 @@ private fun openWithWord(context: android.content.Context, entry: FileEntry) {
         }
     } catch (e: Throwable) {
         Log.w("WordCount", "用Word打开失败 ${entry.displayName}: ${e.message}")
+    }
+}
+
+/** v1.3.3: 直接拉起手机 Excel/WPS 打开文件（用于核对 Excel 显示的页数和字数）。
+ *  优先级：WPS → Microsoft Excel → 系统选择器。WPS 的「逐页输出图片」导出动作无文件级
+ *  页数元数据，无法自动读取，故提供此按钮让用户手动核对。 */
+private fun openWithExcel(context: android.content.Context, entry: FileEntry) {
+    try {
+        val file = File(entry.cachePath)
+        if (!file.exists()) {
+            Log.w("WordCount", "用Excel打开失败：缓存文件不存在 ${entry.displayName}")
+            return
+        }
+        val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
+        val mime = mimeForExt(entry.result?.ext ?: "")
+        // 依次尝试 WPS、Microsoft Excel，均未安装则退回系统选择器
+        val tryPackages = listOf("cn.wps.moffice_eng", "com.microsoft.office.excel")
+        for (pkg in tryPackages) {
+            try {
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, mime)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    `package` = pkg
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+                return
+            } catch (e: android.content.ActivityNotFoundException) {
+                // 该包未安装，尝试下一个
+            }
+        }
+        // 都未安装，退回系统选择器
+        val fallback = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mime)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(fallback, "用其他应用打开"))
+    } catch (e: Throwable) {
+        Log.w("WordCount", "用Excel打开失败 ${entry.displayName}: ${e.message}")
     }
 }
 
@@ -1388,10 +1487,15 @@ private fun addFiles(
                                 outPages = res.pages
                                 outReason = if (res.pagesReason.isNotBlank()) res.pagesReason else null
                             }
+                            // v1.3.3: 隐藏工作表单独统计（默认不计入合计，UI 勾选后才并入）
+                            val hiddenStats = res.hiddenSheets.map { (n, t) ->
+                                val s = countTextKotlin(t)
+                                SheetStat(n, s.first, s.second, s.third, s.fourth)
+                            }
                             val resMap = mapOf(
                                 "name" to dName, "ext" to ".${f.extension.lowercase()}",
                                 "stats" to mapOf("words" to outWords, "fe" to outFe, "nc" to outNc, "chars" to outChars),
-                                "meta" to mapOf("sheets" to res.sheets),
+                                "meta" to mapOf("sheets" to res.sheets, "hidden_sheets" to hiddenStats),
                                 "pages" to outPages,
                                 "pages_reason" to outReason
                             )
@@ -1569,12 +1673,18 @@ private fun addFiles(
                         var docPages: Int = 0  // 0 = 未知
                         var docWords: Int = 0  // 0 = 无元数据
                         var docChars: Int = 0  // 0 = 无元数据
+                        var hiddenText: List<Pair<String, String>> = emptyList() // v1.3.3: .xls 隐藏表
                         if (extLower == "doc") {
                             val docRes = OldOfficeEngine.extractDocFull(f)
                             text = docRes.text
                             docPages = docRes.pages
                             docWords = docRes.words
                             docChars = docRes.chars
+                        } else if (extLower == "xls") {
+                            // v1.3.3: .xls 逐表抽取，隐藏表单独返回
+                            val xlsRes = OldOfficeEngine.extractXlsDetailed(f)
+                            text = xlsRes.text
+                            hiddenText = xlsRes.hiddenSheets
                         } else {
                             text = OldOfficeEngine.extractText(f)
                         }
@@ -1602,10 +1712,15 @@ private fun addFiles(
                                 outNc = stats.third
                                 outChars = stats.fourth
                             }
+                            // v1.3.3: 隐藏工作表单独统计（默认不计入合计，UI 勾选后才并入）
+                            val hiddenStats = hiddenText.map { (n, t) ->
+                                val s = countTextKotlin(t)
+                                SheetStat(n, s.first, s.second, s.third, s.fourth)
+                            }
                             val resMap = mutableMapOf<String, Any?>(
                                 "name" to dName, "ext" to extDot,
                                 "stats" to mapOf("words" to outWords, "fe" to outFe, "nc" to outNc, "chars" to outChars),
-                                "meta" to emptyMap<String, Any?>()
+                                "meta" to mapOf("hidden_sheets" to hiddenStats)
                             )
                             if (pagesValue != null) {
                                 resMap["pages"] = pagesValue
@@ -1762,6 +1877,7 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
         pages = (m?.get("pages") as? Int) ?: estimatePages((stats["chars"] as? Number)?.toInt() ?: 0),
         pagesReason = m?.get("pages_reason") as? String,
         sheets = (meta["sheets"] as? List<*>)?.mapNotNull { it as? String } ?: emptyList(),
+        hiddenSheets = (meta["hidden_sheets"] as? List<*>)?.mapNotNull { it as? SheetStat } ?: emptyList(),
         inner = inner,
         hasUnreliable = ext == ".pdf" && (imageOnly || !imgPages.isNullOrEmpty())
     )

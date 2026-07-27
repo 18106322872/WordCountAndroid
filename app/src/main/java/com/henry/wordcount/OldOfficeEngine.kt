@@ -43,7 +43,7 @@ object OldOfficeEngine {
         FileInputStream(file).use { fis ->
             return when (ext) {
                 "doc" -> extractDoc(fis)
-                "xls" -> extractXls(fis)
+                "xls" -> extractXlsDetailed(fis).text
                 "ppt" -> extractPpt(fis)
                 else -> throw IllegalArgumentException("不支持的格式: .$ext")
             }
@@ -97,24 +97,34 @@ object OldOfficeEngine {
         }
     }
 
-    private fun extractXls(fis: FileInputStream): String {
+    /** .xls 抽取结果：可见表文本（计入默认字数）+ 隐藏表(名称, 文本)列表 */
+    data class XlsResult(val text: String, val hiddenSheets: List<Pair<String, String>>)
+
+    /**
+     * v1.3.3: .xls 逐工作表抽取（含隐藏表）。
+     * 可见表文本计入文件默认字数；隐藏表（isSheetHidden）单独返回，默认不计入合计，
+     * 由 UI 以「红隐 + 勾选框」呈现，用户勾选后才并入合计。
+     * 文本框（HSSFTextbox）按 sheet 的 drawingPatriarch 归属，避免隐藏表文本框污染默认合计。
+     */
+    private fun extractXlsDetailed(fis: FileInputStream): XlsResult {
         val wb = HSSFWorkbook(fis)
         val formatter = DataFormatter()
-        val sb = StringBuilder()
+        val visibleSb = StringBuilder()
+        val hidden = mutableListOf<Pair<String, String>>()
         try {
             for (i in 0 until wb.numberOfSheets) {
-                // v1.3.0: 跳过隐藏工作表（与 .xlsx 的 OoXmlEngine 行为一致：隐藏表不统计）
-                if (wb.isSheetHidden(i)) continue
                 val sheet = wb.getSheetAt(i) ?: continue
-                // 单元格文本（v1.3.2: 不再插入 [工作表:名] 标签，与 .xlsx 一致，避免多算表名）
+                val name = wb.getSheetName(i)
+                val hiddenFlag = wb.isSheetHidden(i)
+                val sb = StringBuilder()
+                // 单元格文本（不再插入 [工作表:名] 标签）
                 for (row in sheet) {
                     val cells = row.mapNotNull { cell ->
                         formatter.formatCellValue(cell).takeIf { it.isNotBlank() }
                     }
                     if (cells.isNotEmpty()) sb.append(cells.joinToString(" ")).append("\n")
                 }
-                // v1.3.2: 文本框文本（HSSFTextbox：Excel 文本框/艺术字里的文字都在这里）
-                // 包在 try 里：无绘图或个别形状异常时不影响单元格统计
+                // 文本框文本（HSSFTextbox：Excel 文本框/艺术字里的文字）
                 try {
                     val patriarch = sheet.drawingPatriarch
                     if (patriarch != null) {
@@ -126,11 +136,13 @@ object OldOfficeEngine {
                         }
                     }
                 } catch (_: Throwable) { }
+                if (hiddenFlag) hidden.add(Pair(name, sb.toString()))
+                else visibleSb.append(sb.toString())
             }
         } finally {
             runCatching { wb.close() }
         }
-        return sb.toString()
+        return XlsResult(visibleSb.toString(), hidden)
     }
 
     private fun extractPpt(fis: FileInputStream): String {

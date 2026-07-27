@@ -23,6 +23,8 @@ object OoXmlEngine {
         val pages: Int,
         val kind: String, // "docx" | "xlsx" | "pptx"
         val sheets: List<String> = emptyList(),
+        // v1.3.3: 隐藏工作表（名称 + 抽取文本），默认不计入文件字数，由 UI 决定是否勾选合计
+        val hiddenSheets: List<Pair<String, String>> = emptyList(),
         val pagesReason: String = "",
         // v1.2.3: docProps/app.xml 中的权威统计（Word/WPS 保存时写入，与 Word 字数统计完全一致）
         // 0 表示无此元数据（如 POI 生成的文件），由调用方退回现算
@@ -295,6 +297,17 @@ object OoXmlEngine {
      *   4. 通过 workbook.xml + workbook.xml.rels 排除隐藏工作表（state=hidden/veryHidden），只统计可见表。
      *   5. 不再往被统计文本插入 [工作表N] 标签（旧代码会因此每个表多算约 3 个中文 + 2 个非中文词）。
      */
+    /**
+     * xlsx 文本提取——模拟"全选 → 复制 → 粘贴到 Word"的效果，按工作表顺序统计。
+     *
+     * v1.3.3 关键变更（隐藏工作表处理）：
+     *   - 遍历全部工作表（含 hidden / veryHidden），逐表抽取单元格 + 该表专属绘图层（文本框/艺术字）。
+     *   - 可见表：文本计入文件默认字数（与 Word「包括文本框」口径一致）。
+     *   - 隐藏表：文本单独返回（OoxmlResult.hiddenSheets），默认【不计入】文件字数与合计，
+     *     由 UI 以「红隐 + 勾选框」形式呈现，用户勾选后才并入合计。
+     *   - 绘图层按 worksheet 的 rels 归属到具体工作表（xl/worksheets/sheetN.xml.rels →
+     *     xl/drawings/drawingN.xml + vmlDrawingN.vml），避免隐藏表的文本框混入默认合计。
+     */
     private fun extractXlsx(zip: ZipFile): OoxmlResult {
         val shared = readSharedStrings(zip)
 
@@ -303,7 +316,6 @@ object OoXmlEngine {
         val nameAttrRe = "name=\"([^\"]*)\"".toRegex()
         val stateAttrRe = "state=\"([^\"]*)\"".toRegex()
         val ridAttrRe = "r:id=\"([^\"]*)\"".toRegex()
-        // Triple: (name, state, r:id)
         val sheetRefs = mutableListOf<Triple<String, String, String>>()
         """<sheet\b[^>]*/>""".toRegex().findAll(wbXml).forEach { m ->
             val tag = m.value
@@ -325,21 +337,22 @@ object OoXmlEngine {
             if (id != null && tg != null) rid2tgt[id] = tg
         }
 
-        // 3) 仅保留可见工作表，按 workbook.xml 顺序。Pair: (sheetName, worksheetPath)
-        val visible = mutableListOf<Pair<String, String>>()
+        // 3) 构建全部工作表（含隐藏）。SheetInfo: (name, worksheetPath, hidden)
+        val allSheets = mutableListOf<SheetInfo>()
         for ((nm, state, rid) in sheetRefs) {
-            if (state == "hidden" || state == "veryHidden") continue
-            var tgt = rid2tgt[rid] ?: continue
-            tgt = tgt.trimStart('/')
-            val path = if (tgt.startsWith("xl/")) tgt else "xl/$tgt"
-            visible.add(Pair(nm, path))
+            val tgt = rid2tgt[rid] ?: continue
+            val trimmed = tgt.trimStart('/')
+            val path = if (trimmed.startsWith("xl/")) trimmed else "xl/$trimmed"
+            allSheets.add(SheetInfo(nm, path, state == "hidden" || state == "veryHidden"))
         }
-        // 兜底：workbook.xml/rels 解析不到可见表时，退回旧逻辑（全部 sheetN.xml，按序号）
-        val sheetsToRead: List<Pair<String, String>> = if (visible.isNotEmpty()) visible else
+        // 兜底：workbook.xml/rels 解析不到时，退回旧逻辑（全部 sheetN.xml，按序号，均视为可见）
+        if (allSheets.isEmpty()) {
             Collections.list(zip.entries())
                 .filter { it.name.matches("""xl/worksheets/sheet\d+\.xml""".toRegex()) }
                 .sortedBy { """\d+""".toRegex().find(it.name)?.value?.toInt() ?: 0 }
-                .mapIndexed { i, e -> Pair("工作表${i + 1}", e.name) }
+                .mapIndexed { i, e -> SheetInfo("工作表${i + 1}", e.name, false) }
+                .let { allSheets.addAll(it) }
+        }
 
         // 支持自闭合 / 完整 元素的正则
         val rowRe = """<row\b([^>]*?)(?:/>|>(.*?)</row>)""".toRegex(RegexOption.DOT_MATCHES_ALL)
@@ -349,30 +362,30 @@ object OoXmlEngine {
         val vRe = """<v>(.*?)</v>""".toRegex(RegexOption.DOT_MATCHES_ALL)
         val tRe = """<t[^>]*>(.*?)</t>""".toRegex(RegexOption.DOT_MATCHES_ALL)
 
-        val sheetNames = mutableListOf<String>()
-        val sb = StringBuilder()
+        val visibleNames = mutableListOf<String>()
+        val visibleSb = StringBuilder()
+        val hiddenSheets = mutableListOf<Pair<String, String>>() // (sheetName, text)
 
-        sheetsToRead.forEachIndexed { idx, vs ->
-            val (vsName, vsPath) = vs
-            sheetNames.add(if (vsName.isNotBlank()) vsName else "工作表${idx + 1}")
-            val xml = readEntry(zip, vsPath) ?: return@forEachIndexed
+        allSheets.forEachIndexed { idx, si ->
+            val (siName, siPath, siHidden) = si
+            val sheetName = if (siName.isNotBlank()) siName else "工作表${idx + 1}"
+            val xml = readEntry(zip, siPath) ?: return@forEachIndexed
 
-            // 按行提取
+            // 按行提取单元格
+            val cellsSb = StringBuilder()
             val rows = mutableListOf<Pair<Int, String>>()
             rowRe.findAll(xml).forEach { rm ->
                 val body = rm.groupValues[2]
-                if (body.isEmpty()) return@forEach // 自闭合空行
+                if (body.isEmpty()) return@forEach
                 val rowNum = rowNumRe.find(rm.groupValues[1])?.groupValues?.get(1)?.toIntOrNull() ?: return@forEach
                 rows.add(Pair(rowNum, body))
             }
             rows.sortBy { it.first }
-
             for ((_, rowBody) in rows) {
-                // 行内单元格按列号排序
-                val cells = mutableListOf<Pair<Int, String>>() // (colNum, text)
+                val cells = mutableListOf<Pair<Int, String>>()
                 cellRe.findAll(rowBody).forEach { cm ->
                     val attrs = cm.groupValues[1]
-                    val inner = cm.groupValues[2] // 自闭合时为空串
+                    val inner = cm.groupValues[2]
                     val ref = cellRefRe.find(attrs) ?: return@forEach
                     val colNum = colNameToIndex(ref.groupValues[1])
                     cells.add(Pair(colNum, cellText(attrs, inner, shared, vRe, tRe)))
@@ -387,48 +400,142 @@ object OoXmlEngine {
                         first = false
                     }
                 }
-                if (line.isNotEmpty()) sb.append(line).append('\n')
+                if (line.isNotEmpty()) cellsSb.append(line).append('\n')
             }
-            sb.append('\n') // 工作表间空行（段落分隔）
+
+            // 本工作表专属绘图层（文本框/艺术字），按 sheet 归属
+            val drawText = extractSheetDrawing(zip, siPath)
+
+            val sheetText = cellsSb.toString() + if (drawText.isNotBlank()) drawText else ""
+            if (siHidden) {
+                hiddenSheets.add(Pair(sheetName, sheetText))
+            } else {
+                visibleNames.add(sheetName)
+                visibleSb.append(sheetText).append('\n')
+            }
         }
 
-        // v1.3.2: 追加绘图层（文本框/艺术字/图表标题）文本，与 Word「包括文本框」口径对齐
-        val drawingText = extractDrawingText(zip)
-        if (drawingText.isNotBlank()) sb.append(drawingText)
+        // 兜底：极少数 workbook 解析异常的文件，仍补抽全部绘图层（保持 v1.3.2 行为）
+        if (allSheets.isEmpty()) {
+            val dt = extractAllDrawings(zip)
+            if (dt.isNotBlank()) visibleSb.append(dt)
+        }
 
-        val text = sb.toString()
-        val pages = max(1, sheetNames.size)
-        return OoxmlResult(text, pages, "xlsx", sheetNames)
+        val text = visibleSb.toString()
+        val pages = max(1, visibleNames.size)
+        return OoxmlResult(text, pages, "xlsx", visibleNames, hiddenSheets, "")
+    }
+
+    /** 工作表信息：名称、worksheet 的 zip 内路径、是否隐藏 */
+    private data class SheetInfo(val name: String, val path: String, val hidden: Boolean)
+
+    /**
+     * 提取单个工作表的绘图层（文本框/艺术字）文本，按 sheet 归属。
+     * 读 worksheet 的 rels 找到对应的 drawingN.xml（DrawingML <a:t>），
+     * 以及其 vmlDrawing（老版 Excel 文本框 VML）。解析异常时返回空串。
+     */
+    private fun extractSheetDrawing(zip: ZipFile, sheetPath: String): String {
+        val drawingPath = drawingPathForSheet(zip, sheetPath) ?: return ""
+        val sb = StringBuilder()
+        return try {
+            val xml = readEntry(zip, drawingPath) ?: return ""
+            """<a:t[^>]*>(.*?)</a:t>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(xml).forEach {
+                sb.append(decodeXml(it.groupValues[1])).append('\n')
+            }
+            // VML 兜底（老版 Excel 文本框）
+            val vmlPath = vmlPathForDrawing(zip, drawingPath)
+            if (vmlPath != null) {
+                val vxml = readEntry(zip, vmlPath) ?: return sb.toString()
+                """<w:txbxContent[^>]*>(.*?)</w:txbxContent>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(vxml).forEach { block ->
+                    """<w:t[^>]*>(.*?)</w:t>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(block.groupValues[1]).forEach {
+                        sb.append(decodeXml(it.groupValues[1])).append('\n')
+                    }
+                }
+                """<v:textbox[^>]*>(.*?)</v:textbox>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(vxml).forEach { block ->
+                    """<text[^>]*>(.*?)</text>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(block.groupValues[1]).forEach {
+                        sb.append(decodeXml(it.groupValues[1])).append('\n')
+                    }
+                }
+            }
+            sb.toString()
+        } catch (_: Throwable) {
+            sb.toString()
+        }
+    }
+
+    /** 从 worksheet 的 rels 找到其 drawing 关系目标路径（zip 内绝对路径）。 */
+    private fun drawingPathForSheet(zip: ZipFile, sheetPath: String): String? {
+        val dir = sheetPath.substringBeforeLast('/')
+        val name = sheetPath.substringAfterLast('/')
+        val relsXml = readEntry(zip, "$dir/_rels/$name.rels") ?: return null
+        val tgtAttrRe = "Target=\"([^\"]*)\"".toRegex()
+        val typeAttrRe = "Type=\"([^\"]*)\"".toRegex()
+        var drawingTgt: String? = null
+        """<Relationship\b[^>]*/>""".toRegex().findAll(relsXml).forEach { m ->
+            val tag = m.value
+            val type = typeAttrRe.find(tag)?.groupValues?.get(1) ?: ""
+            if (type.endsWith("/drawing") || type.endsWith("/drawingml")) {
+                drawingTgt = tgtAttrRe.find(tag)?.groupValues?.get(1)
+            }
+        }
+        return drawingTgt?.let { resolveRelPath(dir, it) }
+    }
+
+    /** 从 drawing 的 rels 找到其 vmlDrawing 目标路径。 */
+    private fun vmlPathForDrawing(zip: ZipFile, drawingPath: String): String? {
+        val dir = drawingPath.substringBeforeLast('/')
+        val name = drawingPath.substringAfterLast('/')
+        val relsXml = readEntry(zip, "$dir/_rels/$name.rels") ?: return null
+        val tgtAttrRe = "Target=\"([^\"]*)\"".toRegex()
+        val typeAttrRe = "Type=\"([^\"]*)\"".toRegex()
+        var vmlTgt: String? = null
+        """<Relationship\b[^>]*/>""".toRegex().findAll(relsXml).forEach { m ->
+            val tag = m.value
+            val type = typeAttrRe.find(tag)?.groupValues?.get(1) ?: ""
+            if (type.endsWith("/vmlDrawing")) {
+                vmlTgt = tgtAttrRe.find(tag)?.groupValues?.get(1)
+            }
+        }
+        return vmlTgt?.let { resolveRelPath(dir, it) }
+    }
+
+    /** 把相对路径（可能含 ../）解析为 zip 内绝对路径。 */
+    private fun resolveRelPath(baseDir: String, rel: String): String {
+        val out = mutableListOf<String>()
+        for (p in (baseDir.split('/') + rel.split('/'))) {
+            when (p) {
+                ".." -> if (out.isNotEmpty() && out.last() != "..") out.removeAt(out.lastIndex) else out.add(p)
+                ".", "" -> {} // 跳过
+                else -> out.add(p)
+            }
+        }
+        return out.joinToString("/")
     }
 
     /**
-     * v1.3.2: 提取绘图层（文本框/艺术字/图表标题等）文本，与 Word「包括文本框」口径对齐。
-     * 遍历 xl/drawings/drawingN.xml（DrawingML，现代 Excel 文本框/WordArt/图表文字都在这里），
-     * 取所有 <a:t> 文本；并兜底读取 vmlDrawingN.vml（老版 Excel 文本框，VML 格式）。
+     * v1.3.2 遗留（兜底用）：抽取全部绘图层文本（所有 drawingN.xml 的 <a:t> + vmlDrawing 文本框）。
+     * 仅在 workbook 解析异常、无法按 sheet 归属时才调用，避免隐藏表文本框污染默认合计。
      */
-    private fun extractDrawingText(zip: ZipFile): String {
+    private fun extractAllDrawings(zip: ZipFile): String {
         val sb = StringBuilder()
         return try {
             val entries = Collections.list(zip.entries())
-            // 1) DrawingML：<a:t> 文本
             for (e in entries) {
                 if (e.name.matches("""xl/drawings/drawing\d+\.xml""".toRegex())) {
                     val xml = readEntry(zip, e.name) ?: continue
-                    val tRe = """<a:t[^>]*>(.*?)</a:t>""".toRegex(RegexOption.DOT_MATCHES_ALL)
-                    tRe.findAll(xml).forEach { sb.append(decodeXml(it.groupValues[1])).append('\n') }
+                    """<a:t[^>]*>(.*?)</a:t>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(xml).forEach {
+                        sb.append(decodeXml(it.groupValues[1])).append('\n')
+                    }
                 }
             }
-            // 2) VML 兜底（老版 Excel 文本框）
             for (e in entries) {
                 if (e.name.matches("""xl/drawings/vmlDrawing\d+\.vml""".toRegex())) {
                     val xml = readEntry(zip, e.name) ?: continue
-                    // WordprocessingML 文本（txbxContent 内 <w:t>）
                     """<w:txbxContent[^>]*>(.*?)</w:txbxContent>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(xml).forEach { block ->
                         """<w:t[^>]*>(.*?)</w:t>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(block.groupValues[1]).forEach {
                             sb.append(decodeXml(it.groupValues[1])).append('\n')
                         }
                     }
-                    // VML 原生 <text> 文本
                     """<v:textbox[^>]*>(.*?)</v:textbox>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(xml).forEach { block ->
                         """<text[^>]*>(.*?)</text>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(block.groupValues[1]).forEach {
                             sb.append(decodeXml(it.groupValues[1])).append('\n')
@@ -438,7 +545,7 @@ object OoXmlEngine {
             }
             sb.toString()
         } catch (_: Throwable) {
-            sb.toString() // 绘图解析异常时退化：仅单元格文本
+            sb.toString()
         }
     }
 
