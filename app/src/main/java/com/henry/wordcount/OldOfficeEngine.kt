@@ -43,7 +43,7 @@ object OldOfficeEngine {
         FileInputStream(file).use { fis ->
             return when (ext) {
                 "doc" -> extractDoc(fis)
-                "xls" -> extractXlsDetailed(fis).text
+                "xls" -> extractXlsDetailed(file).text
                 "ppt" -> extractPpt(fis)
                 else -> throw IllegalArgumentException("不支持的格式: .$ext")
             }
@@ -106,7 +106,8 @@ object OldOfficeEngine {
      * 由 UI 以「红隐 + 勾选框」呈现，用户勾选后才并入合计。
      * 文本框（HSSFTextbox）按 sheet 的 drawingPatriarch 归属，避免隐藏表文本框污染默认合计。
      */
-    private fun extractXlsDetailed(fis: FileInputStream): XlsResult {
+    internal fun extractXlsDetailed(file: File): XlsResult {
+        val fis = FileInputStream(file)
         val wb = HSSFWorkbook(fis)
         val formatter = DataFormatter()
         val visibleSb = StringBuilder()
@@ -141,6 +142,7 @@ object OldOfficeEngine {
             }
         } finally {
             runCatching { wb.close() }
+            runCatching { fis.close() }
         }
         return XlsResult(visibleSb.toString(), hidden)
     }
