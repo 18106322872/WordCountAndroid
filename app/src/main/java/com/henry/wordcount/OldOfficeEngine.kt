@@ -3,7 +3,7 @@ package com.henry.wordcount
 import org.apache.poi.hwpf.HWPFDocument
 import org.apache.poi.hwpf.extractor.WordExtractor
 import org.apache.poi.hpsf.SummaryInformation
-import org.apache.poi.hssf.usermodel.HSSFTextShape
+import org.apache.poi.hssf.usermodel.HSSFTextbox
 import org.apache.poi.hssf.usermodel.HSSFWorkbook
 import org.apache.poi.hslf.usermodel.HSLFSlideShow
 import org.apache.poi.hslf.usermodel.HSLFShape
@@ -113,13 +113,13 @@ object OldOfficeEngine {
                     }
                     if (cells.isNotEmpty()) sb.append(cells.joinToString(" ")).append("\n")
                 }
-                // v1.3.2: 文本框/形状文本（HSSFTextShape：文本框、艺术字、含文字的自选图形）
+                // v1.3.2: 文本框文本（HSSFTextbox：Excel 文本框/艺术字里的文字都在这里）
                 // 包在 try 里：无绘图或个别形状异常时不影响单元格统计
                 try {
                     val patriarch = sheet.drawingPatriarch
                     if (patriarch != null) {
                         for (shape in patriarch.children) {
-                            if (shape is HSSFTextShape) {
+                            if (shape is HSSFTextbox) {
                                 val txt = shape.getString()?.string
                                 if (!txt.isNullOrBlank()) sb.append(txt).append("\n")
                             }
