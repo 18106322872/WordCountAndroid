@@ -1660,6 +1660,7 @@ private fun addFiles(
                         var docWords: Int = 0  // 0 = 无元数据
                         var docChars: Int = 0  // 0 = 无元数据
                         var hiddenText: List<Pair<String, String>> = emptyList() // v1.3.3: .xls 隐藏表
+                        var xlsVisible: List<String> = emptyList() // v1.3.4: .xls 可见表名（明细展示用）
                         if (extLower == "doc") {
                             val docRes = OldOfficeEngine.extractDocFull(f)
                             text = docRes.text
@@ -1671,6 +1672,7 @@ private fun addFiles(
                             val xlsRes = OldOfficeEngine.extractXlsDetailed(f)
                             text = xlsRes.text
                             hiddenText = xlsRes.hiddenSheets
+                            xlsVisible = xlsRes.visibleNames
                         } else {
                             text = OldOfficeEngine.extractText(f)
                         }
@@ -1706,7 +1708,7 @@ private fun addFiles(
                             val resMap = mutableMapOf<String, Any?>(
                                 "name" to dName, "ext" to extDot,
                                 "stats" to mapOf("words" to outWords, "fe" to outFe, "nc" to outNc, "chars" to outChars),
-                                "meta" to mapOf("sheets" to xlsRes.visibleNames, "hidden_sheets" to hiddenStats)
+                                "meta" to mapOf("sheets" to xlsVisible, "hidden_sheets" to hiddenStats)
                             )
                             if (pagesValue != null) {
                                 resMap["pages"] = pagesValue

@@ -3,7 +3,7 @@ package com.henry.wordcount
 import org.apache.poi.hwpf.HWPFDocument
 import org.apache.poi.hwpf.extractor.WordExtractor
 import org.apache.poi.hpsf.SummaryInformation
-import org.apache.poi.hssf.usermodel.HSSFAutoShape
+import org.apache.poi.hssf.usermodel.HSSFSimpleShape
 import org.apache.poi.hssf.usermodel.HSSFTextbox
 import org.apache.poi.hssf.usermodel.HSSFWorkbook
 import org.apache.poi.hslf.usermodel.HSLFSlideShow
@@ -105,7 +105,7 @@ object OldOfficeEngine {
      * v1.3.3: .xls 逐工作表抽取（含隐藏表）。
      * 可见表文本计入文件默认字数；隐藏表（isSheetHidden）单独返回，默认不计入合计，
      * 由 UI 以「红隐 + 勾选框」呈现，用户勾选后才并入合计。
-     * 文本框 + 自选图形文字（HSSFTextbox / HSSFAutoShape）按 sheet 的 drawingPatriarch 归属，避免隐藏表文字污染默认合计。
+     * 文本框 + 自选图形文字（HSSFSimpleShape）按 sheet 的 drawingPatriarch 归属，避免隐藏表文字污染默认合计。
      */
     internal fun extractXlsDetailed(file: File): XlsResult {
         val fis = FileInputStream(file)
@@ -127,18 +127,15 @@ object OldOfficeEngine {
                     }
                     if (cells.isNotEmpty()) sb.append(cells.joinToString(" ")).append("\n")
                 }
-                // v1.3.4: 文本框(HSSFTextbox) + 自选图形(HSSFAutoShape：矩形/标注/流程图框/艺术字)文字一并抓取。
+                // v1.3.4: 文本框(HSSFTextbox) + 自选图形(HSSFSimpleShape：矩形/标注/流程图框/艺术字)文字一并抓取。
                 // 之前只抓 HSSFTextbox，漏掉大量 autoshape 文字，导致 .xls 比同内容 .xlsx 少算约 1268 词；
-                // 现补齐，使两格式字数一致（均与 Word「包括文本框」口径对齐）。
+                // 现用 HSSFSimpleShape（文本框/自选图形的共同基类）统一取文字，使两格式字数一致（与 Word「包括文本框」对齐）。
+                // 图片(HSSFPicture)的 getString() 返回 null，自然被过滤。
                 try {
                     val patriarch = sheet.drawingPatriarch
                     if (patriarch != null) {
                         for (shape in patriarch.children) {
-                            val txt = when (shape) {
-                                is HSSFTextbox -> shape.getString()?.string
-                                is HSSFAutoShape -> shape.getString()?.string
-                                else -> null
-                            }
+                            val txt = (shape as? HSSFSimpleShape)?.string?.string
                             if (!txt.isNullOrBlank()) sb.append(txt).append("\n")
                         }
                     }
