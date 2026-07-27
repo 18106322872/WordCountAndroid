@@ -372,14 +372,20 @@ fun WordCountApp(initialUris: List<Uri>) {
                             tint = Color(0xFFBDBDBD)
                         )
                         Spacer(Modifier.padding(12.dp))
-                        Text("从千牛/微信 → 长按文件 → 用其他应用打开 → 选「字数统计」",
-                            color = Color.Gray, modifier = Modifier.padding(horizontal = 8.dp))
-                        Text("或点下方「选择文件」从本机选取",
-                            color = Color.Gray, modifier = Modifier.padding(horizontal = 8.dp))
-                        Text("页数想跟 Word 核对？点文件名右侧「Word」直接在 Word 里打开",
-                            color = Color(0xFF2B579A), modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp))
-                        Text("Excel 页数想核对？点文件右侧「Excel」直接在 WPS/Excel 里打开（WPS 逐页导出无文件级页数，只能手动看）",
-                            color = Color(0xFF217346), modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp))
+                        // v1.3.4: 空状态说明改为 11.txt 内容；左对齐、黑色字体；新增说明时往 helpLines 追加（编号顺延）
+                        val helpLines = listOf(
+                            "1、从千牛/微信→长按文件→用其他应用打开→选「字数统计」，或点下方「选择文件」从本机选取；",
+                            "2、Word核对方法：手机安装Word后，doc/docx文件2页以上的可点文件名右侧「Word」直接在 Word 里打开，左下角选「页面视图」，上下滚动查看页数和总字数；",
+                            "3、Excel 核对方式：手机安装Wps后，xls、xlsx文件，点击文件右侧「Wps」直接在WPS里打开，左下角选「逐页输出图片」，右下角可看到页数。"
+                        )
+                        Column(
+                            Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                            horizontalAlignment = Alignment.Start
+                        ) {
+                            helpLines.forEach { line ->
+                                Text(line, color = Color.Black, modifier = Modifier.padding(vertical = 2.dp))
+                            }
+                        }
                     }
                 }
                 LazyColumn(
@@ -398,7 +404,7 @@ fun WordCountApp(initialUris: List<Uri>) {
                             },
                             onOpen = { e -> openWithOtherApp(context, e) },
                             onOpenWord = { e -> openWithWord(context, e) },
-                            onOpenExcel = { e -> openWithExcel(context, e) },
+                            onOpenWps = { e -> openWithWps(context, e) },
                             hiddenSelected = hiddenSelected,
                             onToggleHidden = { id, name ->
                                 val k = "$id::$name"
@@ -436,7 +442,7 @@ fun FileCard(
     onDelete: (FileEntry) -> Unit,
     onOpen: (FileEntry) -> Unit,
     onOpenWord: (FileEntry) -> Unit,
-    onOpenExcel: (FileEntry) -> Unit,
+    onOpenWps: (FileEntry) -> Unit,
     hiddenSelected: Map<String, Boolean>,
     onToggleHidden: (String, String) -> Unit
 ) {
@@ -502,15 +508,15 @@ fun FileCard(
                                 .padding(top = 4.dp)
                                 .clickable { onOpenWord(entry) })
                     }
-                    // v1.3.3: 用 Excel 打开（仅对 xls/xlsx 显示）
+                    // v1.3.4: 用 Wps 打开（仅对 xls/xlsx 显示，仅支持 WPS）
                     val excelExts = setOf(".xls", ".xlsx")
                     if (excelExts.contains((entry.result?.ext ?: "").lowercase())) {
-                        Text("Excel",
+                        Text("Wps",
                             style = MaterialTheme.typography.labelSmall,
                             color = Color(0xFF217346),
                             modifier = Modifier
                                 .padding(top = 4.dp)
-                                .clickable { onOpenExcel(entry) })
+                                .clickable { onOpenWps(entry) })
                     }
                 }
             }
@@ -657,39 +663,32 @@ private fun openWithWord(context: android.content.Context, entry: FileEntry) {
 /** v1.3.3: 直接拉起手机 Excel/WPS 打开文件（用于核对 Excel 显示的页数和字数）。
  *  优先级：WPS → Microsoft Excel → 系统选择器。WPS 的「逐页输出图片」导出动作无文件级
  *  页数元数据，无法自动读取，故提供此按钮让用户手动核对。 */
-private fun openWithExcel(context: android.content.Context, entry: FileEntry) {
+private fun openWithWps(context: android.content.Context, entry: FileEntry) {
     try {
         val file = File(entry.cachePath)
         if (!file.exists()) {
-            Log.w("WordCount", "用Excel打开失败：缓存文件不存在 ${entry.displayName}")
+            Log.w("WordCount", "用Wps打开失败：缓存文件不存在 ${entry.displayName}")
             return
         }
         val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
         val mime = mimeForExt(entry.result?.ext ?: "")
-        // 依次尝试 WPS、Microsoft Excel，均未安装则退回系统选择器
-        val tryPackages = listOf("cn.wps.moffice_eng", "com.microsoft.office.excel")
-        for (pkg in tryPackages) {
-            try {
-                val intent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(uri, mime)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    `package` = pkg
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(intent)
-                return
-            } catch (e: android.content.ActivityNotFoundException) {
-                // 该包未安装，尝试下一个
+        // v1.3.4: 仅支持用 WPS 打开（不再尝试 Microsoft Excel / 系统选择器）
+        try {
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, mime)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                `package` = "cn.wps.moffice_eng"
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
+            context.startActivity(intent)
+        } catch (e: android.content.ActivityNotFoundException) {
+            // 未安装 WPS
+            android.widget.Toast.makeText(
+                context, "未安装 WPS，请先安装 WPS 后再打开", android.widget.Toast.LENGTH_SHORT
+            ).show()
         }
-        // 都未安装，退回系统选择器
-        val fallback = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, mime)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        context.startActivity(Intent.createChooser(fallback, "用其他应用打开"))
     } catch (e: Throwable) {
-        Log.w("WordCount", "用Excel打开失败 ${entry.displayName}: ${e.message}")
+        Log.w("WordCount", "用Wps打开失败 ${entry.displayName}: ${e.message}")
     }
 }
 
@@ -1463,30 +1462,17 @@ private fun addFiles(
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = dName, cachePath = f.absolutePath, error = "无法解析此 OOXML 文件（可能损坏或非标准格式）"))
                         } else {
                             val stats = countTextKotlin(res.text)
-                            // v1.2.3: 优先用 docProps/app.xml 的权威统计（与 Word 完全一致），否则用现算
-                            val outWords: Int
-                            val outFe: Int
-                            val outNc: Int
-                            val outChars: Int
-                            val outPages: Int
-                            val outReason: String?
-                            if (res.metaWords > 0) {
-                                // 字数(总)取元数据；非中文(nc)现算；中文 = 字数 - 非中文（保证中文+非中文=字数）
-                                outNc = stats.third
-                                outFe = maxOf(0, res.metaWords - outNc)
-                                outWords = res.metaWords
-                                outChars = if (res.metaChars > 0) res.metaChars else stats.fourth
-                                outPages = if (res.metaPages > 0) res.metaPages else res.pages
-                                outReason = if (res.metaPages > 0) "doc_app_props" else (if (res.pagesReason.isNotBlank()) res.pagesReason else null)
-                                Log.d("WordCount", "docx 用元数据: words=${res.metaWords} chars=${res.metaChars} pages=${res.metaPages}")
-                            } else {
-                                outWords = stats.first
-                                outFe = stats.second
-                                outNc = stats.third
-                                outChars = stats.fourth
-                                outPages = res.pages
-                                outReason = if (res.pagesReason.isNotBlank()) res.pagesReason else null
-                            }
+                            // v1.3.4: docx 不再信任 docProps/app.xml 元数据——某些文件（如本例调查问卷）元数据过期/错误，
+                            // 其中 Words=1089，但正文实际应为 2008。故始终从 word/document.xml 现算，
+                            // 与桌面版 wordcount.py 口径一致（中文 fe 已验证与 Word 完全一致）。
+                            // 仅页数：元数据可靠(metaPages>0)时优先用，否则用正文 lastRenderedPageBreak 估算。
+                            val outWords = stats.first
+                            val outFe = stats.second
+                            val outNc = stats.third
+                            val outChars = stats.fourth
+                            val outPages = if (res.metaPages > 0) res.metaPages else res.pages
+                            val outReason = if (res.pagesReason.isNotBlank()) res.pagesReason else null
+                            Log.d("WordCount", "docx 现算: words=$outWords fe=$outFe nc=$outNc chars=$outChars pages=$outPages")
                             // v1.3.3: 隐藏工作表单独统计（默认不计入合计，UI 勾选后才并入）
                             val hiddenStats = res.hiddenSheets.map { (n, t) ->
                                 val s = countTextKotlin(t)
@@ -1720,7 +1706,7 @@ private fun addFiles(
                             val resMap = mutableMapOf<String, Any?>(
                                 "name" to dName, "ext" to extDot,
                                 "stats" to mapOf("words" to outWords, "fe" to outFe, "nc" to outNc, "chars" to outChars),
-                                "meta" to mapOf("hidden_sheets" to hiddenStats)
+                                "meta" to mapOf("sheets" to xlsRes.visibleNames, "hidden_sheets" to hiddenStats)
                             )
                             if (pagesValue != null) {
                                 resMap["pages"] = pagesValue

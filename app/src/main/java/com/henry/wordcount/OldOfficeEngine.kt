@@ -3,6 +3,7 @@ package com.henry.wordcount
 import org.apache.poi.hwpf.HWPFDocument
 import org.apache.poi.hwpf.extractor.WordExtractor
 import org.apache.poi.hpsf.SummaryInformation
+import org.apache.poi.hssf.usermodel.HSSFAutoShape
 import org.apache.poi.hssf.usermodel.HSSFTextbox
 import org.apache.poi.hssf.usermodel.HSSFWorkbook
 import org.apache.poi.hslf.usermodel.HSLFSlideShow
@@ -97,20 +98,21 @@ object OldOfficeEngine {
         }
     }
 
-    /** .xls 抽取结果：可见表文本（计入默认字数）+ 隐藏表(名称, 文本)列表 */
-    data class XlsResult(val text: String, val hiddenSheets: List<Pair<String, String>>)
+    /** .xls 抽取结果：可见表文本(计入默认字数) + 可见表名 + 隐藏表(名称, 文本)列表 */
+    data class XlsResult(val text: String, val visibleNames: List<String>, val hiddenSheets: List<Pair<String, String>>)
 
     /**
      * v1.3.3: .xls 逐工作表抽取（含隐藏表）。
      * 可见表文本计入文件默认字数；隐藏表（isSheetHidden）单独返回，默认不计入合计，
      * 由 UI 以「红隐 + 勾选框」呈现，用户勾选后才并入合计。
-     * 文本框（HSSFTextbox）按 sheet 的 drawingPatriarch 归属，避免隐藏表文本框污染默认合计。
+     * 文本框 + 自选图形文字（HSSFTextbox / HSSFAutoShape）按 sheet 的 drawingPatriarch 归属，避免隐藏表文字污染默认合计。
      */
     internal fun extractXlsDetailed(file: File): XlsResult {
         val fis = FileInputStream(file)
         val wb = HSSFWorkbook(fis)
         val formatter = DataFormatter()
         val visibleSb = StringBuilder()
+        val visibleNames = mutableListOf<String>()
         val hidden = mutableListOf<Pair<String, String>>()
         try {
             for (i in 0 until wb.numberOfSheets) {
@@ -125,26 +127,33 @@ object OldOfficeEngine {
                     }
                     if (cells.isNotEmpty()) sb.append(cells.joinToString(" ")).append("\n")
                 }
-                // 文本框文本（HSSFTextbox：Excel 文本框/艺术字里的文字）
+                // v1.3.4: 文本框(HSSFTextbox) + 自选图形(HSSFAutoShape：矩形/标注/流程图框/艺术字)文字一并抓取。
+                // 之前只抓 HSSFTextbox，漏掉大量 autoshape 文字，导致 .xls 比同内容 .xlsx 少算约 1268 词；
+                // 现补齐，使两格式字数一致（均与 Word「包括文本框」口径对齐）。
                 try {
                     val patriarch = sheet.drawingPatriarch
                     if (patriarch != null) {
                         for (shape in patriarch.children) {
-                            if (shape is HSSFTextbox) {
-                                val txt = shape.getString()?.string
-                                if (!txt.isNullOrBlank()) sb.append(txt).append("\n")
+                            val txt = when (shape) {
+                                is HSSFTextbox -> shape.getString()?.string
+                                is HSSFAutoShape -> shape.getString()?.string
+                                else -> null
                             }
+                            if (!txt.isNullOrBlank()) sb.append(txt).append("\n")
                         }
                     }
                 } catch (_: Throwable) { }
                 if (hiddenFlag) hidden.add(Pair(name, sb.toString()))
-                else visibleSb.append(sb.toString())
+                else {
+                    visibleNames.add(name)
+                    visibleSb.append(sb.toString())
+                }
             }
         } finally {
             runCatching { wb.close() }
             runCatching { fis.close() }
         }
-        return XlsResult(visibleSb.toString(), hidden)
+        return XlsResult(visibleSb.toString(), visibleNames, hidden)
     }
 
     private fun extractPpt(fis: FileInputStream): String {
