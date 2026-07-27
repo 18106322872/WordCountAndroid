@@ -3,6 +3,7 @@ package com.henry.wordcount
 import org.apache.poi.hwpf.HWPFDocument
 import org.apache.poi.hwpf.extractor.WordExtractor
 import org.apache.poi.hpsf.SummaryInformation
+import org.apache.poi.hssf.usermodel.HSSFTextShape
 import org.apache.poi.hssf.usermodel.HSSFWorkbook
 import org.apache.poi.hslf.usermodel.HSLFSlideShow
 import org.apache.poi.hslf.usermodel.HSLFShape
@@ -102,16 +103,29 @@ object OldOfficeEngine {
         val sb = StringBuilder()
         try {
             for (i in 0 until wb.numberOfSheets) {
-                // v1.3.0: 跳过隐藏工作表（与 .xlsx 的 OoXmlEngine 行为一致）
+                // v1.3.0: 跳过隐藏工作表（与 .xlsx 的 OoXmlEngine 行为一致：隐藏表不统计）
                 if (wb.isSheetHidden(i)) continue
                 val sheet = wb.getSheetAt(i) ?: continue
-                sb.append("\n[工作表: ${sheet.sheetName}]\n")
+                // 单元格文本（v1.3.2: 不再插入 [工作表:名] 标签，与 .xlsx 一致，避免多算表名）
                 for (row in sheet) {
                     val cells = row.mapNotNull { cell ->
                         formatter.formatCellValue(cell).takeIf { it.isNotBlank() }
                     }
                     if (cells.isNotEmpty()) sb.append(cells.joinToString(" ")).append("\n")
                 }
+                // v1.3.2: 文本框/形状文本（HSSFTextShape：文本框、艺术字、含文字的自选图形）
+                // 包在 try 里：无绘图或个别形状异常时不影响单元格统计
+                try {
+                    val patriarch = sheet.drawingPatriarch
+                    if (patriarch != null) {
+                        for (shape in patriarch.children) {
+                            if (shape is HSSFTextShape) {
+                                val txt = shape.getString()?.string
+                                if (!txt.isNullOrBlank()) sb.append(txt).append("\n")
+                            }
+                        }
+                    }
+                } catch (_: Throwable) { }
             }
         } finally {
             runCatching { wb.close() }

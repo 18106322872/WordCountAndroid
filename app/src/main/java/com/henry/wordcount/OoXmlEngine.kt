@@ -392,9 +392,54 @@ object OoXmlEngine {
             sb.append('\n') // 工作表间空行（段落分隔）
         }
 
+        // v1.3.2: 追加绘图层（文本框/艺术字/图表标题）文本，与 Word「包括文本框」口径对齐
+        val drawingText = extractDrawingText(zip)
+        if (drawingText.isNotBlank()) sb.append(drawingText)
+
         val text = sb.toString()
         val pages = max(1, sheetNames.size)
         return OoxmlResult(text, pages, "xlsx", sheetNames)
+    }
+
+    /**
+     * v1.3.2: 提取绘图层（文本框/艺术字/图表标题等）文本，与 Word「包括文本框」口径对齐。
+     * 遍历 xl/drawings/drawingN.xml（DrawingML，现代 Excel 文本框/WordArt/图表文字都在这里），
+     * 取所有 <a:t> 文本；并兜底读取 vmlDrawingN.vml（老版 Excel 文本框，VML 格式）。
+     */
+    private fun extractDrawingText(zip: ZipFile): String {
+        val sb = StringBuilder()
+        return try {
+            val entries = Collections.list(zip.entries())
+            // 1) DrawingML：<a:t> 文本
+            for (e in entries) {
+                if (e.name.matches("""xl/drawings/drawing\d+\.xml""".toRegex())) {
+                    val xml = readEntry(zip, e.name) ?: continue
+                    val tRe = """<a:t[^>]*>(.*?)</a:t>""".toRegex(RegexOption.DOT_MATCHES_ALL)
+                    tRe.findAll(xml).forEach { sb.append(decodeXml(it.groupValues[1])).append('\n') }
+                }
+            }
+            // 2) VML 兜底（老版 Excel 文本框）
+            for (e in entries) {
+                if (e.name.matches("""xl/drawings/vmlDrawing\d+\.vml""".toRegex())) {
+                    val xml = readEntry(zip, e.name) ?: continue
+                    // WordprocessingML 文本（txbxContent 内 <w:t>）
+                    """<w:txbxContent[^>]*>(.*?)</w:txbxContent>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(xml).forEach { block ->
+                        """<w:t[^>]*>(.*?)</w:t>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(block.groupValues[1]).forEach {
+                            sb.append(decodeXml(it.groupValues[1])).append('\n')
+                        }
+                    }
+                    // VML 原生 <text> 文本
+                    """<v:textbox[^>]*>(.*?)</v:textbox>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(xml).forEach { block ->
+                        """<text[^>]*>(.*?)</text>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(block.groupValues[1]).forEach {
+                            sb.append(decodeXml(it.groupValues[1])).append('\n')
+                        }
+                    }
+                }
+            }
+            sb.toString()
+        } catch (_: Throwable) {
+            sb.toString() // 绘图解析异常时退化：仅单元格文本
+        }
     }
 
     /**
