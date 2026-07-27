@@ -365,6 +365,9 @@ object OoXmlEngine {
         val visibleNames = mutableListOf<String>()
         val visibleSb = StringBuilder()
         val hiddenSheets = mutableListOf<Pair<String, String>>() // (sheetName, text)
+        // v1.3.8: drawing 路径去重——同一 drawingN.xml 可能被多个工作表 rels 同时指向
+        //（复制工作表/模板另存场景），避免绘图层文字被重复计入
+        val seenDrawings = mutableSetOf<String>()
 
         allSheets.forEachIndexed { idx, si ->
             val (siName, siPath, siHidden) = si
@@ -403,8 +406,16 @@ object OoXmlEngine {
                 if (line.isNotEmpty()) cellsSb.append(line).append('\n')
             }
 
-            // 本工作表专属绘图层（文本框/艺术字），按 sheet 归属
-            val drawText = extractSheetDrawing(zip, siPath)
+            // 本工作表专属绘图层（文本框/艺术字），按 sheet 归属（v1.3.8: 路径去重）
+            val drawPath = drawingPathForSheet(zip, siPath)
+            val drawText = if (drawPath != null && seenDrawings.add(drawPath)) {
+                extractSheetDrawing(zip, siPath)
+            } else if (drawPath == null) {
+                // 无 DrawingML 时仍尝试 VML（VML 路径独立，不与 drawing 共用去重）
+                extractSheetDrawing(zip, siPath)
+            } else {
+                "" // 已处理过的 drawing，跳过
+            }
 
             val sheetText = cellsSb.toString() + if (drawText.isNotBlank()) drawText else ""
             if (siHidden) {
@@ -432,19 +443,29 @@ object OoXmlEngine {
     /**
      * 提取单个工作表的绘图层（文本框/艺术字）文本，按 sheet 归属。
      * 读 worksheet 的 rels 找到对应的 drawingN.xml（DrawingML <a:t>），
-     * 以及其 vmlDrawing（老版 Excel 文本框 VML）。解析异常时返回空串。
+     * 以及 vmlDrawingN.vml（老版 Excel/WPS 文本框，类型 /vmlDrawing）。
+     * 解析异常时返回空串。
+     *
+     * v1.3.8 修复：此前 vmlPathForDrawing 从 drawing 自身的 rels 找 /vmlDrawing（永远为 null，
+     * 因为 drawing rels 只有图片关系），导致 VML 文本框整段漏抽。现改为从 worksheet rels
+     * 直接找 /vmlDrawing 关系（与 DrawingML 的 drawingPathForSheet 对称）。
      */
     private fun extractSheetDrawing(zip: ZipFile, sheetPath: String): String {
-        val drawingPath = drawingPathForSheet(zip, sheetPath) ?: return ""
         val sb = StringBuilder()
-        return try {
-            val xml = readEntry(zip, drawingPath) ?: return ""
-            """<a:t[^>]*>(.*?)</a:t>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(xml).forEach {
-                sb.append(decodeXml(it.groupValues[1])).append('\n')
-            }
-            // VML 兜底（老版 Excel 文本框）
-            val vmlPath = vmlPathForDrawing(zip, drawingPath)
-            if (vmlPath != null) {
+        // ① DrawingML: <a:t> （现代 Excel 形状）
+        val drawingPath = drawingPathForSheet(zip, sheetPath)
+        if (drawingPath != null) {
+            try {
+                val xml = readEntry(zip, drawingPath) ?: ""
+                """<a:t[^>]*>(.*?)</a:t>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(xml).forEach {
+                    sb.append(decodeXml(it.groupValues[1])).append('\n')
+                }
+            } catch (_: Throwable) {}
+        }
+        // ② VML 文本框：从 worksheet rels 直接找 /vmlDrawing（v1.3.8 修复）
+        val vmlPath = vmlPathForSheet(zip, sheetPath)
+        if (vmlPath != null) {
+            try {
                 val vxml = readEntry(zip, vmlPath) ?: return sb.toString()
                 """<w:txbxContent[^>]*>(.*?)</w:txbxContent>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(vxml).forEach { block ->
                     """<w:t[^>]*>(.*?)</w:t>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(block.groupValues[1]).forEach {
@@ -456,11 +477,9 @@ object OoXmlEngine {
                         sb.append(decodeXml(it.groupValues[1])).append('\n')
                     }
                 }
-            }
-            sb.toString()
-        } catch (_: Throwable) {
-            sb.toString()
+            } catch (_: Throwable) {}
         }
+        return sb.toString()
     }
 
     /** 从 worksheet 的 rels 找到其 drawing 关系目标路径（zip 内绝对路径）。 */
@@ -481,10 +500,15 @@ object OoXmlEngine {
         return drawingTgt?.let { resolveRelPath(dir, it) }
     }
 
-    /** 从 drawing 的 rels 找到其 vmlDrawing 目标路径。 */
-    private fun vmlPathForDrawing(zip: ZipFile, drawingPath: String): String? {
-        val dir = drawingPath.substringBeforeLast('/')
-        val name = drawingPath.substringAfterLast('/')
+    /**
+     * 从 worksheet 的 rels 找到其 vmlDrawing 目标路径（老版 Excel/WPS 文本框）。
+     * v1.3.8 修复：此前错误地从 drawing 自身的 rels（xl/drawings/_rels/drawingN.xml.rels）
+     * 查找 /vmlDrawing，但该文件只有图片关系，永远返回 null。
+     * 现改为从 worksheet 的 rels（xl/worksheets/_rels/sheetN.xml.rels）直接查找，与 drawingPathForSheet 对称。
+     */
+    private fun vmlPathForSheet(zip: ZipFile, sheetPath: String): String? {
+        val dir = sheetPath.substringBeforeLast('/')
+        val name = sheetPath.substringAfterLast('/')
         val relsXml = readEntry(zip, "$dir/_rels/$name.rels") ?: return null
         val tgtAttrRe = "Target=\"([^\"]*)\"".toRegex()
         val typeAttrRe = "Type=\"([^\"]*)\"".toRegex()

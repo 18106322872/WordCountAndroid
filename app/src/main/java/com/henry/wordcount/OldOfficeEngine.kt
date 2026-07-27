@@ -5,6 +5,7 @@ import org.apache.poi.hwpf.extractor.WordExtractor
 import org.apache.poi.hpsf.SummaryInformation
 import org.apache.poi.hssf.usermodel.HSSFSimpleShape
 import org.apache.poi.hssf.usermodel.HSSFTextbox
+import org.apache.poi.hssf.usermodel.HSSFShapeGroup
 import org.apache.poi.hssf.usermodel.HSSFWorkbook
 import org.apache.poi.hslf.usermodel.HSLFSlideShow
 import org.apache.poi.hslf.usermodel.HSLFShape
@@ -127,18 +128,32 @@ object OldOfficeEngine {
                     }
                     if (cells.isNotEmpty()) sb.append(cells.joinToString(" ")).append("\n")
                 }
-                // v1.3.4: 文本框(HSSFTextbox) + 自选图形(HSSFSimpleShape：矩形/标注/流程图框/艺术字)文字一并抓取。
-                // 之前只抓 HSSFTextbox，漏掉大量 autoshape 文字，导致 .xls 比同内容 .xlsx 少算约 1268 词；
-                // 现用 HSSFSimpleShape（文本框/自选图形的共同基类）统一取文字，使两格式字数一致（与 Word「包括文本框」对齐）。
+                // v1.3.8: 递归收集绘图层文字（文本框/自选图形/编组内子形状）。
+                // v1.3.5 用 HSSFSimpleShape 统一取文本框+自选图形，但 patriarch.children
+                // 只返回顶层形状——当图形被编组（HSSFShapeGroup）时，子形状在 group.getChildren()
+                // 里，旧代码整组丢弃。现改为递归遍历，使 .xls 与 .xlsx 的 DrawingML 扁平 <a:t> 对齐。
                 // 图片(HSSFPicture)的 getString() 返回 null，自然被过滤。
                 try {
                     val patriarch = sheet.drawingPatriarch
                     if (patriarch != null) {
                         for (shape in patriarch.children) {
-                            val txt = (shape as? HSSFSimpleShape)?.string?.string
-                            if (!txt.isNullOrBlank()) sb.append(txt).append("\n")
+                            collectShapeText(shape, sb)
                         }
                     }
+                    // 图表文字：HSSFChart 的标题/轴标签/数据标签（多为英文零件号/标注）
+                    try {
+                        val charts = org.apache.poi.hssf.usermodel.HSSFChart.getSheetCharts(sheet)
+                        for (chart in charts) {
+                            for (ti in chart.getChartTitleTexts()) {
+                                val t = ti?.getString()?.string
+                                if (!t.isNullOrBlank()) sb.append(t).append("\n")
+                            }
+                            for (ai in chart.getAxisTitleTexts()) {
+                                val t = ai?.getString()?.string
+                                if (!t.isNullOrBlank()) sb.append(t).append("\n")
+                            }
+                        }
+                    } catch (_: Throwable) { /* 某些 POI 版本 HSSFChart API 可能不可用 */ }
                 } catch (_: Throwable) { }
                 if (hiddenFlag) hidden.add(Pair(name, sb.toString()))
                 else {
@@ -151,6 +166,24 @@ object OldOfficeEngine {
             runCatching { fis.close() }
         }
         return XlsResult(visibleSb.toString(), visibleNames, hidden)
+    }
+
+    /**
+     * v1.3.8: 递归收集 HSSF 形状文字（含编组内子形状）。
+     * - HSSFSimpleShape: 文本框/自选图形/艺术字 → 取文字
+     * - HSSFShapeGroup: 编组 → 递归遍历子形状
+     * - 其他（图片等）→ 忽略
+     */
+    private fun collectShapeText(shape: org.apache.poi.hssf.usermodel.HSSFShape, sb: StringBuilder) {
+        when (shape) {
+            is HSSFShapeGroup -> {
+                for (child in shape.children) collectShapeText(child, sb)
+            }
+            is HSSFSimpleShape -> {
+                val txt = shape.string?.string
+                if (!txt.isNullOrBlank()) sb.append(txt).append("\n")
+            }
+        }
     }
 
     private fun extractPpt(fis: FileInputStream): String {
