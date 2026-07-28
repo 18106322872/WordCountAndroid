@@ -1950,7 +1950,6 @@ fun CompareScreen(
     var rendering by remember { mutableStateOf(false) }          // 正生成/打开长图
 
     // 比较设置（对应 Word 比较对话框）
-    var level by remember { mutableStateOf("word") }   // 'char' 字符级别 | 'word' 字词级别
     var optCase by remember { mutableStateOf(true) }   // 大小写更改
     var optWs by remember { mutableStateOf(false) }     // 空格
     var optTable by remember { mutableStateOf(true) }   // 表格
@@ -1999,7 +1998,7 @@ fun CompareScreen(
                 // 原因：Chaquopy lxml C 扩展在 Android 上触发 fatal 级 AssetFinder 崩溃，
                 //       历经 v1.1.15~v1.35 共 20 个版本验证，Python 层拦截全部无效。
                 val cmpOpts = org.json.JSONObject().apply {
-                    put("level", level)
+                    put("level", "word")   // v1.3.9: 固定字词级别（字符级别已移除，两者结果一致）
                     put("case", optCase)
                     put("whitespace", optWs)
                     put("table", optTable)
@@ -2057,13 +2056,6 @@ fun CompareScreen(
         Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("比较设置", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                // 修订显示级别
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("修订显示级别：", modifier = Modifier.weight(1f))
-                    OutlinedButton(onClick = { level = "char" }, modifier = Modifier.padding(end = 6.dp),
-                        enabled = level != "char") { Text("字符级别") }
-                    OutlinedButton(onClick = { level = "word" }, enabled = level != "word") { Text("字词级别") }
-                }
                 HorizontalDivider()
                 CompareCheck("大小写更改", optCase) { optCase = it }
                 CompareCheck("空格", optWs) { optWs = it }

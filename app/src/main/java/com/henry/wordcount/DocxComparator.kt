@@ -176,11 +176,13 @@ object DocxComparator {
 
         writeOutputDocx(File(actualOrig), outPath, bodyParts)
 
-        // 涉及修改的句子总字数 = 修订档总字数 − 黑色整句字数（修订档视角，与 Word 字符数不计空格一致）
-        // 从结果文档直接解析：修订侧总字数（黑字+蓝字插入，不含删除红字、不含空格）
-        //   − 完全无 <w:ins> 的句子中黑字字数（<w:del> 删除不破坏黑色整句判定）
+        // 涉及修改的句子总字数 = 修订档总字数 − 黑色整句字数（修订档视角）
+        // v1.3.9 修复：此前 totalChars 从结果文档（原文+修订合并，含标记）计算，
+        //   导致修改字数可能超过修订版总字数（结果文档天然比任一原始文档大）。
+        //   现改为从修订档(actualRev)本身取总字数，保证 modifiedChars ≤ 修订档总字数。
+        val revTotalChars = computeRevDocTotalChars(actualRev)
         val resultStats = computeResultDocStats(outPath)
-        val modifiedChars = kotlin.math.max(0, resultStats.totalChars - resultStats.blackWholeSentenceChars)
+        val modifiedChars = kotlin.math.max(0, revTotalChars - resultStats.blackWholeSentenceChars)
         val summary = buildString {
             append("插入 $insCount 处(${totalInsChars}字) | 删除 $delCount 处(${totalDelChars}字) | 修改 $repCount 处")
         }
@@ -1039,6 +1041,28 @@ object DocxComparator {
         val totalChars: Int,                 // 修订侧总字数（<w:t> 黑+蓝，不含删除、不含空格）
         val blackWholeSentenceChars: Int     // 无 <w:ins> 句子中的黑字(<w:t>非插入)字数（不含空格）
     )
+
+    /**
+     * v1.3.9: 统计修订档本身的总字数（不含空格，与 Word「字符数(不计空格)」一致）。
+     * 用于计算"涉及修改的句子总字数 = 修订档总字数 − 黑色整句字数"，
+     * 保证结果不超过修订档总字数（此前从合并结果文档取 totalChars 会虚高）。
+     */
+    private fun computeRevDocTotalChars(revPath: String): Int {
+        try {
+            ZipFile(revPath).use { zip ->
+                val entry = zip.getEntry("word/document.xml") ?: return 0
+                val xml = zip.getInputStream(entry).bufferedReader().readText()
+                var chars = 0
+                """<w:t[^>]*>(.*?)</w:t>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(xml).forEach {
+                    for (ch in it.groupValues[1]) if (ch != ' ') chars++
+                }
+                return chars
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to compute rev doc total chars", e)
+            return 0
+        }
+    }
 
     private fun computeResultDocStats(outPath: String): ResultDocStats {
         try {

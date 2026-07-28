@@ -446,23 +446,32 @@ object OoXmlEngine {
      * 以及 vmlDrawingN.vml（老版 Excel/WPS 文本框，类型 /vmlDrawing）。
      * 解析异常时返回空串。
      *
-     * v1.3.8 修复：此前 vmlPathForDrawing 从 drawing 自身的 rels 找 /vmlDrawing（永远为 null，
-     * 因为 drawing rels 只有图片关系），导致 VML 文本框整段漏抽。现改为从 worksheet rels
-     * 直接找 /vmlDrawing 关系（与 DrawingML 的 drawingPathForSheet 对称）。
+     * v1.3.8 修复 VML：vmlPathForDrawing 从 drawing 自身的 rels 找 /vmlDrawing（永远为 null），
+     *   改为从 worksheet rels 直接找 /vmlDrawing 关系。
+     *
+     * v1.3.9 修复图表虚高：此前用 <a:t> 全局正则匹配 drawingN.xml 内所有 <a:t>，
+     *   把图表标题/轴标签/数据标签（<c:tx> 上下文内的 <a:t>）也算进去了。
+     *   桌面版 wordcount.py 明确注释"不含图表标题(c:tx)，粘贴为图片不计入文字"。
+     *   现改为只提取 <xdr:txBody> 上下文内的 <a:t>（文本框/自选图形/标注），
+     *   与桌面版口径一致。与 Word「复制到 Word」的效果对齐（Excel 图表复制后变为图片）。
      */
     private fun extractSheetDrawing(zip: ZipFile, sheetPath: String): String {
         val sb = StringBuilder()
-        // ① DrawingML: <a:t> （现代 Excel 形状）
+        // ① DrawingML: 只取 <xdr:txBody> 内的 <a:t>（文本框/形状），排除 <c:tx>（图表）
         val drawingPath = drawingPathForSheet(zip, sheetPath)
         if (drawingPath != null) {
             try {
                 val xml = readEntry(zip, drawingPath) ?: ""
-                """<a:t[^>]*>(.*?)</a:t>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(xml).forEach {
-                    sb.append(decodeXml(it.groupValues[1])).append('\n')
+                // 先按 txBody 分块（与桌面版 wordcount.py _extract_xlsx_shapes_text 一致），
+                // 再在每块内取 <a:t>，避免把图表文字算进去
+                """<xdr:txBody[^>]*>(.*?)</xdr:txBody>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(xml).forEach { txBody ->
+                    """<a:t[^>]*>(.*?)</a:t>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(txBody.groupValues[1]).forEach {
+                        sb.append(decodeXml(it.groupValues[1])).append('\n')
+                    }
                 }
             } catch (_: Throwable) {}
         }
-        // ② VML 文本框：从 worksheet rels 直接找 /vmlDrawing（v1.3.8 修复）
+        // ② VML 文本框：从 worksheet rels 直接找 /vmlDrawing
         val vmlPath = vmlPathForSheet(zip, sheetPath)
         if (vmlPath != null) {
             try {
