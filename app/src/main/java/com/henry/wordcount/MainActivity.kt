@@ -1951,7 +1951,6 @@ fun CompareScreen(
 
     // 比较设置（对应 Word 比较对话框）
     var optCase by remember { mutableStateOf(true) }   // 大小写更改
-    var optWs by remember { mutableStateOf(false) }     // 空格
     var optTable by remember { mutableStateOf(true) }   // 表格
     var optHf by remember { mutableStateOf(true) }      // 页眉和页脚
     var optFn by remember { mutableStateOf(true) }      // 脚注和尾注
@@ -1998,9 +1997,8 @@ fun CompareScreen(
                 // 原因：Chaquopy lxml C 扩展在 Android 上触发 fatal 级 AssetFinder 崩溃，
                 //       历经 v1.1.15~v1.35 共 20 个版本验证，Python 层拦截全部无效。
                 val cmpOpts = org.json.JSONObject().apply {
-                    put("level", "word")   // v1.3.9: 固定字词级别（字符级别已移除，两者结果一致）
+                    put("level", "word")   // v1.3.9: 固��字词级别（字符级别已移除，两者结果一致）
                     put("case", optCase)
-                    put("whitespace", optWs)
                     put("table", optTable)
                     put("header_footer", optHf)
                     put("footnote", optFn)
@@ -2057,13 +2055,18 @@ fun CompareScreen(
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("比较设置", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
                 HorizontalDivider()
-                CompareCheck("大小写更改", optCase) { optCase = it }
-                CompareCheck("空格", optWs) { optWs = it }
-                CompareCheck("表格", optTable) { optTable = it }
-                CompareCheck("页眉和页脚", optHf) { optHf = it }
-                CompareCheck("脚注和尾注", optFn) { optFn = it }
-                CompareCheck("文本框", optTb) { optTb = it }
-                CompareCheck("域", optField) { optField = it }
+                // v1.3.10: 紧凑布局，一行放多个选项（删除了无用的「空格」选项）
+                androidx.compose.foundation.layout.FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    CompareCheck("大小写更改", optCase) { optCase = it }
+                    CompareCheck("表格", optTable) { optTable = it }
+                    CompareCheck("页眉和页脚", optHf) { optHf = it }
+                    CompareCheck("脚注和尾注", optFn) { optFn = it }
+                    CompareCheck("文本框", optTb) { optTb = it }
+                    CompareCheck("域", optField) { optField = it }
+                }
             }
         }
 
@@ -2170,7 +2173,7 @@ private fun CompareFileCard(label: String, name: String?, btnText: String,
 
 @Composable
 private fun CompareCheck(label: String, checked: Boolean, onToggle: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
         Checkbox(checked = checked, onCheckedChange = onToggle)
         Text(label, modifier = Modifier.padding(start = 4.dp))
     }

@@ -1043,20 +1043,48 @@ object DocxComparator {
     )
 
     /**
-     * v1.3.9: 统计修订档本身的总字数（不含空格，与 Word「字符数(不计空格)」一致）。
-     * 用于计算"涉及修改的句子总字数 = 修订档总字数 − 黑色整句字数"，
-     * 保证结果不超过修订档总字数（此前从合并结果文档取 totalChars 会虚高）。
+     * v1.3.10: 统计修订档本身的总字数（与 App 统一口径一致：fe + nc）。
+     * 用于计算"涉及修改的句子总字数 = 修订档总字数 − 黑色整句字数"。
+     *
+     * 修复 v1.3.9 的 bug：此前用 Regex(DOT_MATCHES_ALL) 匹配 <w:t>，
+     * 对大文档会匹配到异常内容（如样式定义、嵌套标签等），导致返回值
+     * 虚高至 30 万+（实测 304559）。现改用 XmlPullParser 精确解析，
+     * 只取 <w:body> 内 <w:p> 段落中的 <w:t> 文本，再用 countTextKotlin
+     * 统计（fe+nc，与 App 其余部分完全一致的口径）。
      */
     private fun computeRevDocTotalChars(revPath: String): Int {
         try {
             ZipFile(revPath).use { zip ->
                 val entry = zip.getEntry("word/document.xml") ?: return 0
-                val xml = zip.getInputStream(entry).bufferedReader().readText()
-                var chars = 0
-                """<w:t[^>]*>(.*?)</w:t>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(xml).forEach {
-                    for (ch in it.groupValues[1]) if (ch != ' ') chars++
+                val parser = android.util.Xml.newParser()
+                parser.setInput(zip.getInputStream(entry), "UTF-8")
+                val sb = StringBuilder()
+                var inBody = false
+                var inP = false
+                var inT = false
+                var eventType = parser.eventType
+                while (eventType != XmlPullParser.END_DOCUMENT) {
+                    when (eventType) {
+                        XmlPullParser.START_TAG -> {
+                            val name = parser.name
+                            if (name == "body") inBody = true
+                            else if (inBody && name == "p") inP = true
+                            else if (inP && name == "t") inT = true
+                        }
+                        XmlPullParser.TEXT -> {
+                            if (inT) sb.append(parser.text)
+                        }
+                        XmlPullParser.END_TAG -> {
+                            val name = parser.name
+                            if (name == "t") inT = false
+                            else if (name == "p") inP = false
+                            else if (name == "body") inBody = false
+                        }
+                    }
+                    eventType = parser.next()
                 }
-                return chars
+                // 用 App 统一的 fe+nc 口径统计（与 Word 字数一致）
+                return countTextKotlin(sb.toString()).first
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to compute rev doc total chars", e)
