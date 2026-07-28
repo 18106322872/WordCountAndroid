@@ -48,7 +48,9 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -2057,11 +2059,10 @@ fun CompareScreen(
                 Text("比较设置", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
                 HorizontalDivider()
                 // v1.3.10: 紧凑布局，一行放多个选项（删除了无用的「空格」选项）
-                // v1.3.12: 垂直居中对齐，避免换行后各行不对齐
+                // v1.3.12: 调整间距使换行后对齐更美观
                 androidx.compose.foundation.layout.FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     CompareCheck("大小写更改", optCase) { optCase = it }
                     CompareCheck("表格", optTable) { optTable = it }
