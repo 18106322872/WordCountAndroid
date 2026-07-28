@@ -34,7 +34,8 @@ object DocxComparator {
 
     private const val TAG = "DocxCompare"
 
-    data class Para(val xml: String, val text: String)
+    /** 段落（或表格行）*/
+    data class Para(val xml: String, val text: String, val isTableRow: Boolean = false)
     data class CompareResult(
         val ok: Boolean,
         val error: String? = null,
@@ -131,20 +132,26 @@ object DocxComparator {
         val bodyParts = mutableListOf<String>()
 
         for (op in ops) {
+            // v1.3.16: 表格行（isTableRow）保留原始 <w:tr> XML，不套用段落级包装
+            val isRevTableRow = op.rj >= 0 && revParas[op.rj].isTableRow
+            val isOrigTableRow = op.oi >= 0 && origParas[op.oi].isTableRow
+
             when (op.tag) {
                 "EQ" -> {
-                    // 完全相同段落 → 黑字不变
+                    // 完全相同段落 → 黑字不变（表格行保留原始 <w:tr> 格式）
                     bodyParts.add(revParas[op.rj].xml)
                 }
                 "SUB_EQ" -> {
-                    // 子串匹配段 → 按修订档原样输出（黑字）
+                    // 子串匹配段 → 按修订档原样输出
                     bodyParts.add(revParas[op.rj].xml)
                 }
                 "DEL" -> {
-                    // 原档中被删除的段落（仅非空段落）
+                    // 原档中被删除的段落/行
                     if (origParas[op.oi].text.isNotEmpty()) {
-                        if (op.delExclude != null) {
-                            // 部分消耗的 orig：只输出未被子串提取的剩余片段为红字删除
+                        if (isOrigTableRow) {
+                            // 表格行删除：保留原始 <w:tr> 结构，整行标红
+                            bodyParts.add(wrapDeletedTableRow(origParas[op.oi].xml, author, date, ridSeq))
+                        } else if (op.delExclude != null) {
                             bodyParts.add(wrapPartialDeletedParagraph(origParas[op.oi].xml, op.delExclude, author, date, ridSeq, fontRPr))
                         } else {
                             bodyParts.add(wrapDeletedParagraph(origParas[op.oi].xml, author, date, ridSeq, fontRPr))
@@ -154,23 +161,34 @@ object DocxComparator {
                     }
                 }
                 "INS" -> {
-                    // 修订档中新插入的段落
-                    bodyParts.add(wrapInsertedParagraph(revParas[op.rj].xml, author, date, ridSeq))
+                    // 修订档中新插入的段落/行
+                    if (isRevTableRow) {
+                        // 表格行插入：保留原始 <w:tr> 结构，整行标蓝
+                        bodyParts.add(wrapInsertedTableRow(revParas[op.rj].xml, author, date, ridSeq))
+                    } else {
+                        bodyParts.add(wrapInsertedParagraph(revParas[op.rj].xml, author, date, ridSeq))
+                    }
                     insCount++
                     totalInsChars += revParas[op.rj].text.length
                 }
                 "REP" -> {
-                    // 相似段落 → 内联字符级 diff（蓝字插入+红字删除）
-                    val diff = buildDiffParagraphXml(
-                        origParas[op.oi].xml,
-                        origParas[op.oi].text,
-                        revParas[op.rj].xml,
-                        revParas[op.rj].text,
-                        author, date, ridSeq, fontRPr
-                    )
-                    bodyParts.add(diff.xml)
-                    totalDelChars += diff.delChars
-                    totalInsChars += diff.insChars
+                    // 相似段落 → 内联字符级 diff
+                    if (isRevTableRow) {
+                        // v1.3.16: 表格行修改 → 输出修订版 <w:tr>（保留完整格式）
+                        // TODO: 未来可做单元格级 diff（需解析 <w:tc> 逐格比对）
+                        bodyParts.add(revParas[op.rj].xml)
+                    } else {
+                        val diff = buildDiffParagraphXml(
+                            origParas[op.oi].xml,
+                            origParas[op.oi].text,
+                            revParas[op.rj].xml,
+                            revParas[op.rj].text,
+                            author, date, ridSeq, fontRPr
+                        )
+                        bodyParts.add(diff.xml)
+                        totalDelChars += diff.delChars
+                        totalInsChars += diff.insChars
+                    }
                     repCount++
                 }
             }
@@ -824,9 +842,9 @@ object DocxComparator {
                         }
                         if (cellTexts.isNotEmpty()) {
                             val joined = cellTexts.joinToString(" ")
-                            // 构造一个简单的伪段落 XML（保留基本格式）
-                            val fakePXml = "<w:p><w:r><w:t xml:space=\"preserve\">${escapeXml(joined)}</w:t></w:r></w:p>"
-                            result.add(Para(fakePXml, joined))
+                            // v1.3.16: 保留原始 <w:tr> XML（含完整格式），不再生成假 <w:p>
+                            // 之前用 fakePXml 导致结果文档丢失所有表格格式（字体/颜色/边框/网格）
+                            result.add(Para(trContent, joined, isTableRow = true))
                         }
                         i = trClose
                         continue
@@ -994,6 +1012,28 @@ object DocxComparator {
         val pPr = extractPPr(paraXml)
         val inner = extractParaInner(paraXml)
         return "<w:p>$pPr<w:ins w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">$inner</w:ins></w:p>"
+    }
+
+    // ══════════════════════════════════════════════════════
+    //  v1.3.16: 表格行级修订标记（保留 <w:tr> 完整结构）
+    // ══════════════════════════════════════════════════════
+
+    /**
+     * 将表格行标记为删除（红字/删除线），保留原始 <w:tr><w:tc> 结构和格式。
+     * 策略：在每个 <w:tc> 内的段落前插入 <w:del> 标记。
+     */
+    private fun wrapDeletedTableRow(trXml: String, author: String, date: String, ridSeq: IntArray): String {
+        // 在每个 <w:tc> 中，把 <w:pr> 后的内容包进 <w:del>
+        return trXml.replace(Regex("(<w:tc[^>]*>)"), "$1<w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">")
+            .replace(Regex("(</w:tc>)"), "</w:del>$1")
+    }
+
+    /**
+     * 将表格行标记为插入（蓝字/下划线），保留原始 <w:tr><w:tc> 结构和格式。
+     */
+    private fun wrapInsertedTableRow(trXml: String, author: String, date: String, ridSeq: IntArray): String {
+        return trXml.replace(Regex("(<w:tc[^>]*>)"), "$1<w:ins w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">")
+            .replace(Regex("(</w:tc>)"), "</w:ins>$1")
     }
 
     /**
@@ -1287,7 +1327,26 @@ object DocxComparator {
         var blackWhole = 0       // 无 <w:ins> 句子中的黑字(<w:t> 非插入)字数，不含空格
         val delim = setOf('。', '！', '？', '；', '\n')
 
-        for (px in extractTopLevelParas(xml)) {
+        // v1.3.16: 收集所有需要统计的文本块（顶层 <w:p> + 表格行拼接文本）
+        val allBlocks = mutableListOf<String>()
+        allBlocks.addAll(extractTopLevelParas(xml))
+        // 从 <w:tbl> 中提取每行单元格拼接文本
+        for (m in Regex("<w:tbl\\b.*?</w:tbl>", RegexOption.DOT_MATCHES_ALL).findAll(xml)) {
+            val tblXml = m.value
+            for (trM in Regex("<w:tr\\b.*?</w:tr>", RegexOption.DOT_MATCHES_ALL).findAll(tblXml)) {
+                val cellTexts = mutableListOf<String>()
+                for (tcM in Regex("<w:tc\\b.*?</w:tc>", RegexOption.DOT_MATCHES_ALL).findAll(trM.value)) {
+                    val texts = Regex("<w:t[^>]*>([^<]*)</w:t>").findAll(tcM.value)
+                        .map { it.groupValues[1] }.filter { it.isNotEmpty() }
+                    if (texts.isNotEmpty()) cellTexts.add(texts.joinToString(""))
+                }
+                if (cellTexts.isNotEmpty()) {
+                    allBlocks.add(cellTexts.joinToString(" "))
+                }
+            }
+        }
+
+        for (px in allBlocks) {
             // 仅收集 <w:ins> 块范围（删除块不影响黑色整句判定，故忽略）
             val insBlocks = mutableListOf<IntRange>()
             for (m in Regex("<w:ins[^>]*>.*?</w:ins>", RegexOption.DOT_MATCHES_ALL).findAll(px)) {
@@ -1352,8 +1411,46 @@ object DocxComparator {
         return ResultDocStats(totalChars, blackWhole)
     }
 
+    /**
+     * v1.3.16: 将 bodyParts 组装为文档 body 内容。
+     * 关键改进：连续的 <w:tr> 元素自动包裹到 <w:tbl>...</w:tbl> 中，
+     * 恢复表格结构（此前表格行被压平为独立段落，导致格式和布局全丢）。
+     */
+    private fun buildBodyContent(bodyXmlParts: List<String>): String {
+        val sb = StringBuilder()
+        var tblRowBuffer = mutableListOf<String>()
+
+        fun flushTable() {
+            if (tblRowBuffer.isNotEmpty()) {
+                sb.append("<w:tbl>")
+                for (row in tblRowBuffer) {
+                    sb.append("\n").append(row)
+                }
+                sb.append("\n</w:tbl>\n")
+                tblRowBuffer.clear()
+            }
+        }
+
+        for (part in bodyXmlParts) {
+            val trimmed = part.trim()
+            if (trimmed.startsWith("<w:tr") || trimmed.startsWith("<w:del>") && trimmed.contains("<w:tr")) {
+                // 表格行（可能被 <w:del> 或 <w:ins> 包裹）
+                tblRowBuffer.add(part)
+            } else {
+                // 非表格内容：先刷新累积的表格行
+                flushTable()
+                sb.append(part).append("\n")
+            }
+        }
+        // 刷新末尾可能的表格
+        flushTable()
+
+        return sb.toString()
+    }
+
     private fun writeOutputDocx(origDocx: File, outPath: String, bodyXmlParts: List<String>) {
-        val bodyContent = bodyXmlParts.joinToString("\n")
+        // v1.3.16: 用 buildBodyContent 替代简单 join，恢复表格结构
+        val bodyContent = buildBodyContent(bodyXmlParts)
         ZipFile(origDocx).use { zin ->
             ZipOutputStream(File(outPath).outputStream()).use { zout ->
                 val entries = zin.entries()
