@@ -2057,9 +2057,11 @@ fun CompareScreen(
                 Text("比较设置", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
                 HorizontalDivider()
                 // v1.3.10: 紧凑布局，一行放多个选项（删除了无用的「空格」选项）
+                // v1.3.12: 垂直居中对齐，避免换行后各行不对齐
                 androidx.compose.foundation.layout.FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                 ) {
                     CompareCheck("大小写更改", optCase) { optCase = it }
                     CompareCheck("表格", optTable) { optTable = it }
@@ -2174,7 +2176,10 @@ private fun CompareFileCard(label: String, name: String?, btnText: String,
 
 @Composable
 private fun CompareCheck(label: String, checked: Boolean, onToggle: (Boolean) -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.height(IntrinsicSize.Min)
+    ) {
         Checkbox(checked = checked, onCheckedChange = onToggle)
         Text(label, modifier = Modifier.padding(start = 4.dp))
     }

@@ -1059,6 +1059,7 @@ object DocxComparator {
             ZipFile(revPath).use { zip ->
                 val entry = zip.getEntry("word/document.xml") ?: return 0
                 val factory = XmlPullParserFactory.newInstance()
+                factory.isNamespaceAware = false
                 val parser = factory.newPullParser()
                 parser.setInput(zip.getInputStream(entry), "UTF-8")
                 val sb = StringBuilder()
