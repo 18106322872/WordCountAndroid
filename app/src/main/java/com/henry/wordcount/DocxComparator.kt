@@ -2,6 +2,7 @@ package com.henry.wordcount
 
 import android.content.Context
 import android.util.Log
+import android.util.Xml
 import java.io.File
 import java.io.FileInputStream
 import java.text.SimpleDateFormat
@@ -11,6 +12,7 @@ import kotlin.text.Regex
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
+import org.xmlpull.v1.XmlPullParser
 import org.apache.poi.hwpf.HWPFDocument
 import org.apache.poi.hwpf.usermodel.CharacterRun
 import org.apache.poi.hwpf.usermodel.Paragraph
@@ -1056,7 +1058,7 @@ object DocxComparator {
         try {
             ZipFile(revPath).use { zip ->
                 val entry = zip.getEntry("word/document.xml") ?: return 0
-                val parser = android.util.Xml.newParser()
+                val parser = Xml.newParser()
                 parser.setInput(zip.getInputStream(entry), "UTF-8")
                 val sb = StringBuilder()
                 var inBody = false
