@@ -174,9 +174,16 @@ object DocxComparator {
                 "REP" -> {
                     // 相似段落 → 内联字符级 diff
                     if (isRevTableRow) {
-                        // v1.3.16: 表格行修改 → 输出修订版 <w:tr>（保留完整格式）
-                        // TODO: 未来可做单元格级 diff（需解析 <w:tc> 逐格比对）
-                        bodyParts.add(revParas[op.rj].xml)
+                        // v1.3.20: 表格行修改 → 单元格级字符 diff（逐 <w:tc> 比对）
+                        // 替代 v1.3.16~v1.3.19 的"直接输出原始XML（无任何修订标记）"
+                        val diff = buildDiffTableRowXml(
+                            origParas[op.oi].xml, origParas[op.oi].text,
+                            revParas[op.rj].xml, revParas[op.rj].text,
+                            author, date, ridSeq, fontRPr
+                        )
+                        bodyParts.add(diff.xml)
+                        totalDelChars += diff.delChars
+                        totalInsChars += diff.insChars
                     } else {
                         val diff = buildDiffParagraphXml(
                             origParas[op.oi].xml,
@@ -713,6 +720,140 @@ object DocxComparator {
         }
         val blackWhole = computeBlackWholeSentences(revText, blackRanges)
         return DiffOut(restampFont(sb.toString(), fontRPr), delChars, insChars, equalChars, blackWhole)
+    }
+
+    /**
+     * v1.3.20: 表格行级单元格 diff。
+     * 对 <w:tr> 中每个 <w:tc> 按位置配对，做字符级 LCS diff，
+     * 在单元格内生成 <w:del>(红字删除线) / <w:ins>(蓝字下划线) 修订标记。
+     *
+     * 策略：
+     *   1. 用正则提取 orig/rev 的 <w:tc> 列表（按位置一一对应）
+     *   2. 对每对单元格，提取纯文本，做 charDiff
+     *   3. 保留 rev 单元格的 <w:tcPr>（边框/底纹等格式）
+     *   4. 将 diff 结果写入单元格，保留原 run 格式（字体/字号）
+     */
+    private fun buildDiffTableRowXml(
+        origTrXml: String, origTrText: String,
+        revTrXml: String, revTrText: String,
+        author: String, date: String, ridSeq: IntArray, fontRPr: String
+    ): DiffOut {
+        val tcPattern = Regex("<w:tc\\b.*?</w:tc>", RegexOption.DOT_MATCHES_ALL)
+        val origCells = tcPattern.findAll(origTrXml).map { it.value }.toList()
+        val revCells = tcPattern.findall(revTrXml)
+
+        val sb = StringBuilder()
+        // 保留 <w:tr> 的行属性（如 <w:trPr>）
+        val trPrMatch = Regex("<w:trPr.*?</w:trPr>", RegexOption.DOT_MATCHES_ALL).find(revTrXml)
+        sb.append("<w:tr>")
+        if (trPrMatch != null) sb.append(trPrMatch.value)
+
+        var totalDel = 0
+        var totalIns = 0
+        val maxCells = kotlin.math.max(origCells.size, revCells.size)
+
+        for (ci in 0 until maxCells) {
+            val origCell = if (ci < origCells.size) origCells[ci] else ""
+            val revCell = if (ci < revCells.size) revCells[ci] else ""
+
+            // 提取单元格属性（边框、底纹等）—— 从修订档取，保留格式
+            val tcPrMatch = Regex("<w:tcPr.*?</w:tcPr>", RegexOption.DOT_MATCHES_ALL).find(revCell)
+            val tcPr = tcPrMatch?.value ?: ""
+
+            val origCellText = extractParaText(origCell)
+            val revCellText = extractParaText(revCell)
+
+            sb.append("<w:tc>").append(tcPr)
+
+            if (origCellText == revCellText) {
+                // 完全相同 → 输出修订版单元格原样（黑字）
+                sb.append(revCell.removePrefix("<w:tc").removeSuffix("</w:tc>")
+                    .removePrefix(tcPr))
+            } else if (origCellText.isEmpty()) {
+                // 纯插入 → 整个单元格标蓝
+                sb.append("<w:ins w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">")
+                // 输出修订版单元格内容（去掉 tcPr 包裹）
+                val cellInner = stripTcPr(revCell)
+                sb.append(cellInner)
+                sb.append("</w:ins>")
+                totalIns += revCellText.length
+            } else if (revCellText.isEmpty()) {
+                // 纯删除 → 整个单元格标红
+                sb.append("<w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">")
+                val cellInner = stripTcPr(origCell)
+                sb.append(toDelText(cellInner))
+                sb.append("</w:del>")
+                totalDel += origCellText.length
+            } else {
+                // 有差异 → 字符级 diff
+                val ops = charDiff(origCellText, revCellText)
+                val origRuns = extractWRunsFromCell(origCell)
+
+                var delChars = 0
+                var insChars = 0
+                for (op in ops) {
+                    when (op.tag) {
+                        "equal" -> {
+                            val seg = extractRunsInRange(origRuns, op.i1, op.i2)
+                            if (seg.isNotEmpty()) sb.append(seg)
+                        }
+                        "delete" -> {
+                            val seg = extractRunsInRange(origRuns, op.i1, op.i2)
+                            if (seg.isNotEmpty()) {
+                                val delSeg = toDelText(seg)
+                                sb.append("<w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">")
+                                sb.append(delSeg)
+                                sb.append("</w:del>")
+                                delChars += (op.i2 - op.i1)
+                            }
+                        }
+                        "insert" -> {
+                            val seg = revCellText.substring(op.j1, op.j2)
+                            if (seg.isNotEmpty()) {
+                                sb.append("<w:ins w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\"><w:r><w:rPr><w:color w:val=\"2E74B5\"/><w:u w:val=\"single\"/></w:rPr><w:t xml:space=\"preserve\">${escapeXml(seg)}</w:t></w:r></w:ins>")
+                                insChars += (op.j2 - op.j1)
+                            }
+                        }
+                        "replace" -> {
+                            val dSeg = extractRunsInRange(origRuns, op.i1, op.i2)
+                            if (dSeg.isNotEmpty()) {
+                                sb.append("<w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">")
+                                sb.append(toDelText(dSeg))
+                                sb.append("</w:del>")
+                                delChars += (op.i2 - op.i1)
+                            }
+                            val iSeg = revCellText.substring(op.j1, op.j2)
+                            if (iSeg.isNotEmpty()) {
+                                sb.append("<w:ins w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\"><w:r><w:rPr><w:color w:val=\"2E74B5\"/><w:u w:val=\"single\"/></w:rPr><w:t xml:space=\"preserve\">${escapeXml(iSeg)}</w:t></w:r></w:ins>")
+                                insChars += (op.j2 - op.j1)
+                            }
+                        }
+                    }
+                }
+                totalDel += delChars
+                totalIns += insChars
+            }
+
+            sb.append("</w:tc>")
+        }
+
+        sb.append("</w:tr>")
+        // 表格行的 blackWhole 按整行判定：如果任一单元格有修改则整行不算黑色
+        val hasChanges = (totalDel + totalIns) > 0
+        return DiffOut(sb.toString(), totalDel, totalIns, 0, if (hasChanges) 0 else revTrText.length)
+    }
+
+    /** 从单元格 XML 中提取 WRun 列表（用于表格内 diff 的原文 run 定位）。 */
+    private fun extractWRunsFromCell(cellXml: String): List<WRun> {
+        // 复用 extractWRuns 但作用于整个单元格内容
+        return extractWRuns(cellXml)
+    }
+
+    /** 去除 <w:tc> 标签和 <w:tcPr> 后的单元格内部内容。 */
+    private fun stripTcPr(cellXml: String): String {
+        var s = cellXml.removePrefix("<w:tc").removeSuffix("</w:tc>")
+        s = Regex("<w:tcPr.*?</w:tcPr>", RegexOption.DOT_MATCHES_ALL).replace(s, "")
+        return s
     }
 
     private fun charDiff(textO: String, textR: String): List<Quad> {
