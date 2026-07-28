@@ -707,23 +707,169 @@ object DocxComparator {
     //  DOCX 段落解析（保留完整 XML）
     // ══════════════════════════════════════════════════════
 
+    /**
+     * v1.3.14: 提取文档全部段落（含表格内的段落）。
+     * 此前版本只提取 <w:p>，完全忽略 <w:tbl> 表格，
+     * 导致问卷等表格布局文档的大量内容丢失（Section C/D 无内容、字数严重偏低）。
+     *
+     * 策略：对表格内段落，把每个单元格的文本用空格拼接为一行，
+     * 作为伪段落参与比对。这样既保留内容又不破坏逐段比对逻辑。
+     */
     private fun readParagraphs(docx: File, label: String): List<Para> {
         val paras = mutableListOf<Para>()
         try {
             ZipFile(docx).use { zip ->
                 val entry = zip.getEntry("word/document.xml") ?: return emptyList()
                 val xml = zip.getInputStream(entry).bufferedReader().readText()
-                val paraXmls = extractTopLevelParas(xml)
-                for (px in paraXmls) {
-                    val text = extractParaText(px)
-                    paras.add(Para(px, text))
-                }
+                // 提取 body 区域
+                val bodyStart = xml.indexOf("<w:body")
+                if (bodyStart < 0) return emptyList()
+                val bodyGt = xml.indexOf('>', bodyStart)
+                if (bodyGt < 0) return emptyList()
+                val bodyEnd = xml.lastIndexOf("</w:body>")
+                if (bodyEnd < 0) return emptyList()
+                val bodyContent = xml.substring(bodyGt + 1, bodyEnd)
+
+                // 1. 提取顶层段落 + 表格内段落
+                extractParasAndTableParas(bodyContent, paras)
             }
         } catch (e: Exception) {
             Log.e(TAG, "readParagraphs($label) error: ${e.javaClass.simpleName}: ${e.message}")
         }
         Log.d(TAG, "readParagraphs($label): ${paras.size} 段落")
         return paras
+    }
+
+    /**
+     * 从 body 内容中提取所有段落：
+     * - 顶层 <w:p> 原样保留
+     * - <w:tbl> 表格内每个单元格的段落拼接为伪段落（单元格间用空格分隔）
+     */
+    private fun extractParasAndTableParas(content: String, result: MutableList<Para>) {
+        var i = 0
+        val n = content.length
+        while (i < n) {
+            // 检查是否遇到表格
+            if (content.startsWith("<w:tbl", i)) {
+                val tblClose = findMatchingTag(content, i, "w:tbl")
+                if (tblClose > 0) {
+                    val tblContent = content.substring(i, tblClose)
+                    extractTableParagraphs(tblContent, result)
+                    i = tblClose
+                    continue
+                }
+            }
+            // 顶层段落
+            if (content.startsWith("<w:p", i)) {
+                val after = if (i + 4 < n) content[i + 4] else '>'
+                if (after == ' ' || after == '>' || after == '/' || after == '\t' || after == '\n') {
+                    val pClose = findMatchingTag(content, i, "w:p")
+                    if (pClose > 0) {
+                        val pXml = content.substring(i, pClose)
+                        val text = extractParaText(pXml)
+                        result.add(Para(pXml, text))
+                        i = pClose
+                        continue
+                    }
+                }
+            }
+            i++
+        }
+    }
+
+    /**
+     * 从表格 XML 中提取每行的拼接文本作为伪段落。
+     * 每行 = 各单元格文本用空格连接（保持原横排阅读顺序）。
+     */
+    private fun extractTableParagraphs(tblXml: String, result: MutableList<Para>) {
+        // 找所有 <w:tr> (表格行)
+        var i = 0
+        val n = tblXml.length
+        while (i < n) {
+            if (tblXml.startsWith("<w:tr", i)) {
+                val after = if (i + 4 < n) tblXml[i + 4] else '>'
+                if (after == ' ' || after == '>' || after == '/' || after == '\t' || after == '\n') {
+                    val trClose = findMatchingTag(tblXml, i, "w:tr")
+                    if (trClose > 0) {
+                        val trContent = tblXml.substring(i, trClose)
+                        // 提取该行所有单元格的文本
+                        val cellTexts = mutableListOf<String>()
+                        var j = 0
+                        val trLen = trContent.length
+                        while (j < trLen) {
+                            if (trContent.startsWith("<w:tc", j)) {
+                                val tcAfter = if (j + 4 < trLen) trContent[j + 4] else '>'
+                                if (tcAfter == ' ' || tcAfter == '>' || tcAfter == '/' || tcAfter == '\t' || tcAfter == '\n') {
+                                    val tcClose = findMatchingTag(trContent, j, "w:tc")
+                                    if (tcClose > 0) {
+                                        val tcXml = trContent.substring(j, tcClose)
+                                        // 提取单元格内所有 <w:t> 文本
+                                        val cellTm = Regex("<w:t(?![a-zA-Z])[^>]*>(.*?)</w:t>", RegexOption.DOT_MATCHES_ALL).findAll(tcXml)
+                                        val sb = StringBuilder()
+                                        for (tm in cellTm) sb.append(tm.groupValues[1])
+                                        val txt = sb.toString().trim()
+                                        if (txt.isNotEmpty()) cellTexts.add(txt)
+                                        j = tcClose
+                                        continue
+                                    }
+                                }
+                            }
+                            j++
+                        }
+                        if (cellTexts.isNotEmpty()) {
+                            val joined = cellTexts.joinToString(" ")
+                            // 构造一个简单的伪段落 XML（保留基本格式）
+                            val fakePXml = "<w:p><w:r><w:t xml:space=\"preserve\">${escapeXml(joined)}</w:t></w:r></w:p>"
+                            result.add(Para(fakePXml, joined))
+                        }
+                        i = trClose
+                        continue
+                    }
+                }
+            }
+            i++
+        }
+    }
+
+    /**
+     * 查找匹配的闭合标签位置（处理嵌套）。
+     * @param xml 源 XML
+     * @param start 起始标签的开始位置
+     * @param tagName 标签名（不含尖括号和前缀分隔符，如 "w:p" 或 "w:tbl"）
+     * @return 闭合标签之后的位置（> 之后），未找到返回 -1
+     */
+    private fun findMatchingTag(xml: String, start: Int, tagName: String): Int {
+        val openTag = "<$tagName"
+        val closeTag = "</$tagName>"
+        val n = xml.length
+        // 找到起始标签的 >
+        var k = start
+        var depth = 0
+        // 先跳过起始标签本身
+        val gt = xml.indexOf('>', k)
+        if (gt < 0) return -1
+        k = gt + 1
+        depth = 1
+        while (k < n) {
+            if (xml.startsWith(openTag, k)) {
+                val a = if (k + openTag.length < n) xml[k + openTag.length] else '>'
+                if (a == ' ' || a == '>' || a == '/' || a == '\t' || a == '\n') {
+                    depth++
+                    val g = xml.indexOf('>', k)
+                    if (g < 0) return -1
+                    k = g + 1
+                    continue
+                }
+            }
+            if (xml.startsWith(closeTag, k)) {
+                depth--
+                if (depth == 0) return k + closeTag.length
+                k += closeTag.length
+                continue
+            }
+            k++
+        }
+        return -1
     }
 
     private fun extractTopLevelParas(xml: String): List<String> {
