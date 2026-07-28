@@ -7,6 +7,7 @@ import org.apache.poi.hssf.usermodel.HSSFSimpleShape
 import org.apache.poi.hssf.usermodel.HSSFTextbox
 import org.apache.poi.hssf.usermodel.HSSFShapeGroup
 import org.apache.poi.hssf.usermodel.HSSFWorkbook
+import org.apache.poi.hssf.usermodel.HSSFChart
 import org.apache.poi.hslf.usermodel.HSLFSlideShow
 import org.apache.poi.hslf.usermodel.HSLFShape
 import org.apache.poi.hslf.usermodel.HSLFTextShape
@@ -138,6 +139,20 @@ object OldOfficeEngine {
                     if (patriarch != null) {
                         for (shape in patriarch.children) {
                             collectShapeText(shape, sb)
+                        }
+                    }
+                } catch (_: Throwable) { }
+                // v1.3.11: 计入图表文字（图表标题 + 系列名/图例名）。这些是翻译内容。
+                // 注：POI HSSFChart 无轴标题公开 API（桌面版靠 Office COM 取轴标题），
+                //     Android 端先计入图表标题与系列名；xls 轴标题暂无法经 POI 取得。
+                try {
+                    val charts = HSSFChart.getSheetCharts(sheet)
+                    for (ch in charts) {
+                        val ct = ch.chartTitle
+                        if (!ct.isNullOrBlank()) sb.append(ct).append("\n")
+                        for (s in ch.series) {
+                            val st = s.seriesTitle
+                            if (!st.isNullOrBlank()) sb.append(st).append("\n")
                         }
                     }
                 } catch (_: Throwable) { }

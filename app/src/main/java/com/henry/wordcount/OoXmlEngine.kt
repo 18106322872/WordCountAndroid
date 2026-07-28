@@ -432,6 +432,13 @@ object OoXmlEngine {
             if (dt.isNotBlank()) visibleSb.append(dt)
         }
 
+        // v1.3.11: 计入内嵌图表文字（图表标题 / 坐标轴标题 / 图例系列名等，存于
+        // xl/charts/chartN.xml 的 <a:t>）。这些是需要翻译的内容，与桌面版 wordcount.py
+        // _extract_xlsx_chart_text 一致。系列名/分类标签多为公式引用(指向单元格，已在
+        // 单元格中统计)，不会重复计入。图表文字独立于 drawingN.xml(形状文字)，互不重叠。
+        val chartText = extractChartText(zip)
+        if (chartText.isNotBlank()) visibleSb.append(chartText)
+
         val text = visibleSb.toString()
         val pages = max(1, visibleNames.size)
         return OoxmlResult(text, pages, "xlsx", visibleNames, hiddenSheets, "")
@@ -449,11 +456,10 @@ object OoXmlEngine {
      * v1.3.8 修复 VML：vmlPathForDrawing 从 drawing 自身的 rels 找 /vmlDrawing（永远为 null），
      *   改为从 worksheet rels 直接找 /vmlDrawing 关系。
      *
-     * v1.3.9 修复图表虚高：此前用 <a:t> 全局正则匹配 drawingN.xml 内所有 <a:t>，
-     *   把图表标题/轴标签/数据标签（<c:tx> 上下文内的 <a:t>）也算进去了。
-     *   桌面版 wordcount.py 明确注释"不含图表标题(c:tx)，粘贴为图片不计入文字"。
-     *   现改为只提取 <xdr:txBody> 上下文内的 <a:t>（文本框/自选图形/标注），
-     *   与桌面版口径一致。与 Word「复制到 Word」的效果对齐（Excel 图表复制后变为图片）。
+     * 只提取 <xdr:txBody> 内的 <a:t>（文本框/形状/标注）——这些是 drawingN.xml 里的形状文字。
+     * 注意：图表的标题/轴标题等文字并不在 drawingN.xml 内，而在独立的 xl/charts/chartN.xml 中，
+     *   由 extractChartText() 单独抽取并计入（这些也是需要翻译的内容，与桌面版一致）。
+     * 两者文件不同、互不重叠，不会重复计数。
      */
     private fun extractSheetDrawing(zip: ZipFile, sheetPath: String): String {
         val sb = StringBuilder()
@@ -488,6 +494,33 @@ object OoXmlEngine {
                 }
             } catch (_: Throwable) {}
         }
+        return sb.toString()
+    }
+
+    /**
+     * 提取内嵌图表文字（图表标题 / 坐标轴标题 / 图例系列名等）。
+     * 图表文字写在独立的 xl/charts/chartN.xml 里，以 <a:t> 字面字符串存储；
+     * 与形状文字(drawingN.xml 的 <xdr:txBody>)分属不同文件，互不重叠。
+     * 只抽 <a:t>：系列名/分类标签/数据标签多数只存公式引用(<strRef>/<numRef>
+     * 指向单元格)，其字面文字已在单元格统计，不会重复计入。
+     * 与桌面版 wordcount.py _extract_xlsx_chart_text 口径一致（需要翻译的内容计入）。
+     */
+    private fun extractChartText(zip: ZipFile): String {
+        val sb = StringBuilder()
+        try {
+            val entries = Collections.list(zip.entries())
+            for (e in entries) {
+                if (e.name.startsWith("xl/charts/chart") && e.name.endsWith(".xml")) {
+                    val xml = readEntry(zip, e.name) ?: continue
+                    // <a:t> 允许带属性(如 xml:space="preserve")，用 [^>]* 容错；
+                    // <a:t> 为纯文本叶子节点，内容不含子标签，用 [^<]* 即可（无需 DOT_MATCHES_ALL）
+                    """<a:t[^>]*>([^<]*)</a:t>""".toRegex().findAll(xml).forEach {
+                        val t = decodeXml(it.groupValues[1]).trim()
+                        if (t.isNotEmpty()) sb.append(t).append('\n')
+                    }
+                }
+            }
+        } catch (_: Throwable) {}
         return sb.toString()
     }
 
