@@ -763,95 +763,55 @@ object DocxComparator {
      * - 顶层 <w:p> 原样保留
      * - <w:tbl> 表格内每个单元格的段落拼接为伪段落（单元格间用空格分隔）
      */
+    /**
+     * 从 body 内容中提取所有段落与表格行。
+     * v1.3.17: 改用正则直接匹配，替换原手写的 findMatchingTag 嵌套标签索引。
+     * 原实现在部分运行环境下对嵌套 <w:tbl>/<w:tr>/<w:tc> 的边界处理存在不一致，
+     * 导致表格行被静默漏掉（结果文档表格全丢失）。正则在各运行时行为一致。
+     *
+     * 策略：
+     *   - 先用 <w:tbl> 正则取出每个表格，内部按 <w:tr> 提取行（保留原始 <w:tr> XML）
+     *   - 再从「去除所有表格」的 body 中用 <w:p> 正则提取顶层段落，
+     *     避免单元格内的 <w:p> 被重复计入。
+     */
     private fun extractParasAndTableParas(content: String, result: MutableList<Para>) {
-        var i = 0
-        val n = content.length
-        while (i < n) {
-            // 检查是否遇到表格
-            if (content.startsWith("<w:tbl", i)) {
-                val tblClose = findMatchingTag(content, i, "w:tbl")
-                if (tblClose > 0) {
-                    val tblContent = content.substring(i, tblClose)
-                    extractTableParagraphs(tblContent, result)
-                    i = tblClose
-                    continue
-                }
-            }
-            // 顶层段落
-            if (content.startsWith("<w:p", i)) {
-                val after = if (i + 4 < n) content[i + 4] else '>'
-                if (after == ' ' || after == '>' || after == '/' || after == '\t' || after == '\n') {
-                    val pClose = findMatchingTag(content, i, "w:p")
-                    if (pClose > 0) {
-                        val pXml = content.substring(i, pClose)
-                        val text = extractParaText(pXml)
-                        result.add(Para(pXml, text))
-                        i = pClose
-                        continue
-                    }
-                }
-            }
-            i++
+        val tblPattern = Regex("<w:tbl\\b.*?</w:tbl>", RegexOption.DOT_MATCHES_ALL)
+        // 1. 表格行（保留原始 <w:tr> XML，含完整格式）
+        for (tblM in tblPattern.findAll(content)) {
+            extractTableParagraphs(tblM.value, result)
+        }
+        // 2. 顶层段落（先移除表格区域，避免单元格内 <w:p> 被重复计入）
+        val noTables = tblPattern.replace(content, "")
+        for (pM in Regex("<w:p\\b.*?</w:p>", RegexOption.DOT_MATCHES_ALL).findAll(noTables)) {
+            val pXml = pM.value
+            val text = extractParaText(pXml)
+            result.add(Para(pXml, text))
         }
     }
 
     /**
-     * 从表格 XML 中提取每行的拼接文本作为伪段落。
-     * 每行 = 各单元格文本用空格连接（保持原横排阅读顺序）。
+     * 从表格 XML 中提取每行的拼接文本作为表格行（保留原始 <w:tr> XML）。
+     * v1.3.17: 改用正则直接匹配 <w:tr>/<w:tc>（表格行/单元格不嵌套，非贪婪安全），
+     * 替换原手写的 findMatchingTag 嵌套索引匹配。
      *
-     * v1.3.15 修复：此前用 i+4 检查分隔符，但 w:tr/w:tc 的标签名长度为4（"w:tr"），
-     * i+4 仍在标签名内部（指向 'r' 或 'c'），导致永远匹配不到表格行和单元格！
-     * 现改为 i+5（标签名长度+1=5）正确检查分隔符。
+     * 每行 = 各单元格文本用空格连接（保持原横排阅读顺序），
+     * 同时保留完整 <w:tr><w:tc> 结构以恢复字体/边框/网格格式。
      */
     private fun extractTableParagraphs(tblXml: String, result: MutableList<Para>) {
-        // 找所有 <w:tr> (表格行)
-        var i = 0
-        val n = tblXml.length
-        while (i < n) {
-            if (tblXml.startsWith("<w:tr", i)) {
-                // v1.3.15: "w:tr" 长度4，分隔符在 i+5（不是 i+4）
-                val after = if (i + 5 < n) tblXml[i + 5] else '>'
-                if (after == ' ' || after == '>' || after == '/' || after == '\t' || after == '\n') {
-                    val trClose = findMatchingTag(tblXml, i, "w:tr")
-                    if (trClose > 0) {
-                        val trContent = tblXml.substring(i, trClose)
-                        // 提取该行所有单元格的文本
-                        val cellTexts = mutableListOf<String>()
-                        var j = 0
-                        val trLen = trContent.length
-                        while (j < trLen) {
-                            if (trContent.startsWith("<w:tc", j)) {
-                                // v1.3.15: "w:tc" 长度4，分隔符在 j+5
-                                val tcAfter = if (j + 5 < trLen) trContent[j + 5] else '>'
-                                if (tcAfter == ' ' || tcAfter == '>' || tcAfter == '/' || tcAfter == '\t' || tcAfter == '\n') {
-                                    val tcClose = findMatchingTag(trContent, j, "w:tc")
-                                    if (tcClose > 0) {
-                                        val tcXml = trContent.substring(j, tcClose)
-                                        // 提取单元格内所有 <w:t> 文本
-                                        val cellTm = Regex("<w:t(?![a-zA-Z])[^>]*>(.*?)</w:t>", RegexOption.DOT_MATCHES_ALL).findAll(tcXml)
-                                        val sb = StringBuilder()
-                                        for (tm in cellTm) sb.append(tm.groupValues[1])
-                                        val txt = sb.toString().trim()
-                                        if (txt.isNotEmpty()) cellTexts.add(txt)
-                                        j = tcClose
-                                        continue
-                                    }
-                                }
-                            }
-                            j++
-                        }
-                        if (cellTexts.isNotEmpty()) {
-                            val joined = cellTexts.joinToString(" ")
-                            // v1.3.16: 保留原始 <w:tr> XML（含完整格式），不再生成假 <w:p>
-                            // 之前用 fakePXml 导致结果文档丢失所有表格格式（字体/颜色/边框/网格）
-                            result.add(Para(trContent, joined, isTableRow = true))
-                        }
-                        i = trClose
-                        continue
-                    }
-                }
+        for (trM in Regex("<w:tr\\b.*?</w:tr>", RegexOption.DOT_MATCHES_ALL).findAll(tblXml)) {
+            val trContent = trM.value
+            val cellTexts = mutableListOf<String>()
+            for (tcM in Regex("<w:tc\\b.*?</w:tc>", RegexOption.DOT_MATCHES_ALL).findAll(trContent)) {
+                val texts = Regex("<w:t(?![a-zA-Z])[^>]*>(.*?)</w:t>", RegexOption.DOT_MATCHES_ALL)
+                    .findAll(tcM.value)
+                    .map { it.groupValues[1] }
+                    .filter { it.isNotEmpty() }
+                    .toList()
+                if (texts.isNotEmpty()) cellTexts.add(texts.joinToString(""))
             }
-            i++
+            if (cellTexts.isNotEmpty()) {
+                result.add(Para(trContent, cellTexts.joinToString(" "), isTableRow = true))
+            }
         }
     }
 
@@ -1237,61 +1197,42 @@ object DocxComparator {
     )
 
     /**
-     * v1.3.15: 统计修订档本身的总字数（与 App 统一口径一致：fe + nc）。
-     * 用于计算"涉及修改的句子总字数 = 修订档总字数 − 黑色整句字数"。
+     * v1.3.17: 统计修订档总字数（与 App 统一口径：fe + nc）。
+     * 直接用正则提取 <w:body> 内所有 <w:t> 文本（含表格内文字），
+     * 不再依赖 XmlPullParser 状态机。
      *
      * 修复历史：
-     *   v1.3.9: Regex(DOT_MATCHES_ALL) 匹配 <w:t> → 大文档返回 30 万+（虚高）
+     *   v1.3.9:  Regex(DOT_MATCHES_ALL) 匹配 <w:t> → 大文档返回 30 万+（虚高）
      *   v1.3.10: 改用 XmlPullParser，只取 <w:body> 内 <w:p> 段落中的 <w:t>
      *   v1.3.13: Android KXmlParser parser.name 返回带前缀名 → substringAfterLast(':')
-     *   v1.3.15: 发现只统计 <w:p> 忽略 <w:tbl> 表格！问卷 Section B/C/D 全在表格内
-     *           → revTotalChars 严重偏低。现同时提取表格内 <w:t> 文本参与统计。
+     *   v1.3.15: 发现只统计 <w:p> 忽略 <w:tbl> 表格 → 改用 XmlPullParser 状态机补统计表格
+     *   v1.3.17: XmlPullParser 状态机在部分运行环境下对表格边界处理不一致，
+     *            导致表格内文字被漏统计、"修改涉及句子总字数"严重偏小。
+     *            现改为正则直接提取 <w:body> 内全部 <w:t>（含表格），简洁且跨运行时一致。
      */
     private fun computeRevDocTotalChars(revPath: String): Int {
         try {
             ZipFile(revPath).use { zip ->
                 val entry = zip.getEntry("word/document.xml") ?: return 0
-                val factory = XmlPullParserFactory.newInstance()
-                factory.isNamespaceAware = false
-                val parser = factory.newPullParser()
-                parser.setInput(zip.getInputStream(entry), "UTF-8")
+                val xml = zip.getInputStream(entry).bufferedReader().readText()
+                val bodyStart = xml.indexOf("<w:body")
+                if (bodyStart < 0) return 0
+                val bodyGt = xml.indexOf('>', bodyStart)
+                if (bodyGt < 0) return 0
+                val bodyEnd = xml.lastIndexOf("</w:body>")
+                if (bodyEnd < 0) return 0
+                val bodyContent = xml.substring(bodyGt + 1, bodyEnd)
                 val sb = StringBuilder()
-                var inBody = false
-                var inP = false
-                var inT = false
-                // v1.3.15: 也收集表格内的文字（表格不在 <w:p> 内）
-                var inTbl = false
-                var eventType = parser.eventType
-                while (eventType != XmlPullParser.END_DOCUMENT) {
-                    when (eventType) {
-                        XmlPullParser.START_TAG -> {
-                            val raw = parser.name
-                            val name = raw.substringAfterLast(':')
-                            if (name == "body") inBody = true
-                            else if (inBody && name == "p") inP = true
-                            else if (inP && name == "t") inT = true
-                            // v1.3.15: 进入表格时标记（表格内的 <w:t> 直接收集）
-                            else if (inBody && name == "tbl") inTbl = true
-                            else if (inTbl && name == "t") inT = true
-                        }
-                        XmlPullParser.TEXT -> {
-                            if (inT) sb.append(parser.text)
-                        }
-                        XmlPullParser.END_TAG -> {
-                            val raw = parser.name
-                            val name = raw.substringAfterLast(':')
-                            if (name == "t") inT = false
-                            else if (name == "p") inP = false
-                            else if (name == "tbl") inTbl = false
-                            else if (name == "body") inBody = false
-                        }
-                    }
-                    eventType = parser.next()
+                for (m in Regex("<w:t(?![a-zA-Z])[^>]*>(.*?)</w:t>", RegexOption.DOT_MATCHES_ALL).findAll(bodyContent)) {
+                    sb.append(m.groupValues[1])
                 }
-                return countTextKotlin(sb.toString()).first
+                // v1.3.17: 返回【字符数】(不含空格)，与 computeResultDocStatsSimple 的
+                // blackWholeSentenceChars 同单位。此前误用 .first(词数) 与字符数相减，
+                // 导致"修改涉及句子总字数"被严重低估（如英文文档 916 词 vs 数千字符）。
+                return countTextKotlin(sb.toString()).fourth
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to compute rev doc total chars", e)
+            Log.e(TAG, "computeRevDocTotalChars error", e)
             return 0
         }
     }
