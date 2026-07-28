@@ -740,7 +740,7 @@ object DocxComparator {
     ): DiffOut {
         val tcPattern = Regex("<w:tc\\b.*?</w:tc>", RegexOption.DOT_MATCHES_ALL)
         val origCells = tcPattern.findAll(origTrXml).map { it.value }.toList()
-        val revCells = tcPattern.findall(revTrXml)
+        val revCells = tcPattern.findAll(revTrXml).map { it.value }.toList()
 
         val sb = StringBuilder()
         // 保留 <w:tr> 的行属性（如 <w:trPr>）
