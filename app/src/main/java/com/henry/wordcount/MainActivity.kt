@@ -2179,10 +2179,7 @@ private fun CompareFileCard(label: String, name: String?, btnText: String,
 
 @Composable
 private fun CompareCheck(label: String, checked: Boolean, onToggle: (Boolean) -> Unit) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth(0.5f)
-    ) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
         Checkbox(checked = checked, onCheckedChange = onToggle)
         Text(label, modifier = Modifier.padding(start = 4.dp))
     }

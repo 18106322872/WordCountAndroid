@@ -780,6 +780,10 @@ object DocxComparator {
     /**
      * 从表格 XML 中提取每行的拼接文本作为伪段落。
      * 每行 = 各单元格文本用空格连接（保持原横排阅读顺序）。
+     *
+     * v1.3.15 修复：此前用 i+4 检查分隔符，但 w:tr/w:tc 的标签名长度为4（"w:tr"），
+     * i+4 仍在标签名内部（指向 'r' 或 'c'），导致永远匹配不到表格行和单元格！
+     * 现改为 i+5（标签名长度+1=5）正确检查分隔符。
      */
     private fun extractTableParagraphs(tblXml: String, result: MutableList<Para>) {
         // 找所有 <w:tr> (表格行)
@@ -787,7 +791,8 @@ object DocxComparator {
         val n = tblXml.length
         while (i < n) {
             if (tblXml.startsWith("<w:tr", i)) {
-                val after = if (i + 4 < n) tblXml[i + 4] else '>'
+                // v1.3.15: "w:tr" 长度4，分隔符在 i+5（不是 i+4）
+                val after = if (i + 5 < n) tblXml[i + 5] else '>'
                 if (after == ' ' || after == '>' || after == '/' || after == '\t' || after == '\n') {
                     val trClose = findMatchingTag(tblXml, i, "w:tr")
                     if (trClose > 0) {
@@ -798,7 +803,8 @@ object DocxComparator {
                         val trLen = trContent.length
                         while (j < trLen) {
                             if (trContent.startsWith("<w:tc", j)) {
-                                val tcAfter = if (j + 4 < trLen) trContent[j + 4] else '>'
+                                // v1.3.15: "w:tc" 长度4，分隔符在 j+5
+                                val tcAfter = if (j + 5 < trLen) trContent[j + 5] else '>'
                                 if (tcAfter == ' ' || tcAfter == '>' || tcAfter == '/' || tcAfter == '\t' || tcAfter == '\n') {
                                     val tcClose = findMatchingTag(trContent, j, "w:tc")
                                     if (tcClose > 0) {
@@ -1191,18 +1197,15 @@ object DocxComparator {
     )
 
     /**
-     * v1.3.13: 统计修订档本身的总字数（与 App 统一口径一致：fe + nc）。
-     * 用于计算"涉及修改的句子总字数 = 修订档��字数 − 黑色整句字数"。
+     * v1.3.15: 统计修订档本身的总字数（与 App 统一口径一致：fe + nc）。
+     * 用于计算"涉及修改的句子总字数 = 修订档总字数 − 黑色整句字数"。
      *
-     * 修复 v1.3.9 的 bug：此前用 Regex(DOT_MATCHES_ALL) 匹配 <w:t>，
-     * 对大文档会匹配到异常内容（如样式定义、嵌套标签等），导致返回值
-     * 虚高至 30 万+（实测 304559）。现改用 XmlPullParser 精确解析，
-     * 只取 <w:body> 内 <w:p> 段落中的 <w:t> 文本，再用 countTextKotlin
-     * 统计（fe+nc，与 App 其余部分完全一致的口径）。
-     *
-     * v1.3.13 修复：Android KXmlParser 在 isNamespaceAware=false 时，
-     * parser.name (getName()) 仍可能返回带前缀的限定名（如 "w:body" 而非 "body"），
-     * 导致标签匹配全失败、返回值恒为 0。现用 localName() 兼容两种行为。
+     * 修复历史：
+     *   v1.3.9: Regex(DOT_MATCHES_ALL) 匹配 <w:t> → 大文档返回 30 万+（虚高）
+     *   v1.3.10: 改用 XmlPullParser，只取 <w:body> 内 <w:p> 段落中的 <w:t>
+     *   v1.3.13: Android KXmlParser parser.name 返回带前缀名 → substringAfterLast(':')
+     *   v1.3.15: 发现只统计 <w:p> 忽略 <w:tbl> 表格！问卷 Section B/C/D 全在表格内
+     *           → revTotalChars 严重偏低。现同时提取表格内 <w:t> 文本参与统计。
      */
     private fun computeRevDocTotalChars(revPath: String): Int {
         try {
@@ -1216,16 +1219,20 @@ object DocxComparator {
                 var inBody = false
                 var inP = false
                 var inT = false
+                // v1.3.15: 也收集表格内的文字（表格不在 <w:p> 内）
+                var inTbl = false
                 var eventType = parser.eventType
                 while (eventType != XmlPullParser.END_DOCUMENT) {
                     when (eventType) {
                         XmlPullParser.START_TAG -> {
-                            // v1.3.13: 兼容带前缀(w:body)和不带前缀(body)两种格式
                             val raw = parser.name
                             val name = raw.substringAfterLast(':')
                             if (name == "body") inBody = true
                             else if (inBody && name == "p") inP = true
                             else if (inP && name == "t") inT = true
+                            // v1.3.15: 进入表格时标记（表格内的 <w:t> 直接收集）
+                            else if (inBody && name == "tbl") inTbl = true
+                            else if (inTbl && name == "t") inT = true
                         }
                         XmlPullParser.TEXT -> {
                             if (inT) sb.append(parser.text)
@@ -1235,12 +1242,12 @@ object DocxComparator {
                             val name = raw.substringAfterLast(':')
                             if (name == "t") inT = false
                             else if (name == "p") inP = false
+                            else if (name == "tbl") inTbl = false
                             else if (name == "body") inBody = false
                         }
                     }
                     eventType = parser.next()
                 }
-                // 用 App 统一的 fe+nc 口径统计（与 Word 字数一致）
                 return countTextKotlin(sb.toString()).first
             }
         } catch (e: Exception) {
