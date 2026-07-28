@@ -32,7 +32,6 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -1935,7 +1934,7 @@ private fun exportUnreliable(
 // v1.1.1: 文档比较界面（仿 Word「审阅 → 比较」）
 // ═══════════════════════════════════════════════════════════════════════════
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CompareScreen(
     context: android.content.Context,
@@ -2059,17 +2058,20 @@ fun CompareScreen(
                 Text("比较设置", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
                 HorizontalDivider()
                 // v1.3.10: 紧凑布局，一行放多个选项（删除了无用的「空格」选项）
-                // v1.3.12: 调整间距使换行后对齐更美观
-                androidx.compose.foundation.layout.FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    CompareCheck("大小写更改", optCase) { optCase = it }
-                    CompareCheck("表格", optTable) { optTable = it }
-                    CompareCheck("页眉和页脚", optHf) { optHf = it }
-                    CompareCheck("脚注和尾注", optFn) { optFn = it }
-                    CompareCheck("文本框", optTb) { optTb = it }
-                    CompareCheck("域", optField) { optField = it }
+                // v1.3.13: 改用 Column+Row 固定权重网格，解决 FlowRow 换行后选择框纵向不对齐问题
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        CompareCheck("大小写更改", optCase) { optCase = it }
+                        CompareCheck("表格", optTable) { optTable = it }
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        CompareCheck("页眉和页脚", optHf) { optHf = it }
+                        CompareCheck("脚注和尾注", optFn) { optFn = it }
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        CompareCheck("文本框", optTb) { optTb = it }
+                        CompareCheck("域", optField) { optField = it }
+                    }
                 }
             }
         }
@@ -2179,7 +2181,7 @@ private fun CompareFileCard(label: String, name: String?, btnText: String,
 private fun CompareCheck(label: String, checked: Boolean, onToggle: (Boolean) -> Unit) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.height(IntrinsicSize.Min)
+        modifier = Modifier.weight(1f)
     ) {
         Checkbox(checked = checked, onCheckedChange = onToggle)
         Text(label, modifier = Modifier.padding(start = 4.dp))

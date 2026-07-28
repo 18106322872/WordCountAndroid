@@ -1045,14 +1045,18 @@ object DocxComparator {
     )
 
     /**
-     * v1.3.10: 统计修订档本身的总字数（与 App 统一口径一致：fe + nc）。
-     * 用于计算"涉及修改的句子总字数 = 修订档总字数 − 黑色整句字数"。
+     * v1.3.13: 统计修订档本身的总字数（与 App 统一口径一致：fe + nc）。
+     * 用于计算"涉及修改的句子总字数 = 修订档��字数 − 黑色整句字数"。
      *
      * 修复 v1.3.9 的 bug：此前用 Regex(DOT_MATCHES_ALL) 匹配 <w:t>，
      * 对大文档会匹配到异常内容（如样式定义、嵌套标签等），导致返回值
      * 虚高至 30 万+（实测 304559）。现改用 XmlPullParser 精确解析，
      * 只取 <w:body> 内 <w:p> 段落中的 <w:t> 文本，再用 countTextKotlin
      * 统计（fe+nc，与 App 其余部分完全一致的口径）。
+     *
+     * v1.3.13 修复：Android KXmlParser 在 isNamespaceAware=false 时，
+     * parser.name (getName()) 仍可能返回带前缀的限定名（如 "w:body" 而非 "body"），
+     * 导致标签匹配全失败、返回值恒为 0。现用 localName() 兼容两种行为。
      */
     private fun computeRevDocTotalChars(revPath: String): Int {
         try {
@@ -1070,7 +1074,9 @@ object DocxComparator {
                 while (eventType != XmlPullParser.END_DOCUMENT) {
                     when (eventType) {
                         XmlPullParser.START_TAG -> {
-                            val name = parser.name
+                            // v1.3.13: 兼容带前缀(w:body)和不带前缀(body)两种格式
+                            val raw = parser.name
+                            val name = raw.substringAfterLast(':')
                             if (name == "body") inBody = true
                             else if (inBody && name == "p") inP = true
                             else if (inP && name == "t") inT = true
@@ -1079,7 +1085,8 @@ object DocxComparator {
                             if (inT) sb.append(parser.text)
                         }
                         XmlPullParser.END_TAG -> {
-                            val name = parser.name
+                            val raw = parser.name
+                            val name = raw.substringAfterLast(':')
                             if (name == "t") inT = false
                             else if (name == "p") inP = false
                             else if (name == "body") inBody = false
