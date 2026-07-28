@@ -1337,7 +1337,7 @@ object DocxComparator {
                 val cellTexts = mutableListOf<String>()
                 for (tcM in Regex("<w:tc\\b.*?</w:tc>", RegexOption.DOT_MATCHES_ALL).findAll(trM.value)) {
                     val texts = Regex("<w:t[^>]*>([^<]*)</w:t>").findAll(tcM.value)
-                        .map { it.groupValues[1] }.filter { it.isNotEmpty() }
+                        .map { it.groupValues[1] }.filter { it.isNotEmpty() }.toList()
                     if (texts.isNotEmpty()) cellTexts.add(texts.joinToString(""))
                 }
                 if (cellTexts.isNotEmpty()) {
