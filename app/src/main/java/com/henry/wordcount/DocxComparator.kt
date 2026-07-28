@@ -764,28 +764,62 @@ object DocxComparator {
      * - <w:tbl> 表格内每个单元格的段落拼接为伪段落（单元格间用空格分隔）
      */
     /**
-     * 从 body 内容中提取所有段落与表格行。
-     * v1.3.17: 改用正则直接匹配，替换原手写的 findMatchingTag 嵌套标签索引。
-     * 原实现在部分运行环境下对嵌套 <w:tbl>/<w:tr>/<w:tc> 的边界处理存在不一致，
-     * 导致表格行被静默漏掉（结果文档表格全丢失）。正则在各运行时行为一致。
+     * 从 body 内容中提取所有段落与表格行（按文档自然顺序）。
+     * v1.3.19: 重写为单遍扫描，按 <w:tbl> / <w:p> 在文档中的实际出现位置交替提取。
      *
-     * 策略：
-     *   - 先用 <w:tbl> 正则取出每个表格，内部按 <w:tr> 提取行（保留原始 <w:tr> XML）
-     *   - 再从「去除所有表格」的 body 中用 <w:p> 正则提取顶层段落，
-     *     避免单元格内的 <w:p> 被重复计入。
+     * v1.3.17/v1.3.18 的「先提全部表格行、再提全部段落」策略有致命缺陷：
+     *   paras 列表中所有 TR 排在所有 P 之前 → 文档顺序完全破坏 →
+     *   alignParagraphs 用索引(i,j)做位置邻近匹配时位置信息错误 →
+     *   mergeInDocumentOrder 输出顺序也错 → 段落乱序、修改标记错位、表格结构破碎。
+     *
+     * 策略：单遍扫描，每次找下一个最近的 <w:tbl 或 <w:p> 起始标签，
+     *   用非贪婪正则匹配完整元素，按出现顺序加入 result 列表。
      */
     private fun extractParasAndTableParas(content: String, result: MutableList<Para>) {
         val tblPattern = Regex("<w:tbl\\b.*?</w:tbl>", RegexOption.DOT_MATCHES_ALL)
-        // 1. 表格行（保留原始 <w:tr> XML，含完整格式）
-        for (tblM in tblPattern.findAll(content)) {
-            extractTableParagraphs(tblM.value, result)
-        }
-        // 2. 顶层段落（先移除表格区域，避免单元格内 <w:p> 被重复计入）
-        val noTables = tblPattern.replace(content, "")
-        for (pM in Regex("<w:p\\b.*?</w:p>", RegexOption.DOT_MATCHES_ALL).findAll(noTables)) {
-            val pXml = pM.value
-            val text = extractParaText(pXml)
-            result.add(Para(pXml, text))
+        val pPattern = Regex("<w:p\\b.*?</w:p>", RegexOption.DOT_MATCHES_ALL)
+        var pos = 0
+        val len = content.length
+        while (pos < len) {
+            // 找下一个 <w:tbl 或 <w:p> 的起始位置
+            val nextTbl = content.indexOf("<w:tbl", pos)
+            val nextP = content.indexOf("<w:p", pos)
+
+            // 都找不到 → 结束
+            if (nextTbl < 0 && nextP < 0) break
+
+            // 取最近的一个
+            val useTbl = when {
+                nextTbl < 0 -> false
+                nextP < 0 -> true
+                else -> nextTbl <= nextP  // 位置相同时表格优先（表格通常包含段落）
+            }
+
+            if (useTbl) {
+                val m = tblPattern.matchAt(content, nextTbl)
+                if (m != null) {
+                    extractTableParagraphs(m.value, result)
+                    pos = m.range.last
+                } else {
+                    pos = nextTbl + 1
+                }
+            } else {
+                // 验证 <w:p 后面是合法标签字符（避免匹配 <w:pPr> 等）
+                val afterP = if (nextP + 4 < len) content[nextP + 4] else '>'
+                if (afterP == ' ' || afterP == '>' || afterP == '/' || afterP == '\t' || afterP == '\n') {
+                    val m = pPattern.matchAt(content, nextP)
+                    if (m != null) {
+                        val pXml = m.value
+                        val text = extractParaText(pXml)
+                        result.add(Para(pXml, text))
+                        pos = m.range.last
+                    } else {
+                        pos = nextP + 1
+                    }
+                } else {
+                    pos = nextP + 4
+                }
+            }
         }
     }
 
@@ -1064,7 +1098,7 @@ object DocxComparator {
         }
     }
 
-    /** 合并：以 fontRPr 的字体/字号为主，保留原 rPr 中的颜色/下划线/加粗/斜体。 */
+    /** 合并：保留原 rPr 中的字体/字号（已有则不覆盖），只补充缺失的 + 保留颜色/下划线等标记。 */
     private fun mergeFontRPr(origRPr: String, fontRPr: String): String {
         val extras = StringBuilder()
         for (tag in listOf("w:color", "w:u", "w:b", "w:i", "w:highlight")) {
@@ -1072,8 +1106,31 @@ object DocxComparator {
                 ?: Regex("<$tag\\b[^>]*>.*?</$tag>", RegexOption.DOT_MATCHES_ALL).find(origRPr)
             if (m != null) extras.append(m.value)
         }
+        // v1.3.19: 不再强制覆盖原字体/字号。如果原 run 已有 rFonts/sz/szCs，保留原文；
+        // 只在缺失时从 fontRPr（修订档主流字体）补充。避免标题/加粗等格式被统一成同一种字体。
         val fontInner = fontRPr.removePrefix("<w:rPr>").removeSuffix("</w:rPr>")
-        return "<w:rPr>$fontInner$extras</w:rPr>"
+        val sb = StringBuilder()
+        // 检查原 rPr 是否已有字体/字号属性
+        val hasFonts = origRPr.contains("<w:rFonts")
+        val hasSz = origRPr.contains("<w:sz ") || origRPr.contains("<w:sz/")
+        val hasSzCs = origRPr.contains("<w:szCs ") || origRPr.contains("<w:szCs/")
+        if (!hasFonts) {
+            val fm = Regex("<w:rFonts\\b[^>]*/>").find(fontInner)
+                ?: Regex("<w:rFonts\\b[^>]*>.*?</w:rFonts>", RegexOption.DOT_MATCHES_ALL).find(fontInner)
+            if (fm != null) sb.append(fm.value)
+        }
+        if (!hasSz) {
+            val sm = Regex("<w:sz\\b[^>]*/>").find(fontInner)
+                ?: Regex("<w:sz\\b[^>]*>.*?</w:sz>", RegexOption.DOT_MATCHES_ALL).find(fontInner)
+            if (sm != null) sb.append(sm.value)
+        }
+        if (!hasSzCs) {
+            val scm = Regex("<w:szCs\\b[^>]*/>").find(fontInner)
+                ?: Regex("<w:szCs\\b[^>]*>.*?</w:szCs>", RegexOption.DOT_MATCHES_ALL).find(fontInner)
+            if (scm != null) sb.append(scm.value)
+        }
+        sb.append(extras.toString())
+        return if (sb.isNotEmpty()) "<w:rPr>$sb</w:rPr>" else origRPr
     }
 
     /**
@@ -1353,9 +1410,9 @@ object DocxComparator {
     }
 
     /**
-     * v1.3.16: 将 bodyParts 组装为文档 body 内容。
+     * v1.3.19: 将 bodyParts 组装为文档 body 内容。
      * 关键改进：连续的 <w:tr> 元素自动包裹到 <w:tbl>...</w:tbl> 中，
-     * 恢复表格结构（此前表格行被压平为独立段落，导致格式和布局全丢）。
+     * 恢复表格结构。增强检测：支持被 <w:del>/<w:ins> 包裹的 <w:tr>。
      */
     private fun buildBodyContent(bodyXmlParts: List<String>): String {
         val sb = StringBuilder()
@@ -1372,18 +1429,25 @@ object DocxComparator {
             }
         }
 
+        // 判断一个 bodyPart 是否为表格行（含被修订标记包裹的情况）
+        fun isTableRow(part: String): Boolean {
+            val t = part.trim()
+            return when {
+                t.startsWith("<w:tr") -> true
+                t.startsWith("<w:del>") && t.contains("<w:tr") -> true
+                t.startsWith("<w:ins>") && t.contains("<w:tr") -> true
+                else -> false
+            }
+        }
+
         for (part in bodyXmlParts) {
-            val trimmed = part.trim()
-            if (trimmed.startsWith("<w:tr") || trimmed.startsWith("<w:del>") && trimmed.contains("<w:tr")) {
-                // 表格行（可能被 <w:del> 或 <w:ins> 包裹）
+            if (isTableRow(part)) {
                 tblRowBuffer.add(part)
             } else {
-                // 非表格内容：先刷新累积的表格行
                 flushTable()
                 sb.append(part).append("\n")
             }
         }
-        // 刷新末尾可能的表格
         flushTable()
 
         return sb.toString()
