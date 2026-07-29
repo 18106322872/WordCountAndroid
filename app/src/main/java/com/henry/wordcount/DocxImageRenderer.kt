@@ -154,15 +154,50 @@ object DocxImageRenderer {
         val res = mutableListOf<Block>()
         var i = 0
         while (i < tx.length) {
-            val p = tx.indexOf("<w:p", i)
-            if (p < 0) break
-            val after = tx.getOrElse(p + 4) { '>' }
-            if (after !in " >/\t\n") { i = p + 5; continue }
-            val close = findCloseTag(tx, p, "<w:p", "</w:p>")
-            res.add(parseParagraphBlock(tx.substring(p, close), numCounters))
-            i = close
+            val tr = tx.indexOf("<w:tr", i)
+            if (tr < 0) break
+            val after = tx.getOrElse(tr + 4) { '>' }
+            if (after !in " >/\t\n") { i = tr + 5; continue }
+            val trClose = findCloseTag(tx, tr, "<w:tr", "</w:tr>")
+            val trXml = tx.substring(tr, trClose)
+            val rowSegs = mutableListOf<Seg>()
+            var firstCell = true
+            var j = 0
+            while (j < trXml.length) {
+                val tc = trXml.indexOf("<w:tc", j)
+                if (tc < 0) break
+                val tcafter = trXml.getOrElse(tc + 4) { '>' }
+                if (tcafter !in " >/\t\n") { j = tc + 5; continue }
+                val tcClose = findCloseTag(trXml, tc, "<w:tc", "</w:tc>")
+                val cellSegs = parseCell(trXml.substring(tc, tcClose), numCounters)
+                if (!firstCell && cellSegs.isNotEmpty()) {
+                    rowSegs.add(Seg("   ", Color.BLACK, false, false, DEFAULT_SZ))
+                }
+                rowSegs.addAll(cellSegs)
+                firstCell = false
+                j = tcClose
+            }
+            if (rowSegs.isNotEmpty()) {
+                res.add(Block(rowSegs, 0, 0, 0, ""))
+            }
+            i = trClose
         }
         return res
+    }
+    
+    private fun parseCell(tcXml: String, numCounters: MutableMap<NumKey, Int>): List<Seg> {
+        val segs = mutableListOf<Seg>()
+        var i = 0
+        while (i < tcXml.length) {
+            val p = tcXml.indexOf("<w:p", i)
+            if (p < 0) break
+            val after = tcXml.getOrElse(p + 4) { '>' }
+            if (after !in " >/\t\n") { i = p + 5; continue }
+            val close = findCloseTag(tcXml, p, "<w:p", "</w:p>")
+            segs.addAll(parseParagraphSegs(tcXml.substring(p, close)))
+            i = close
+        }
+        return segs
     }
 
     private fun parseParagraphBlock(px: String, numCounters: MutableMap<NumKey, Int>): Block {

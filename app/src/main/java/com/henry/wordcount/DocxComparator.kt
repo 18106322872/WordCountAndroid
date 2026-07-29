@@ -868,8 +868,8 @@ object DocxComparator {
         val gtIdx = cellXml.indexOf('>')
         if (gtIdx < 0) return ""
         var s = cellXml.substring(gtIdx + 1)
-        // 去掉闭标签 </w:tc>
-        if (s.endsWith("</w:tc>")) s = s.dropLast(5)
+        // 去掉闭标签 </w:tc> （v1.3.24 修复：必须用 removeSuffix，dropLast(5) 会残留 " </" 导致 </</w:tc> 非法 token）
+        if (s.endsWith("</w:tc>")) s = s.removeSuffix("</w:tc>")
         // 去掉 <w:tcPr>...</w:tcPr>
         s = Regex("<w:tcPr.*?</w:tcPr>", RegexOption.DOT_MATCHES_ALL).replace(s, "")
         return s
@@ -889,8 +889,7 @@ object DocxComparator {
             val gt = t.indexOf('>')
             if (gt > 0) {
                 val inner = t.substring(gt + 1)
-                if (inner.endsWith("</w:pod>")) return inner.dropLast(6) // shouldn't happen
-                if (inner.endsWith("</w:p>")) return inner.dropLast(6)
+                if (inner.endsWith("</w:p>")) return inner.removeSuffix("</w:p>")
             }
         }
         return xml
@@ -1515,7 +1514,7 @@ object DocxComparator {
      *
      * 公式（用户指定）：修改字数 = 修订档总词数 − 黑色整句词数     *   1. totalWords = 所有非删除文本(<w:t>黑+<w:ins>蓝)的词数(fe+nc)     *   2. blackWholeWords = 完全不含<w:ins>的句子中，黑字文本的词数     *   3. modifiedWords = totalWords − blackWholeWords     */
     private fun computeResultDocStatsSimple(xml: String): ResultDocStats {
-        val delim = setOf('。', '！', '？', '；', '\n')
+        val delim = setOf('。', '！', '？', '；', '…', '\n', '.', '!', '?', ';', ':')
 
         // 收集所有需要统计的文本块（顶层 <w:p> + 表格行原始 XML）
         val allBlocks = mutableListOf<String>()
@@ -1535,23 +1534,35 @@ object DocxComparator {
         var blackWholeWords = 0
 
         for (px in allBlocks) {
-            // 收集 <w:ins> 块范围
-            val insBlocks = mutableListOf<IntRange>()
-            for (m in Regex("<w:ins[^>]*>.*?</w:ins>", RegexOption.DOT_MATCHES_ALL).findAll(px)) {
-                insBlocks.add(m.range)
-            }
-            fun inIns(pos: Int): Boolean = insBlocks.any { pos in it }
-
+            // v1.3.24: 栈式解析。ins/del 深度与 seg 文本处于同一坐标系（fullText 顺序），
+            // 旧版 inIns(tm.range.first) 以 XML 坐标判断，与 seg 的 fullText 坐标错位，
+            // 导致所有 <w:ins> 检测失败 -> 全算黑色整句 -> blackWhole 虚高 -> modified 暴跌。
             data class Seg(val text: String, val isIns: Boolean, val isBlack: Boolean, val isDel: Boolean)
+            var insDepth = 0
+            var delDepth = 0
             val segs = mutableListOf<Seg>()
-            for (tm in Regex("<w:(t|delText)[^>]*>(.*?)</w:\\1>", RegexOption.DOT_MATCHES_ALL).findAll(px)) {
-                val tag = tm.groupValues[1]
-                val txt = tm.groupValues[2]
-                if (txt.isEmpty()) continue
-                val isDel = (tag == "delText")
-                val isIns = !isDel && inIns(tm.range.first)
-                val isBlack = !isDel && !isIns
-                segs.add(Seg(txt, isIns, isBlack, isDel))
+            val tokenRe = Regex(
+                "<w:ins\\b[^>]*>|</w:ins>|<w:del\\b[^>]*>|</w:del>|<w:(t|delText)\\b[^>]*>(.*?)</w:(?:t|delText)>",
+                RegexOption.DOT_MATCHES_ALL
+            )
+            for (m in tokenRe.findAll(px)) {
+                val v = m.value
+                when {
+                    v.startsWith("<w:ins") -> insDepth++
+                    v == "</w:ins>" -> if (insDepth > 0) insDepth = insDepth - 1
+                    v.startsWith("<w:del") -> delDepth++
+                    v == "</w:del>" -> if (delDepth > 0) delDepth = delDepth - 1
+                    else -> {
+                        val tag = m.groupValues[1]
+                        val txt = m.groupValues[2]
+                        if (txt.isNotEmpty()) {
+                            val isDel = (tag == "delText")
+                            val isIns = !isDel && insDepth > 0
+                            val isBlack = !isDel && !isIns
+                            segs.add(Seg(txt, isIns, isBlack, isDel))
+                        }
+                    }
+                }
             }
 
             // 收集全部非删除文本用于 totalWords（词数口径）
@@ -1705,7 +1716,19 @@ object DocxComparator {
         if (bodyClose < 0) return origDoc
         val sectPrMatch = Regex("<w:sectPr.*?</w:sectPr>", RegexOption.DOT_MATCHES_ALL).find(origDoc)
         val sectPr = sectPrMatch?.value ?: ""
-        return origDoc.substring(0, bodyStart) + "\n" + bodyContent + "\n" + sectPr + "\n" + origDoc.substring(bodyClose)
+        val raw = origDoc.substring(0, bodyStart) + "\n" + bodyContent + "\n" + sectPr + "\n" + origDoc.substring(bodyClose)
+        // v1.3.24: 清理非法 XML token —— </</ 是多余的前缀导致 Expat "invalid token"
+        return sanitizeXml(raw)
+    }
+
+    /** v1.3.24: 清理生成 XML 中的常见非法模式，确保 Word 能打开。 */
+    private fun sanitizeXml(xml: String): String {
+        var s = xml
+        // 1. 去掉多余的 </ 前缀（如 </</w:tc> → </w:tc>）
+        s = s.replace("</</", "</")
+        // 2. 确保没有空 <w:del/> 或 <w:ins/> （某些路径可能产生）
+        // 这些在 OOXML 中虽然合法但 Word 处理可能有问题，保持原样不处理
+        return s
     }
 
     private fun ensureTrackRevisions(originalSettings: String): String {
