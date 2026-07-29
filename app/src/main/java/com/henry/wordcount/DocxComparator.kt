@@ -889,7 +889,7 @@ object DocxComparator {
             val gt = t.indexOf('>')
             if (gt > 0) {
                 val inner = t.substring(gt + 1)
-                if (inner.endsWith("</w:pod>")) return inner.dropLast(6)) // shouldn't happen
+                if (inner.endsWith("</w:pod>")) return inner.dropLast(6) // shouldn't happen
                 if (inner.endsWith("</w:p>")) return inner.dropLast(6)
             }
         }
