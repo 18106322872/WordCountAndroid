@@ -108,94 +108,95 @@ object DocxImageRenderer {
         }
     }
 
+    /**
+     * v1.3.25: 用正则提取 <w:p> 和 <w:tbl>（替代 v1.3.24 的手动 indexOf+findCloseTag 深度计数）。
+     * 教训（v1.3.18/v1.3.23）：OOXML 嵌套结构下手写标签匹配/深度计数极易错乱；
+     * 正则 DOT_MATCHES_ALL 非贪婪匹配在跨运行时一致且更可靠。
+     */
     private fun parseBody(xml: String, numCounters: MutableMap<NumKey, Int>): List<Block> {
         val blocks = mutableListOf<Block>()
-        val body = Regex("""<w:body.*?>(.*?)</w:body>""", RegexOption.DOT_MATCHES_ALL)
-            .find(xml)?.groupValues?.get(1) ?: xml
-        var i = 0
-        val n = body.length
-        while (i < n) {
-            val p = body.indexOf("<w:p", i)
-            val t = body.indexOf("<w:tbl", i)
-            val next = when {
-                p < 0 && t < 0 -> -1
-                p < 0 -> t
-                t < 0 -> p
-                else -> minOf(p, t)
-            }
-            if (next < 0) break
-            // "<w:p" 长 4；"<w:tbl" 长 6。检查标签后的字符是否为空白/结束符，
-            // 避免把 <w:pPr> / <w:tblStyle> 等误判为段落/表格。
-            val tagLen = if (p >= 0 && next == p) 4 else 6
-            val after = body.getOrElse(next + tagLen) { '>' }
-            if (after !in " >/\t\n") { i = next + tagLen + 1; continue }
-            if (next == p) {
-                var close = findCloseTag(body, next, "<w:p", "</w:p>")
-                if (close >= body.length) {
-                    val last = body.lastIndexOf("</w:p>")
-                    if (last >= 0) close = last + 6
-                }
-                blocks.add(parseParagraphBlock(body.substring(next, close), numCounters))
-                i = close
+        val bodyMatch = Regex("""<w:body\b[^>]*>(.*?)</w:body>""", RegexOption.DOT_MATCHES_ALL)
+            .find(xml)
+        val body = bodyMatch?.groupValues?.get(1) ?: xml
+
+        // 收集所有 <w:p> 和 <w:tbl> 的 (start, end, type) 位置
+        data class Elem(val start: Int, val end: Int, val isTbl: Boolean)
+        val elems = mutableListOf<Elem>()
+
+        // 正则提取所有顶层 <w:p>（非贪婪，按出现顺序）
+        for (m in Regex("""<w:p\b[^>]*>.*?</w:p>""", RegexOption.DOT_MATCHES_ALL).findAll(body)) {
+            elems.add(Elem(m.range.first, m.range.last + 1, false))
+        }
+        // 正则提取所有 <w:tbl>
+        for (m in Regex("""<w:tbl\b.*?</w:tbl>""", RegexOption.DOT_MATCHES_ALL).findAll(body)) {
+            elems.add(Elem(m.range.first, m.range.last + 1, true))
+        }
+
+        // 按位置排序，依次处理（保持文档自然顺序）
+        elems.sortBy { it.start }
+        for (elem in elems) {
+            val xmlSnippet = body.substring(elem.start, elem.end)
+            if (elem.isTbl) {
+                blocks.addAll(parseTable(xmlSnippet, numCounters))
             } else {
-                var close = findCloseTag(body, next, "<w:tbl", "</w:tbl>")
-                if (close >= body.length) {
-                    val last = body.lastIndexOf("</w:tbl>")
-                    if (last >= 0) close = last + 6
-                }
-                blocks.addAll(parseTable(body.substring(next, close), numCounters))
-                i = close
+                blocks.add(parseParagraphBlock(xmlSnippet, numCounters))
             }
         }
         return blocks
     }
 
+    /**
+     * v1.3.25: 用正则提取 <w:tr>/<w:tc>（替代手动 indexOf+findCloseTag）。
+     * 每行 = 一个 Block，单元格间用 "   " 分隔横向排版。
+     * 保底：如果结构解析失败，直接从表格 XML 抽全部文本作为单个 Block。
+     */
     private fun parseTable(tx: String, numCounters: MutableMap<NumKey, Int>): List<Block> {
         val res = mutableListOf<Block>()
-        var i = 0
-        while (i < tx.length) {
-            val tr = tx.indexOf("<w:tr", i)
-            if (tr < 0) break
-            val after = tx.getOrElse(tr + 4) { '>' }
-            if (after !in " >/\t\n") { i = tr + 5; continue }
-            val trClose = findCloseTag(tx, tr, "<w:tr", "</w:tr>")
-            val trXml = tx.substring(tr, trClose)
+
+        // 正则提取所有 <w:tr>
+        val trMatches = Regex("""<w:tr\b[^>]*>.*?</w:tr>""", RegexOption.DOT_MATCHES_ALL).findAll(tx)
+        var hasContent = false
+        for (trM in trMatches) {
+            val trXml = trM.value
             val rowSegs = mutableListOf<Seg>()
             var firstCell = true
-            var j = 0
-            while (j < trXml.length) {
-                val tc = trXml.indexOf("<w:tc", j)
-                if (tc < 0) break
-                val tcafter = trXml.getOrElse(tc + 4) { '>' }
-                if (tcafter !in " >/\t\n") { j = tc + 5; continue }
-                val tcClose = findCloseTag(trXml, tc, "<w:tc", "</w:tc>")
-                val cellSegs = parseCell(trXml.substring(tc, tcClose), numCounters)
+
+            // 正则提取该行所有 <w:tc>
+            val tcMatches = Regex("""<w:tc\b[^>]*>.*?</w:tc>""", RegexOption.DOT_MATCHES_ALL).findAll(trXml)
+            for (tcM in tcMatches) {
+                val cellSegs = parseCell(tcM.value, numCounters)
                 if (!firstCell && cellSegs.isNotEmpty()) {
                     rowSegs.add(Seg("   ", Color.BLACK, false, false, DEFAULT_SZ))
                 }
                 rowSegs.addAll(cellSegs)
                 firstCell = false
-                j = tcClose
             }
+
             if (rowSegs.isNotEmpty()) {
                 res.add(Block(rowSegs, 0, 0, 0, ""))
+                hasContent = true
             }
-            i = trClose
         }
+
+        // 保底：如果结构解析没产生任何内容，直接抽文本
+        if (!hasContent) {
+            val fallbackTexts = Regex("""<w:t[^>]*>([^<]*)</w:t>""").findAll(tx)
+                .map { unescape(it.groupValues[1]) }.filter { it.isNotEmpty() }
+            if (fallbackTexts.any()) {
+                val segs = fallbackTexts.map { Seg(it, Color.BLACK, false, false, DEFAULT_SZ) }
+                res.add(Block(segs.toList(), 0, 0, 0, ""))
+            }
+        }
+
         return res
     }
     
+    /** v1.3.25: 用正则提取单元格内 <w:p>（替代手动 indexOf+findCloseTag）。 */
     private fun parseCell(tcXml: String, numCounters: MutableMap<NumKey, Int>): List<Seg> {
         val segs = mutableListOf<Seg>()
-        var i = 0
-        while (i < tcXml.length) {
-            val p = tcXml.indexOf("<w:p", i)
-            if (p < 0) break
-            val after = tcXml.getOrElse(p + 4) { '>' }
-            if (after !in " >/\t\n") { i = p + 5; continue }
-            val close = findCloseTag(tcXml, p, "<w:p", "</w:p>")
-            segs.addAll(parseParagraphSegs(tcXml.substring(p, close)))
-            i = close
+        val pMatches = Regex("""<w:p\b[^>]*>.*?</w:p>""", RegexOption.DOT_MATCHES_ALL).findAll(tcXml)
+        for (pM in pMatches) {
+            segs.addAll(parseParagraphSegs(pM.value))
         }
         return segs
     }
