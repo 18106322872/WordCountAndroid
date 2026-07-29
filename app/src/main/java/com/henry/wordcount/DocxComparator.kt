@@ -1092,7 +1092,26 @@ object DocxComparator {
         return -1
     }
 
+    /**
+     * 提取顶层 &lt;w:p&gt; 段落（排除表格内部的）。
+     * v1.3.27: 增加表格排除。旧版提取所有 &lt;w:p&gt; 包括表格内的，
+     * 导致 computeResultDocStatsSimple 中表格内容被重复统计（一次作为段落、一次作为表格行），
+     * blackWhole 虚高 → modified 偏低。
+     */
     private fun extractTopLevelParas(xml: String): List<String> {
+        // 先收集所有 <w:tbl>...</w:tbl> 的位置范围
+        val tblRanges = mutableListOf<Pair<Int, Int>>()
+        for (m in Regex("<w:tbl\\b.*?</w:tbl>", RegexOption.DOT_MATCHES_ALL).findAll(xml)) {
+            tblRanges.add(Pair(m.range.first, m.range.last + 1))
+        }
+
+        fun isInTable(pos: Int): Boolean {
+            for ((s, e) in tblRanges) {
+                if (pos in s until e) return true
+            }
+            return false
+        }
+
         val result = mutableListOf<String>()
         var i = 0
         val n = xml.length
@@ -1101,6 +1120,11 @@ object DocxComparator {
             if (open < 0) break
             val after = if (open + 4 < n) xml[open + 4] else '>'
             if (after != ' ' && after != '>' && after != '/' && after != '\t' && after != '\n') {
+                i = open + 4
+                continue
+            }
+            // v1.3.27: 跳过表格内的 <w:p>
+            if (isInTable(open)) {
                 i = open + 4
                 continue
             }
