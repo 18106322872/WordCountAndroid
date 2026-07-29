@@ -1405,8 +1405,8 @@ object DocxComparator {
     // ══════════════════════════════════════════════════════
 
     private data class ResultDocStats(
-        val totalChars: Int,                 // 修订侧总字数（<w:t> 黑+蓝，不含删除、不含空格）
-        val blackWholeSentenceChars: Int     // 无 <w:ins> 句子中的黑字(<w:t>非插入)字数（不含空格）
+        val totalChars: Int,                 // 修订侧总词数（words口径，<w:t> 黑+蓝）
+        val blackWholeSentenceChars: Int     // 无 <w:ins> 句子中的黑字词数（words口径）
     )
 
     /**
@@ -1439,10 +1439,10 @@ object DocxComparator {
                 for (m in Regex("<w:t(?![a-zA-Z])[^>]*>(.*?)</w:t>", RegexOption.DOT_MATCHES_ALL).findAll(bodyContent)) {
                     sb.append(m.groupValues[1])
                 }
-                // v1.3.17: 返回【字符数】(不含空格)，与 computeResultDocStatsSimple 的
-                // blackWholeSentenceChars 同单位。此前误用 .first(词数) 与字符数相减，
-                // 导致"修改涉及句子总字数"被严重低估（如英文文档 916 词 vs 数千字符）。
-                return countTextKotlin(sb.toString()).fourth
+                // v1.3.22: 返回【词数】(words = fe + nc)，与 App 统计口径一致。
+                // 用户公式：修改字数 = 修订档总词数 − 黑色整句词数。
+                // v1.3.17~v1.3.21 误用 .fourth(字符数)，导致修改字数超过修订档总字数。
+                return countTextKotlin(sb.toString()).first
             }
         } catch (e: Exception) {
             Log.e(TAG, "computeRevDocTotalChars error", e)
@@ -1464,27 +1464,20 @@ object DocxComparator {
     }
 
     /**
-     * 结果文档字数统计（与 Word「字符数(不计空格)」口径一致，等价于修订档视角）。
+     * 结果文档字数统计（v1.3.22: 统一使用词数 words 口径，与 App 统计一致）。
      *
-     * 口径定义（用户指定：涉及修改句字数 = 修订档总字数 − 黑色整句字数）：
-     *   1. 修订侧总字数 totalChars = 所有 <w:t>（黑字 + 蓝字插入）的字符数，排除空格；
-     *      <w:delText>（红色删除）是「原文档独有、修订档没有」的文字，不计入修订侧总数。
-     *   2. 黑色整句 blackWhole = 完全不含 <w:ins> 的句子中，黑字(<w:t> 非插入)的字符数，排除空格。
-     *      <w:del>（红色删除）表示原文档比修订档多出的文字 —— 修订档该句本身未改动，
-     *      因此删除标记【不破坏】黑色整句判定（只以蓝色 <w:ins> 插入作为“修改”依据）。
-     *   3. 涉及修改的句子总字数 = totalChars − blackWhole。
-     *
-     * 注：空格不计入，与 Word 默认「字符数(不计空格)」一致；数字/英文字母正常计入。
+     * 公式（用户指定）：修改字数 = 修订档总词数 − 黑色整句词数
+     */
+     *   1. totalWords = 所有非删除文本(<w:t>黑+<w:ins>蓝)的词数(fe+nc)，不含<w:delText>
+     *   2. blackWholeWords = 完全不含<w:ins>��句子中，黑字文本的词数
+     *   3. modifiedWords = totalWords − blackWholeWords
      */
     private fun computeResultDocStatsSimple(xml: String): ResultDocStats {
-        var totalChars = 0       // 修订侧总字数（<w:t> 黑+蓝，不含空格，不含删除）
-        var blackWhole = 0       // 无 <w:ins> 句子中的黑字(<w:t> 非插入)字数，不含空格
         val delim = setOf('。', '！', '？', '；', '\n')
 
-        // v1.3.16: 收集所有需要统计的文本块（顶层 <w:p> + 表格行拼接文本）
+        // 收集所有需要统计的文本块（顶层 <w:p> + 表格行拼接文本）
         val allBlocks = mutableListOf<String>()
         allBlocks.addAll(extractTopLevelParas(xml))
-        // 从 <w:tbl> 中提取每行单元格拼接文本
         for (m in Regex("<w:tbl\\b.*?</w:tbl>", RegexOption.DOT_MATCHES_ALL).findAll(xml)) {
             val tblXml = m.value
             for (trM in Regex("<w:tr\\b.*?</w:tr>", RegexOption.DOT_MATCHES_ALL).findAll(tblXml)) {
@@ -1500,8 +1493,11 @@ object DocxComparator {
             }
         }
 
+        var totalWords = 0
+        var blackWholeWords = 0
+
         for (px in allBlocks) {
-            // 仅收集 <w:ins> 块范围（删除块不影响黑色整句判定，故忽略）
+            // 收集 <w:ins> 块范围
             val insBlocks = mutableListOf<IntRange>()
             for (m in Regex("<w:ins[^>]*>.*?</w:ins>", RegexOption.DOT_MATCHES_ALL).findAll(px)) {
                 insBlocks.add(m.range)
@@ -1518,51 +1514,70 @@ object DocxComparator {
                 val isIns = !isDel && inIns(tm.range.first)
                 val isBlack = !isDel && !isIns
                 segs.add(Seg(txt, isIns, isBlack))
-                // 修订侧总数：黑字 + 蓝字插入（不含删除，不含空格）
-                if (!isDel) {
-                    for (ch in txt) if (ch != ' ') totalChars++
-                }
             }
 
+            // 收集全部非删除文本用于 totalWords（词数口径）
+            val allNonDelText = segs.filter { !it.isDel }.joinToString("") { it.text }
+            if (allNonDelText.isNotEmpty()) {
+                totalWords += countTextKotlin(allNonDelText).first
+            }
+
+            // 切句：找出无 <w:ins> 的黑色整句，累加其词数
             val fullText = segs.joinToString("") { it.text }
             if (fullText.isEmpty()) continue
 
-            // char 级标记数组
             val insArr = BooleanArray(fullText.length)
-            val blackArr = BooleanArray(fullText.length)
             var idx = 0
             for (seg in segs) {
                 for (i in 0 until seg.text.length) {
                     val p = idx + i
-                    if (p < fullText.length) {
-                        insArr[p] = seg.isIns
-                        blackArr[p] = seg.isBlack
-                    }
+                    if (p < fullText.length) insArr[p] = seg.isIns
                 }
                 idx += seg.text.length
             }
 
-            // 切句：无 <w:ins> 的句子计为黑色整句，累加其中的黑字（不含空格）
             var sStart = 0
             for (ci in fullText.indices) {
                 if (fullText[ci] in delim) {
                     val sEnd = ci + 1
                     if (sEnd > sStart && !insArr.sliceArray(sStart until sEnd).any { it }) {
-                        for (i in sStart until sEnd) {
-                            if (blackArr[i] && fullText[i] != ' ') blackWhole++
+                        // 黑色整句：收集其中黑字部分的文本，按词数统计
+                        val sentenceText = StringBuilder()
+                        var si = 0
+                        for (seg in segs) {
+                            for (i in 0 until seg.text.length) {
+                                val p = si + i
+                                if (p >= sStart && p < sEnd && seg.isBlack) {
+                                    sentenceText.append(seg.text[i])
+                                }
+                            }
+                            si += seg.text.length
                         }
+                        val st = sentenceText.toString()
+                        if (st.isNotEmpty()) blackWholeWords += countTextKotlin(st).first
                     }
                     sStart = sEnd
                 }
             }
+            // 最后一句
             if (sStart < fullText.length && !insArr.sliceArray(sStart until fullText.length).any { it }) {
-                for (i in sStart until fullText.length) {
-                    if (blackArr[i] && fullText[i] != ' ') blackWhole++
+                val sentenceText = StringBuilder()
+                var si = 0
+                for (seg in segs) {
+                    for (i in 0 until seg.text.length) {
+                        val p = si + i
+                        if (p >= sStart && p < fullText.length && seg.isBlack) {
+                            sentenceText.append(seg.text[i])
+                        }
+                    }
+                    si += seg.text.length
                 }
+                val st = sentenceText.toString()
+                if (st.isNotEmpty()) blackWholeWords += countTextKotlin(st).first
             }
         }
 
-        return ResultDocStats(totalChars, blackWhole)
+        return ResultDocStats(totalWords, blackWholeWords)
     }
 
     /**
