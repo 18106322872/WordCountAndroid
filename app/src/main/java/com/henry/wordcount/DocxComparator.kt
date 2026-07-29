@@ -909,9 +909,8 @@ object DocxComparator {
         return m?.groupValues?.get(1) ?: ""
     }
 
-    companion object {
-        const val DEFAULT_CELL_SZ = 21  // 默认字号（半磅，10.5pt）
-    }
+    // v1.3.23: 默认字号常量（注意：DocxComparator 是 object 而非 class，不能用 companion object）
+    private const val DEFAULT_CELL_SZ = 21  // 默认字号（半磅，10.5pt）
 
     /** 从单元格 XML 中提取 WRun 列表（用于表格内 diff 的原文 run 定位）。 */
     private fun extractWRunsFromCell(cellXml: String): List<WRun> {
