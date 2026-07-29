@@ -109,9 +109,12 @@ object DocxImageRenderer {
     }
 
     /**
-     * v1.3.25: 用正则提取 <w:p> 和 <w:tbl>（替代 v1.3.24 的手动 indexOf+findCloseTag 深度计数）。
+     * v1.3.26: 用正则提取 <w:p> 和 <w:tbl>（替代 v1.3.24 的手动 indexOf+findCloseTag 深度计数）。
      * 教训（v1.3.18/v1.3.23）：OOXML 嵌套结构下手写标签匹配/深度计数极易错乱；
      * 正则 DOT_MATCHES_ALL 非贪婪匹配在跨运行时一致且更可靠。
+     *
+     * v1.3.26 修复：先收集 <w:tbl> 范围，提取 <w:p> 时排除落在表格范围内的段落，
+     * 避免同一内容被渲染两次（一次作为段落竖排、一次作为表格横排）。
      */
     private fun parseBody(xml: String, numCounters: MutableMap<NumKey, Int>): List<Block> {
         val blocks = mutableListOf<Block>()
@@ -119,13 +122,23 @@ object DocxImageRenderer {
             .find(xml)
         val body = bodyMatch?.groupValues?.get(1) ?: xml
 
-        // 收集所有 <w:p> 和 <w:tbl> 的 (start, end, type) 位置
         data class Elem(val start: Int, val end: Int, val isTbl: Boolean)
+
+        // 先收集所有 <w:tbl> 范围（用于排除内部 <w:p>）
+        val tblRanges = mutableListOf<IntRange>()
+        for (m in Regex("""<w:tbl\b.*?</w:tbl>""", RegexOption.DOT_MATCHES_ALL).findAll(body)) {
+            tblRanges.add(m.range)
+        }
+
+        fun isInTable(pos: Int): Boolean = tblRanges.any { pos in it }
+
         val elems = mutableListOf<Elem>()
 
-        // 正则提取所有顶层 <w:p>（非贪婪，按出现顺序）
+        // 正则提取所有顶层 <w:p>（排除落在 <w:tbl> 范围内的）
         for (m in Regex("""<w:p\b[^>]*>.*?</w:p>""", RegexOption.DOT_MATCHES_ALL).findAll(body)) {
-            elems.add(Elem(m.range.first, m.range.last + 1, false))
+            if (!isInTable(m.range.first)) {
+                elems.add(Elem(m.range.first, m.range.last + 1, false))
+            }
         }
         // 正则提取所有 <w:tbl>
         for (m in Regex("""<w:tbl\b.*?</w:tbl>""", RegexOption.DOT_MATCHES_ALL).findAll(body)) {

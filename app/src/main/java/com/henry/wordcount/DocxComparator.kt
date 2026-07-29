@@ -1717,8 +1717,10 @@ object DocxComparator {
         val sectPrMatch = Regex("<w:sectPr.*?</w:sectPr>", RegexOption.DOT_MATCHES_ALL).find(origDoc)
         val sectPr = sectPrMatch?.value ?: ""
         val raw = origDoc.substring(0, bodyStart) + "\n" + bodyContent + "\n" + sectPr + "\n" + origDoc.substring(bodyClose)
+        // v1.3.26: 去掉硬分页符，避免结果文档中间出现只有一行的孤立第二页
+        var cleaned = Regex("<w:br\\s+w:type=\"page\"\\s*/?>", RegexOption.MULTILINE).replace(raw, "")
         // v1.3.24: 清理非法 XML token —— </</ 是多余的前缀导致 Expat "invalid token"
-        return sanitizeXml(raw)
+        return sanitizeXml(cleaned)
     }
 
     /** v1.3.24: 清理生成 XML 中的常见非法模式，确保 Word 能打开。 */
