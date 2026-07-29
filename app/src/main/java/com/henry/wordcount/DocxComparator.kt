@@ -1466,12 +1466,7 @@ object DocxComparator {
     /**
      * 结果文档字数统计（v1.3.22: 统一使用词数 words 口径，与 App 统计一致）。
      *
-     * 公式（用户指定）：修改字数 = 修订档总词数 − 黑色整句词数
-     */
-     *   1. totalWords = 所有非删除文本(<w:t>黑+<w:ins>蓝)的词数(fe+nc)，不含<w:delText>
-     *   2. blackWholeWords = 完全不含<w:ins>��句子中，黑字文本的词数
-     *   3. modifiedWords = totalWords − blackWholeWords
-     */
+     * 公式（用户指定）：修改字数 = 修订档总词数 − 黑色整句词数     *   1. totalWords = 所有非删除文本(<w:t>黑+<w:ins>蓝)的词数(fe+nc)     *   2. blackWholeWords = 完全不含<w:ins>的句子中，黑字文本的词数     *   3. modifiedWords = totalWords − blackWholeWords     */
     private fun computeResultDocStatsSimple(xml: String): ResultDocStats {
         val delim = setOf('。', '！', '？', '；', '\n')
 
