@@ -772,20 +772,28 @@ object DocxComparator {
 
             sb.append("<w:tc>").append(tcPr)
 
+            // v1.3.23: 提取单元格字体信息，用于 insert run 保持一致
+            val cellSz = extractCellSz(revCell)
+            val cellFont = extractCellFont(revCell)
+            val insRPr = if (cellFont.isNotEmpty())
+                "<w:rPr><w:rFonts w:ascii=\"$cellFont\" w:eastAsia=\"$cellFont\"/><w:sz w:val=\"$cellSz\"/><w:color w:val=\"2E74B5\"/><w:u w:val=\"single\"/></w:rPr>"
+            else
+                "<w:rPr><w:sz w:val=\"$cellSz\"/><w:color w:val=\"2E74B5\"/><w:u w:val=\"single\"/></w:rPr>"
+
             if (origCellText == revCellText) {
                 // 完全相同 → 输出修订版单元格内部内容原样（已含 <w:p>，黑字）
                 sb.append(extractCellInnerContent(revCell))
                 totalEq += revCellText.length
             } else if (origCellText.isEmpty()) {
-                // 纯插入 → 整个单元格标蓝，包裹在 <w:p> 中
+                // 纯插入 → 整个单元格标蓝（v1.3.23: stripOuterP 避免嵌套 <w:p>）
                 sb.append("<w:p><w:ins w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">")
-                sb.append(extractCellInnerContent(revCell))
+                sb.append(stripOuterP(extractCellInnerContent(revCell)))
                 sb.append("</w:ins></w:p>")
                 totalIns += revCellText.length
             } else if (revCellText.isEmpty()) {
-                // 纯删除 → 整个单元格标红，包裹在 <w:p> 中
+                // 纯删除 → 整个单元格标红（v1.3.23: stripOuterP 避免嵌套 <w:p>）
                 sb.append("<w:p><w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">")
-                sb.append(toDelText(extractCellInnerContent(origCell)))
+                sb.append(stripOuterP(toDelText(extractCellInnerContent(origCell))))
                 sb.append("</w:del></w:p>")
                 totalDel += origCellText.length
             } else {
@@ -817,7 +825,8 @@ object DocxComparator {
                         "insert" -> {
                             val seg = revCellText.substring(op.j1, op.j2)
                             if (seg.isNotEmpty()) {
-                                sb.append("<w:ins w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\"><w:r><w:rPr><w:color w:val=\"2E74B5\"/><w:u w:val=\"single\"/></w:rPr><w:t xml:space=\"preserve\">${escapeXml(seg)}</w:t></w:r></w:ins>")
+                                // v1.3.23: 使用 insRPr（含字号+字体）替代硬编码 rPr
+                                sb.append("<w:ins w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\"><w:r>$insRPr<w:t xml:space=\"preserve\">${escapeXml(seg)}</w:t></w:r></w:ins>")
                                 insChars += (op.j2 - op.j1)
                             }
                         }
@@ -831,7 +840,8 @@ object DocxComparator {
                             }
                             val iSeg = revCellText.substring(op.j1, op.j2)
                             if (iSeg.isNotEmpty()) {
-                                sb.append("<w:ins w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\"><w:r><w:rPr><w:color w:val=\"2E74B5\"/><w:u w:val=\"single\"/></w:rPr><w:t xml:space=\"preserve\">${escapeXml(iSeg)}</w:t></w:r></w:ins>")
+                                // v1.3.23: 使用 insRPr（含字号+字体）替代硬编码 rPr
+                                sb.append("<w:ins w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\"><w:r>$insRPr<w:t xml:space=\"preserve\">${escapeXml(iSeg)}</w:t></w:r></w:ins>")
                                 insChars += (op.j2 - op.j1)
                             }
                         }
@@ -863,6 +873,44 @@ object DocxComparator {
         // 去掉 <w:tcPr>...</w:tcPr>
         s = Regex("<w:tcPr.*?</w:tcPr>", RegexOption.DOT_MATCHES_ALL).replace(s, "")
         return s
+    }
+
+    /**
+     * v1.3.23: 去掉 extractCellInnerContent 结果的最外层 <w:p>...</w:p> 包裹。
+     * 用途：在 buildDiffTableRowXml 的 insert/delete/diff 分支中，
+     * 我们需要手动添加自己的 <w:p> 包裹（内含 <w:ins>/<w:del> 标记），
+     * 但 extractCellInnerContent 返回的内容已含 <w:p>（OOXML 单元格标准结构）。
+     * 如果不剥离就会产生嵌套 <w:p>，导致 Word 无法打开文档（WPS 可宽容打开）。
+     */
+    private fun stripOuterP(xml: String): String {
+        val t = xml.trim()
+        if (t.startsWith("<w:p") && t.endsWith("</w:p>")) {
+            // 找到第一个 >（开标签结束）和最后一个 </w:p> 的起始位置
+            val gt = t.indexOf('>')
+            if (gt > 0) {
+                val inner = t.substring(gt + 1)
+                if (inner.endsWith("</w:pod>")) return inner.dropLast(6)) // shouldn't happen
+                if (inner.endsWith("</w:p>")) return inner.dropLast(6)
+            }
+        }
+        return xml
+    }
+
+    /** 从单元格的 rPr 中提取字号（用于 insert run 保持字体一致）。 */
+    private fun extractCellSz(cellXml: String): Int {
+        val m = Regex("<w:sz\\b[^>]*w:val=\"(\\d+)\"").find(cellXml)
+        return m?.groupValues?.get(1)?.toIntOrNull() ?: DEFAULT_CELL_SZ
+    }
+
+    /** 从单元格的 rPr 中提取字体名。 */
+    private fun extractCellFont(cellXml: String): String {
+        val m = Regex("<w:rFonts\\b[^>]*w:ascii=\"([^\"]+)\"").find(cellXml)
+            ?: Regex("<w:rFonts\\b[^>]*w:eastAsia=\"([^\"]+)\"").find(cellXml)
+        return m?.groupValues?.get(1) ?: ""
+    }
+
+    companion object {
+        const val DEFAULT_CELL_SZ = 21  // 默认字号（半磅，10.5pt）
     }
 
     /** 从单元格 XML 中提取 WRun 列表（用于表格内 diff 的原文 run 定位）。 */
@@ -1470,21 +1518,17 @@ object DocxComparator {
     private fun computeResultDocStatsSimple(xml: String): ResultDocStats {
         val delim = setOf('。', '！', '？', '；', '\n')
 
-        // 收集所有需要统计的文本块（顶层 <w:p> + 表格行拼接文本）
+        // 收集所有需要统计的文本块（顶层 <w:p> + 表格行原始 XML）
         val allBlocks = mutableListOf<String>()
         allBlocks.addAll(extractTopLevelParas(xml))
+        // v1.3.23: 表格行使用原始 <w:tr> XML 而非纯文本拼接。
+        // 旧版用 join("<w:t>文本") 拼接 → 丢失 <w:ins>/<w:del> 标签 →
+        // insBlocks 检测永远为空 → 整个表格内容被误判为"黑色整句"→ blackWhole 虚高 → modified 偏低。
         for (m in Regex("<w:tbl\\b.*?</w:tbl>", RegexOption.DOT_MATCHES_ALL).findAll(xml)) {
             val tblXml = m.value
             for (trM in Regex("<w:tr\\b.*?</w:tr>", RegexOption.DOT_MATCHES_ALL).findAll(tblXml)) {
-                val cellTexts = mutableListOf<String>()
-                for (tcM in Regex("<w:tc\\b.*?</w:tc>", RegexOption.DOT_MATCHES_ALL).findAll(trM.value)) {
-                    val texts = Regex("<w:t[^>]*>([^<]*)</w:t>").findAll(tcM.value)
-                        .map { it.groupValues[1] }.filter { it.isNotEmpty() }.toList()
-                    if (texts.isNotEmpty()) cellTexts.add(texts.joinToString(""))
-                }
-                if (cellTexts.isNotEmpty()) {
-                    allBlocks.add(cellTexts.joinToString(" "))
-                }
+                // 直接使用 <w:tr> 原始 XML，保留完整的 <w:ins>/<w:del>/<w:t>/<w:delText> 标签
+                allBlocks.add(trM.value)
             }
         }
 
