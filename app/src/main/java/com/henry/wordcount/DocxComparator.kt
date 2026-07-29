@@ -723,15 +723,21 @@ object DocxComparator {
     }
 
     /**
-     * v1.3.20: 表格行级单元格 diff。
-     * 对 <w:tr> 中每个 <w:tc> 按位置配对，做字符级 LCS diff，
-     * 在单元格内生成 <w:del>(红字删除线) / <w:ins>(蓝字下划线) 修订标记。
+     * v1.3.21: 表格行级单元格 diff（修复 v1.3.20 的三大致命问题）。
+     *
+     * v1.3.20 BUG 修复：
+     *   1. Word 打不开：diff 分支在 <w:tc> 内直接输出 <w:r>，违反 OOXML 规范
+     *      （<w:tc> 内容必须包裹在 <w:p> 内）。现所有分支统一用 <w:p> 包裹。
+     *   2. 修改字数偏大：有差异的表格行 blackWhole=0 → 整行文字全算"修改"。
+     *      现跟踪 equal 字符数，返回正确的 blackWhole。
+     *   3. 表格文字全无：removePrefix("<w:tc") 只去标签名留 ">" → XML 非法。
+     *      现用正则精确去除 <w:tc> 标签。
      *
      * 策略：
      *   1. 用正则提取 orig/rev 的 <w:tc> 列表（按位置一一对应）
      *   2. 对每对单元格，提取纯文本，做 charDiff
      *   3. 保留 rev 单元格的 <w:tcPr>（边框/底纹等格式）
-     *   4. 将 diff 结果写入单元格，保留原 run 格式（字体/字号）
+     *   4. 所有输出内容包裹在 <w:p> 内（OOXML 合规）
      */
     private fun buildDiffTableRowXml(
         origTrXml: String, origTrText: String,
@@ -750,6 +756,7 @@ object DocxComparator {
 
         var totalDel = 0
         var totalIns = 0
+        var totalEq = 0   // v1.3.21: 跟踪 equal 字符数用于 blackWhole 计算
         val maxCells = kotlin.math.max(origCells.size, revCells.size)
 
         for (ci in 0 until maxCells) {
@@ -766,36 +773,36 @@ object DocxComparator {
             sb.append("<w:tc>").append(tcPr)
 
             if (origCellText == revCellText) {
-                // 完全相同 → 输出修订版单元格原样（黑字）
-                sb.append(revCell.removePrefix("<w:tc").removeSuffix("</w:tc>")
-                    .removePrefix(tcPr))
+                // 完全相同 → 输出修订版单元格内部内容原样（已含 <w:p>，黑字）
+                sb.append(extractCellInnerContent(revCell))
+                totalEq += revCellText.length
             } else if (origCellText.isEmpty()) {
-                // 纯插入 → 整个单元格标蓝
-                sb.append("<w:ins w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">")
-                // 输出修订版单元格内容（去掉 tcPr 包裹）
-                val cellInner = stripTcPr(revCell)
-                sb.append(cellInner)
-                sb.append("</w:ins>")
+                // 纯插入 → 整个单元格标蓝，包裹在 <w:p> 中
+                sb.append("<w:p><w:ins w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">")
+                sb.append(extractCellInnerContent(revCell))
+                sb.append("</w:ins></w:p>")
                 totalIns += revCellText.length
             } else if (revCellText.isEmpty()) {
-                // 纯删除 → 整个单元格标红
-                sb.append("<w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">")
-                val cellInner = stripTcPr(origCell)
-                sb.append(toDelText(cellInner))
-                sb.append("</w:del>")
+                // 纯删除 → 整个单元格标红，包裹在 <w:p> 中
+                sb.append("<w:p><w:del w:id=\"${nextRid(ridSeq)}\" w:author=\"$author\" w:date=\"$date\">")
+                sb.append(toDelText(extractCellInnerContent(origCell)))
+                sb.append("</w:del></w:p>")
                 totalDel += origCellText.length
             } else {
-                // 有差异 → 字符级 diff
+                // 有差异 → 字符级 diff，所有输出包裹在 <w:p> 中
                 val ops = charDiff(origCellText, revCellText)
                 val origRuns = extractWRunsFromCell(origCell)
 
                 var delChars = 0
                 var insChars = 0
+                var eqChars = 0
+                sb.append("<w:p>")
                 for (op in ops) {
                     when (op.tag) {
                         "equal" -> {
                             val seg = extractRunsInRange(origRuns, op.i1, op.i2)
                             if (seg.isNotEmpty()) sb.append(seg)
+                            eqChars += (op.i2 - op.i1)
                         }
                         "delete" -> {
                             val seg = extractRunsInRange(origRuns, op.i1, op.i2)
@@ -830,30 +837,38 @@ object DocxComparator {
                         }
                     }
                 }
+                sb.append("</w:p>")
                 totalDel += delChars
                 totalIns += insChars
+                totalEq += eqChars
             }
 
             sb.append("</w:tc>")
         }
 
         sb.append("</w:tr>")
-        // 表格行的 blackWhole 按整行判定：如果任一单元格有修改则整行不算黑色
-        val hasChanges = (totalDel + totalIns) > 0
-        return DiffOut(sb.toString(), totalDel, totalIns, 0, if (hasChanges) 0 else revTrText.length)
+        // v1.3.21: blackWhole = equal 字符数（不再一刀切为 0）
+        return DiffOut(sb.toString(), totalDel, totalIns, totalEq, totalEq)
+    }
+
+    /** 提取 <w:tc> 内部内容（去掉 <w:tc> 开标签、</w:tc> 闭标签、<w:tcPr> 属性块）。 */
+    private fun extractCellInnerContent(cellXml: String): String {
+        if (cellXml.isEmpty()) return ""
+        // 去掉开标签 <w:tc ...>
+        val gtIdx = cellXml.indexOf('>')
+        if (gtIdx < 0) return ""
+        var s = cellXml.substring(gtIdx + 1)
+        // 去掉闭标签 </w:tc>
+        if (s.endsWith("</w:tc>")) s = s.dropLast(5)
+        // 去掉 <w:tcPr>...</w:tcPr>
+        s = Regex("<w:tcPr.*?</w:tcPr>", RegexOption.DOT_MATCHES_ALL).replace(s, "")
+        return s
     }
 
     /** 从单元格 XML 中提取 WRun 列表（用于表格内 diff 的原文 run 定位）。 */
     private fun extractWRunsFromCell(cellXml: String): List<WRun> {
         // 复用 extractWRuns 但作用于整个单元格内容
         return extractWRuns(cellXml)
-    }
-
-    /** 去除 <w:tc> 标签和 <w:tcPr> 后的单元格内部内容。 */
-    private fun stripTcPr(cellXml: String): String {
-        var s = cellXml.removePrefix("<w:tc").removeSuffix("</w:tc>")
-        s = Regex("<w:tcPr.*?</w:tcPr>", RegexOption.DOT_MATCHES_ALL).replace(s, "")
-        return s
     }
 
     private fun charDiff(textO: String, textR: String): List<Quad> {
