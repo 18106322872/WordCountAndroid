@@ -1499,7 +1499,7 @@ object DocxComparator {
             }
             fun inIns(pos: Int): Boolean = insBlocks.any { pos in it }
 
-            data class Seg(val text: String, val isIns: Boolean, val isBlack: Boolean)
+            data class Seg(val text: String, val isIns: Boolean, val isBlack: Boolean, val isDel: Boolean)
             val segs = mutableListOf<Seg>()
             for (tm in Regex("<w:(t|delText)[^>]*>(.*?)</w:\\1>", RegexOption.DOT_MATCHES_ALL).findAll(px)) {
                 val tag = tm.groupValues[1]
@@ -1508,7 +1508,7 @@ object DocxComparator {
                 val isDel = (tag == "delText")
                 val isIns = !isDel && inIns(tm.range.first)
                 val isBlack = !isDel && !isIns
-                segs.add(Seg(txt, isIns, isBlack))
+                segs.add(Seg(txt, isIns, isBlack, isDel))
             }
 
             // 收集全部非删除文本用于 totalWords（词数口径）
