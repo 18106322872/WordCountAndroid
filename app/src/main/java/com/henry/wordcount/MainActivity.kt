@@ -142,6 +142,12 @@ data class FileResult(
     val sheets: List<String>,
     // v1.3.3: 隐藏工作表列表（默认不计入文件字数与合计，由 UI 勾选后才并入）
     val hiddenSheets: List<SheetStat> = emptyList(),
+    // v1.3.32: PPT 备注幻灯片列表（默认不计入文件字数与合计，由 UI 勾选后才并入）
+    val notesSlides: List<SheetStat> = emptyList(),
+    // v1.3.32: PPT 嵌入图片数量
+    val imageCount: Int = 0,
+    // v1.3.32: 文件内部标题（docProps/core.xml <dc:title>），用于修复 URI 无法获取真实文件名的问题
+    val internalTitle: String = "",
     val inner: List<InnerResult>,
     val hasUnreliable: Boolean,
 )
@@ -285,6 +291,12 @@ fun WordCountApp(initialUris: List<Uri>) {
             r.result!!.hiddenSheets.forEach { hs ->
                 if (hiddenSelected["${r.id}::${hs.name}"] == true) {
                     w += hs.words; fe += hs.fe; nc += hs.nc; ch += hs.chars
+                }
+            }
+            // v1.3.32: 勾选的 PPT 备注幻灯片计入合计
+            r.result!!.notesSlides.forEach { ns ->
+                if (hiddenSelected["${r.id}::notes::${ns.name}"] == true) {
+                    w += ns.words; fe += ns.fe; nc += ns.nc; ch += ns.chars
                 }
             }
         }
@@ -485,7 +497,9 @@ fun FileCard(
                             style = MaterialTheme.typography.bodySmall, color = Color.Gray
                         )
                         // v1.3.6: 明细折叠/展开切换（点击统计行展开）
-                        val detailCount = (r.inner?.size ?: 0) + (r.sheets?.size ?: 0) + (r.hiddenSheets?.size ?: 0)
+                        val detailCount = (r.inner?.size ?: 0) + (r.sheets?.size ?: 0) +
+                            (r.hiddenSheets?.size ?: 0) + (r.notesSlides?.size ?: 0) +
+                            if (r.imageCount > 0) 1 else 0
                         if (detailCount > 0) {
                             Text(
                                 if (expanded.value) "▲ 收起明细" else "▶ 展开${detailCount}项明细",
@@ -504,11 +518,21 @@ fun FileCard(
                         Text("统计中…", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                     }
                 }
-                // 右侧：文件类型标签 + 隐藏表标记 + Word/Excel 按钮（上下排列）
+                // 右侧：文件类型标签 + 隐藏表/备注/图片标记 + Word/WPS 按钮（上下排列）
                 Column(horizontalAlignment = Alignment.End) {
                     // v1.3.3: 有隐藏工作表的文件，在右列顶部显示红色小"隐"字
                     if (entry.result?.hiddenSheets?.isNotEmpty() == true) {
                         Text("隐", style = MaterialTheme.typography.labelSmall, color = Color(0xFFB00020),
+                            modifier = Modifier.padding(bottom = 2.dp))
+                    }
+                    // v1.3.32: 有备注的 PPT，显示蓝色小"备"字
+                    if (entry.result?.notesSlides?.isNotEmpty() == true) {
+                        Text("备", style = MaterialTheme.typography.labelSmall, color = Color(0xFF1565C0),
+                            modifier = Modifier.padding(bottom = 2.dp))
+                    }
+                    // v1.3.32: 有嵌入图片的 PPT，显示绿色小"图"字
+                    if ((entry.result?.imageCount ?: 0) > 0) {
+                        Text("图", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2E7D32),
                             modifier = Modifier.padding(bottom = 2.dp))
                     }
                     Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.small) {
@@ -524,9 +548,9 @@ fun FileCard(
                                 .padding(top = 4.dp)
                                 .clickable { onOpenWord(entry) })
                     }
-                    // v1.3.4: 用 Wps 打开（仅对 xls/xlsx 显示，仅支持 WPS）
-                    val excelExts = setOf(".xls", ".xlsx")
-                    if (excelExts.contains((entry.result?.ext ?: "").lowercase())) {
+                    // v1.3.4/v1.3.32: 用 Wps 打开（xls/xlsx + ppt/pptx，仅支持 WPS）
+                    val wpsExts = setOf(".xls", ".xlsx", ".ppt", ".pptx")
+                    if (wpsExts.contains((entry.result?.ext ?: "").lowercase())) {
                         Text("Wps",
                             style = MaterialTheme.typography.labelSmall,
                             color = Color(0xFF217346),
@@ -555,6 +579,26 @@ fun FileCard(
                     Checkbox(checked = checked, onCheckedChange = { onToggleHidden(entry.id, hs.name) }, modifier = Modifier.size(24.dp))
                     Text(hs.name, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text("字 ${hs.words} 中 ${hs.fe} 非 ${hs.nc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                }
+            }
+            // v1.3.32: PPT 备注幻灯片（蓝"备" + 勾选框 + 名称 + 字数），勾选后并入合计
+            entry.result?.notesSlides?.forEach { ns ->
+                val checked = hiddenSelected["${entry.id}::notes::${ns.name}"] ?: false
+                Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("备", style = MaterialTheme.typography.labelSmall, color = Color(0xFF1565C0))
+                    Checkbox(checked = checked, onCheckedChange = { onToggleHidden(entry.id, "notes::${ns.name}") }, modifier = Modifier.size(24.dp))
+                    Text(ns.name, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("字 ${ns.words} 中 ${ns.fe} 非 ${ns.nc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                }
+            }
+            // v1.3.32: PPT 嵌入图片（绿"图" + 张数），页数列显示张数，字数列显示"—"
+            if ((entry.result?.imageCount ?: 0) > 0) {
+                Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("图", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2E7D32))
+                    Text("嵌入图片", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    Text("—", style = MaterialTheme.typography.bodySmall, color = Color.Gray,
+                        modifier = Modifier.padding(end = 8.dp))
+                    Text("${entry.result!!.imageCount} 张", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
             }
             } // end expanded
@@ -1497,15 +1541,32 @@ private fun addFiles(
                                 val s = countTextKotlin(t)
                                 SheetStat(n, s.first, s.second, s.third, s.fourth)
                             }
+                            // v1.3.32: PPT 备注幻灯片单独统计（默认不计入合计，UI 勾选后才并入）
+                            val notesStats = res.notesSlides.map { (n, t) ->
+                                val s = countTextKotlin(t)
+                                SheetStat(n, s.first, s.second, s.third, s.fourth)
+                            }
                             val resMap = mapOf(
                                 "name" to dName, "ext" to ".${f.extension.lowercase()}",
                                 "stats" to mapOf("words" to outWords, "fe" to outFe, "nc" to outNc, "chars" to outChars),
-                                "meta" to mapOf("sheets" to res.sheets, "hidden_sheets" to hiddenStats),
+                                "meta" to mapOf("sheets" to res.sheets, "hidden_sheets" to hiddenStats,
+                                    "notes_slides" to notesStats, "image_count" to res.imageCount,
+                                    "internal_title" to res.internalTitle),
                                 "pages" to outPages,
                                 "pages_reason" to outReason
                             )
                             val fr = toFileResult(resMap, f.absolutePath)
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                            // v1.3.32: 如果 URI 无法获取真实文件名（显示为"PPT演示_A04D.pptx"等生成名），
+                            //   尝试用 OOXML 内部标题（docProps/core.xml <dc:title>）替换
+                            val finalDisplayName = if (res.internalTitle.isNotBlank() &&
+                                (dName.startsWith("PPT演示_") || dName.startsWith("Word文档_") ||
+                                 dName.startsWith("Excel表格_") || dName.startsWith("PDF文档_") ||
+                                 dName.startsWith("文档_") || dName.startsWith("文本文件_") ||
+                                 looksLikeHashString(dName) || isSuspiciousFilename(dName))) {
+                                val ext = f.extension.lowercase()
+                                "${res.internalTitle}.${if (ext.isNotBlank()) ext else "file"}"
+                            } else dName
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = finalDisplayName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                         }
                     } catch (e: Throwable) {
                         Log.w("WordCount", "OOXML 解析失败 ${f.name}: ${e.message}")
@@ -1885,6 +1946,12 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
         pagesReason = m?.get("pages_reason") as? String,
         sheets = (meta["sheets"] as? List<*>)?.mapNotNull { it as? String } ?: emptyList(),
         hiddenSheets = (meta["hidden_sheets"] as? List<*>)?.mapNotNull { it as? SheetStat } ?: emptyList(),
+        // v1.3.32: PPT 备注幻灯片
+        notesSlides = (meta["notes_slides"] as? List<*>)?.mapNotNull { it as? SheetStat } ?: emptyList(),
+        // v1.3.32: PPT 嵌入图片数量
+        imageCount = (meta["image_count"] as? Number)?.toInt() ?: 0,
+        // v1.3.32: 文件内部标题
+        internalTitle = (meta["internal_title"] as? String) ?: "",
         inner = inner,
         hasUnreliable = ext == ".pdf" && (imageOnly || !imgPages.isNullOrEmpty())
     )

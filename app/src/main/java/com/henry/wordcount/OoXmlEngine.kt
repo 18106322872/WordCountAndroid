@@ -25,6 +25,12 @@ object OoXmlEngine {
         val sheets: List<String> = emptyList(),
         // v1.3.3: 隐藏工作表（名称 + 抽取文本），默认不计入文件字数，由 UI 决定是否勾选合计
         val hiddenSheets: List<Pair<String, String>> = emptyList(),
+        // v1.3.32: PPT 备注幻灯片（名称 + 抽取文本），默认不计入文件字数，由 UI 决定是否勾选合计
+        val notesSlides: List<Pair<String, String>> = emptyList(),
+        // v1.3.32: PPT 嵌入图片数量（仅计数，不含文本）
+        val imageCount: Int = 0,
+        // v1.3.32: 文件内部标题（docProps/core.xml 的 <dc:title>），用于修复 URI 无法获取真实文件名的问题
+        val internalTitle: String = "",
         val pagesReason: String = "",
         // v1.2.3: docProps/app.xml 中的权威统计（Word/WPS 保存时写入，与 Word 字数统计完全一致）
         // 0 表示无此元数据（如 POI 生成的文件），由调用方退回现算
@@ -149,6 +155,7 @@ object OoXmlEngine {
             pages = pages,
             kind = "docx",
             pagesReason = pagesReason,
+            internalTitle = extractInternalTitle(zip),
             metaPages = metaPages,
             metaWords = metaWords,
             metaChars = metaChars
@@ -441,7 +448,8 @@ object OoXmlEngine {
 
         val text = visibleSb.toString()
         val pages = max(1, visibleNames.size)
-        return OoxmlResult(text, pages, "xlsx", visibleNames, hiddenSheets, "")
+        return OoxmlResult(text, pages, "xlsx", visibleNames, hiddenSheets, "",
+            internalTitle = extractInternalTitle(zip))
     }
 
     /** 工作表信息：名称、worksheet 的 zip 内路径、是否隐藏 */
@@ -668,24 +676,98 @@ object OoXmlEngine {
     }
 
     // ───────────────────────── pptx ─────────────────────────
+    /**
+     * 提取 pptx 文本（幻灯片 + 备注）+ 图片计数。
+     *
+     * v1.3.32 重大改进：
+     *   1. 按段落(<a:p>)分组提取，同段落内<a:t>直接拼接不插空格，
+     *      避免英文/数字 token 被空格拆成多个 nc 词（此前 nc 偏高 2~10 倍）
+     *   2. 提取备注文本(ppt/notesSlides/)，作为独立明细供 UI 展开勾选
+     *   3. 统计嵌入图片数量(ppt/media/)
+     *   4. 清洗提取文本中的残留 XML 标签（某些 PPTX 的 <a:t> 内含 XML 片段）
+     */
     private fun extractPptx(zip: ZipFile): OoxmlResult {
+        // ── 幻灯片 ──
         val slideEntries = Collections.list(zip.entries())
             .filter { it.name.matches("""ppt/slides/slide\d+\.xml""".toRegex()) }
             .sortedBy { """\d+""".toRegex().find(it.name)?.value?.toInt() ?: 0 }
+
+        val tRe = """<a:t[^>]*>(.*?)</a:t>""".toRegex(RegexOption.DOT_MATCHES_ALL)
+        val pRe = """<a:p[^>]*>(.*?)</a:p>""".toRegex(RegexOption.DOT_MATCHES_ALL)
+        // 清洗残留 XML 标签（某些 PPTX 的 <a:t> 内容包含 <a:rPr> 等标签片段）
+        val xmlTagRe = """<[^>]+>""".toRegex()
+
         val sb = StringBuilder()
         slideEntries.forEachIndexed { idx, entry ->
             val xml = readEntry(zip, entry.name) ?: return@forEachIndexed
             sb.append("\n[幻灯片${idx + 1}]\n")
-            val tRe = """<a:t[^>]*>(.*?)</a:t>""".toRegex(RegexOption.DOT_MATCHES_ALL)
-            tRe.findAll(xml).forEach { sb.append(decodeXml(it.groupValues[1])).append(' ') }
+            // 按段落提取：同段落内的 <a:t> 直接拼接，段落间用空格分隔
+            val paras = pRe.findAll(xml)
+            for (para in paras) {
+                val pText = StringBuilder()
+                tRe.findAll(para.groupValues[1]).forEach { match ->
+                    pText.append(decodeXml(match.groupValues(1)))
+                }
+                val line = pText.toString().trim()
+                if (line.isNotEmpty()) {
+                    // 二次清洗：去除可能泄漏的 XML 标签
+                    val clean = xmlTagRe.replace(line, "")
+                    if (clean.isNotEmpty()) sb.append(clean).append(' ')
+                }
+            }
             sb.append('\n')
         }
+
+        // ── 备注幻灯片 ──
+        val noteEntries = Collections.list(zip.entries())
+            .filter { it.name.matches("""ppt/notesSlides/notesSlide\d+\.xml""".toRegex()) }
+            .sortedBy { """\d+""".toRegex().find(it.name)?.value?.toInt() ?: 0 }
+
+        val notesList = mutableListOf<Pair<String, String>>()
+        noteEntries.forEachIndexed { idx, entry ->
+            val xml = readEntry(zip, entry.name) ?: return@forEachIndexed
+            val nsb = StringBuilder()
+            // 备注也按段落提取
+            val paras = pRe.findAll(xml)
+            for (para in paras) {
+                val pText = StringBuilder()
+                tRe.findAll(para.groupValues(1)).forEach { match ->
+                    pText.append(decodeXml(match.groupValues(1)))
+                }
+                val line = pText.toString().trim()
+                if (line.isNotEmpty()) {
+                    val clean = xmlTagRe.replace(line, "")
+                    if (clean.isNotEmpty()) nsb.append(clean).append(' ')
+                }
+            }
+            notesList.add("备注${idx + 1}" to nsb.toString())
+        }
+
+        // ── 图片计数（仅统计媒体文件，排除 .xml/.rels）──
+        val imageCount = Collections.list(zip.entries())
+            .count { it.name.startsWith("ppt/media/") &&
+                     !it.name.endsWith(".xml") && !it.name.endsWith(".rels") }
+
         val text = sb.toString()
         val pages = max(1, slideEntries.size)
-        return OoxmlResult(text, pages, "pptx")
+        return OoxmlResult(text, pages, "pptx",
+            notesSlides = notesList,
+            imageCount = imageCount,
+            internalTitle = extractInternalTitle(zip))
     }
 
     // ───────────────────────── 工具 ─────────────────────────
+    /** 从 docProps/core.xml 提取 <dc:title> 作为文件内部标题（用于修复 URI 无法获取真实文件名的问题） */
+    private fun extractInternalTitle(zip: ZipFile): String {
+        val xml = readEntry(zip, "docProps/core.xml") ?: return ""
+        // Dublin Core title: <dc:title>...</dc:title> or <cp:coreProperties> namespace variants
+        val dcTitleRe = """<dc:title[^>]*>(.*?)</dc:title>""".toRegex(RegexOption.DOT_MATCHES_ALL)
+        val m = dcTitleRe.find(xml) ?: return ""
+        val title = decodeXml(m.groupValues[1]).trim()
+        if (title.length >= 2 && title.length <= 200) return title
+        return ""
+    }
+
     private fun readSharedStrings(zip: ZipFile): List<String> {
         val xml = readEntry(zip, "xl/sharedStrings.xml") ?: return emptyList()
         val out = mutableListOf<String>()
