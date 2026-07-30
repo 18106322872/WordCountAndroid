@@ -350,13 +350,14 @@ fun WordCountApp(initialUris: List<Uri>) {
                             Text("字数 ${totals["words"]} ｜ 中文 ${totals["fe"]} ｜ 非中文 ${totals["nc"]} ｜ 页数 ${totals["pages"]}")
                         }
                         Spacer(Modifier.padding(4.dp))
+                        var isExporting by remember { mutableStateOf(false) }
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(onClick = { pickWithPermission() }, modifier = Modifier.weight(1f)) { Text("选择文件") }
                             OutlinedButton(
-                                onClick = { exportUnreliable(context, scope, snackbar, entries) },
+                                onClick = { exportUnreliable(context, scope, snackbar, entries, onStateChange = { isExporting = it }) },
                                 modifier = Modifier.weight(1f),
-                                enabled = entries.any { it.selected && it.result?.hasUnreliable == true }
-                            ) { Text("导出不可识别内容") }
+                                enabled = entries.any { it.selected && it.result?.hasUnreliable == true } && !isExporting
+                            ) { Text(if (isExporting) "导出中…" else "导出不可识别内容") }
                         }
                     }
                 }
@@ -1996,9 +1997,11 @@ private fun exportUnreliable(
     context: android.content.Context,
     scope: kotlinx.coroutines.CoroutineScope,
     snackbar: SnackbarHostState,
-    entries: List<FileEntry>
+    entries: List<FileEntry>,
+    onStateChange: (Boolean) -> Unit = {}
 ) {
     scope.launch(Dispatchers.Main) {
+        onStateChange(true)
         try {
             val sel = entries.filter { it.selected && it.result?.hasUnreliable == true && it.cachePath.isNotBlank() }
             if (sel.isEmpty()) { snackbar.showSnackbar("没有可导出的不可识别内容"); return@launch }
@@ -2022,6 +2025,8 @@ private fun exportUnreliable(
             }
         } catch (e: Exception) {
             snackbar.showSnackbar("导出失败：${e.message}")
+        } finally {
+            onStateChange(false)
         }
     }
 }
