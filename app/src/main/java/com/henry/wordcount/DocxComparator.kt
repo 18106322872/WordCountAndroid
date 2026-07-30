@@ -209,22 +209,25 @@ object DocxComparator {
         val revTotalChars = computeRevDocTotalChars(actualRev)
         val resultStats = computeResultDocStats(outPath)
         val formulaResult = kotlin.math.max(0, revTotalChars - resultStats.blackWholeSentenceChars)
+        // v1.3.29: 三级 fallback 公式
+        //   1) 原公式：revTotal - blackWhole（依赖修订档读取，.doc 可能异常）
+        //   2) Fallback：结果文档 total - blackWhole（结果文档自身统计）
+        //   3) 兜底：insWords + delWords（直接统计插入+删除内容的词数）
         val modifiedChars = if (formulaResult > 0) {
             formulaResult
         } else {
-            // Fallback 1: 用结果文档自身的 total - blackWhole（不依赖修订档读取）
             val alt1 = kotlin.math.max(0, resultStats.totalChars - resultStats.blackWholeSentenceChars)
             if (alt1 > 0) alt1
             else {
-                // Fallback 2: 直接用 <w:ins> 内词数（至少反映有修改内容）
-                kotlin.math.max(1, resultStats.insWords)
+                // v1.3.29: ins+del 才是完整的修改量（此前只算 ins 漏掉 del）
+                resultStats.insWords + resultStats.delWords
             }
         }
         val summary = buildString {
             append("插入 $insCount 处(${totalInsChars}字) | 删除 $delCount 处(${totalDelChars}字) | 修改 $repCount 处")
         }
 
-        Log.d(TAG, "result: ins=$insCount(${totalInsChars}字) del=$delCount(${totalDelChars}字) rep=$repCount chars=$modifiedChars (revTotal=$revTotalChars total=${resultStats.totalChars} blackWhole=${resultStats.blackWholeSentenceChars} insWords=${resultStats.insWords})")
+        Log.d(TAG, "result: ins=$insCount(${totalInsChars}字) del=$delCount(${totalDelChars}字) rep=$repCount chars=$modifiedChars (revTotal=$revTotalChars total=${resultStats.totalChars} blackWhole=${resultStats.blackWholeSentenceChars} insWords=${resultStats.insWords} delWords=${resultStats.delWords})")
 
         // 清理 .doc 转换产生的临时 .docx 文件
         for (tp in tempFiles) {
@@ -1487,7 +1490,8 @@ object DocxComparator {
     private data class ResultDocStats(
         val totalChars: Int,                 // 修订侧总词数（words口径，<w:t> 黑+蓝）
         val blackWholeSentenceChars: Int,    // 无 <w:ins> 句子中的黑字词数（words口径）
-        val insWords: Int = 0               // <w:ins> 内的词数（v1.3.28：直接统计修改内容）
+        val insWords: Int = 0,              // <w:ins> 内的词数
+        val delWords: Int = 0               // <w:del> 内的词数（v1.3.29：ins+del=修改总量）
     )
 
     /**
@@ -1568,6 +1572,7 @@ object DocxComparator {
         var totalWords = 0
         var blackWholeWords = 0
         var insWords = 0  // v1.3.28: 直接统计 <w:ins> 内的词数
+        var delWords = 0  // v1.3.29: 直接统计 <w:del> 内的词数
 
         for (px in allBlocks) {
             // v1.3.24: 栈式解析。ins/del 深度与 seg 文本处于同一坐标系（fullText 顺序），
@@ -1611,6 +1616,12 @@ object DocxComparator {
             val insText = segs.filter { it.isIns }.joinToString("") { it.text }
             if (insText.isNotEmpty()) {
                 insWords += countTextKotlin(insText).first
+            }
+
+            // v1.3.29: 直接统计 <w:del> 内的词数（ins+del=修改总量）
+            val delText = segs.filter { it.isDel }.joinToString("") { it.text }
+            if (delText.isNotEmpty()) {
+                delWords += countTextKotlin(delText).first
             }
 
             // 切句：找出无 <w:ins> 的黑色整句，累加其词数
@@ -1668,7 +1679,7 @@ object DocxComparator {
             }
         }
 
-        return ResultDocStats(totalWords, blackWholeWords, insWords)
+        return ResultDocStats(totalWords, blackWholeWords, insWords, delWords)
     }
 
     /**
