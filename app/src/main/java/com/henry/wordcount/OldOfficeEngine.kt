@@ -244,26 +244,12 @@ object OldOfficeEngine {
                         if (org.apache.poi.hslf.usermodel.HSLFPictureShape::class.java.isInstance(shape)) imgCount++
                     }
                 } catch (_: Throwable) {}
-                // 内嵌图表文字（图表标题 + 系列名），与 xls 对齐
-                try {
-                    val charts = HSSFChart.getSheetCharts(slide)
-                    for (ch in charts) {
-                        val ct = ch.chartTitle
-                        if (!ct.isNullOrBlank()) textSb.append(ct).append("\n")
-                        for (s in ch.series) {
-                            val st = s.seriesTitle
-                            if (!st.isNullOrBlank()) textSb.append(st).append("\n")
-                        }
-                    }
-                } catch (_: Throwable) {}
+                // 注意：POI HSLF 不像 HSSF(Excel)那样有 getSheetCharts() API，
+                // .ppt 内嵌图表是 OLE 对象，POI scratchpad 无法直接提取文字。
+                // 字数差距主要靠递归编组形状弥补（见上方的 collectHslfShapeText）。
             }
-            // 批注（演讲者注释/评论）文字——这些是需要翻译的内容
-            try {
-                for (comment in ppt.comments) {
-                    val ct = comment.text
-                    if (!ct.isNullOrBlank()) textSb.append(ct).append("\n")
-                }
-            } catch (_: Throwable) {}
+            // 批注：POI HSLF scratchpad 未暴露 comments 属性，暂无法通过 POI 提取
+            // （电脑版用 COM PowerPoint.Application 可取到）
             // 备注文本（HSLF: 通过 ppt.notes 获取所有备注幻灯片）
             try {
                 for (notes in ppt.notes) {
