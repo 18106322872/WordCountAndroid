@@ -301,21 +301,31 @@ object OldOfficeEngine {
                 }
                 is org.apache.poi.hslf.usermodel.HSLFTable -> {
                     // v1.3.38: 表格文本（与电脑版 COM shape.Table 对齐）
-                    for (row in shape.rows) {
-                        val rowSb = StringBuilder()
-                        for (cell in row) {
-                            val ct = cell.text?.trim() ?: ""
-                            if (ct.isNotEmpty()) rowSb.append(ct).append(" ")
+                    try {
+                        val numRows = shape.numberOfRows
+                        val numCols = shape.numberOfColumns
+                        for (r in 0 until numRows) {
+                            val rowSb = StringBuilder()
+                            for (c in 0 until numCols) {
+                                val cell = shape.getCell(r, c)
+                                if (cell != null) {
+                                    val ct = (cell as? HSLFTextShape)?.text?.trim() ?: ""
+                                    if (ct.isNotEmpty()) rowSb.append(ct).append(" ")
+                                }
+                            }
+                            val rowText: String = rowSb.toString().trim()
+                            if (rowText.isNotEmpty()) sb.append(rowText).append("\n")
                         }
-                        val rowText = rowSb.toString().trim()
-                        if (rowText.isNotEmpty()) sb.append(rowText).append("\n")
-                    }
+                    } catch (_: Throwable) {}
                 }
                 else -> {
                     // v1.3.38: 其他形状（HSLFSimpleShape 等）尝试获取文本
                     try {
-                        val txt = (shape as? org.apache.poi.hslf.usermodel.HSLFSimpleShape)?.text
-                        if (!txt.isNullOrBlank()) sb.append(txt).append("\n")
+                        val simple = shape as? org.apache.poi.hslf.usermodel.HSLFSimpleShape
+                        if (simple != null) {
+                            val txt = simple.text
+                            if (!txt.isNullOrBlank()) sb.append(txt).append("\n")
+                        }
                     } catch (_: Throwable) {}
                 }
             }
