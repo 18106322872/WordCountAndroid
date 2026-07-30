@@ -1934,6 +1934,8 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
     val imgPages = meta["img_pages"] as? List<*>
     val imageOnly = meta["image_only"] as? Boolean ?: false
     val ext = (m?.get("ext") as? String) ?: ""
+    // v1.3.33: OOXML 嵌入图片数量（来自 meta["image_count"]），供 hasUnreliable 判断
+    val imageCount = (meta["image_count"] as? Number)?.toInt() ?: 0
     return FileResult(
         name = (m?.get("name") as? String) ?: "",
         ext = ext,
@@ -1949,7 +1951,7 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
         // v1.3.32: PPT 备注幻灯片
         notesSlides = (meta["notes_slides"] as? List<*>)?.mapNotNull { it as? SheetStat } ?: emptyList(),
         // v1.3.32: PPT 嵌入图片数量
-        imageCount = (meta["image_count"] as? Number)?.toInt() ?: 0,
+        imageCount = imageCount,
         // v1.3.32: 文件内部标题
         internalTitle = (meta["internal_title"] as? String) ?: "",
         inner = inner,
