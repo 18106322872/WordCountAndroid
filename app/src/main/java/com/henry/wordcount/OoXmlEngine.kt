@@ -156,6 +156,7 @@ object OoXmlEngine {
             kind = "docx",
             pagesReason = pagesReason,
             internalTitle = extractInternalTitle(zip),
+            imageCount = countMediaImages(zip),
             metaPages = metaPages,
             metaWords = metaWords,
             metaChars = metaChars
@@ -449,7 +450,8 @@ object OoXmlEngine {
         val text = visibleSb.toString()
         val pages = max(1, visibleNames.size)
         return OoxmlResult(text, pages, "xlsx", visibleNames, hiddenSheets,
-            internalTitle = extractInternalTitle(zip))
+            internalTitle = extractInternalTitle(zip),
+            imageCount = countMediaImages(zip))
     }
 
     /** 工作表信息：名称、worksheet 的 zip 内路径、是否隐藏 */
@@ -744,9 +746,7 @@ object OoXmlEngine {
         }
 
         // ── 图片计数（仅统计媒体文件，排除 .xml/.rels）──
-        val imageCount = Collections.list(zip.entries())
-            .count { it.name.startsWith("ppt/media/") &&
-                     !it.name.endsWith(".xml") && !it.name.endsWith(".rels") }
+        val imageCount = countMediaImages(zip)
 
         val text = sb.toString()
         val pages = max(1, slideEntries.size)
@@ -757,6 +757,22 @@ object OoXmlEngine {
     }
 
     // ───────────────────────── 工具 ─────────────────────────
+    /**
+     * 统计 OOXML 包内嵌入的图片数量（ppt/media、word/media、xl/media，排除 .xml/.rels）。
+     * 这些图片是无法被文字抽取的"不可识别内容"，由 UI「导出不可识别内容」按钮导出为 PDF。
+     */
+    private fun countMediaImages(zip: ZipFile): Int {
+        var n = 0
+        val e = zip.entries()
+        while (e.hasMoreElements()) {
+            val name = e.nextElement().name.lowercase()
+            if (("/media/" !in name) && !name.startsWith("media/")) continue
+            if (name.endsWith(".xml") || name.endsWith(".rels") || name.endsWith("/")) continue
+            n++
+        }
+        return n
+    }
+
     /** 从 docProps/core.xml 提取 <dc:title> 作为文件内部标题（用于修复 URI 无法获取真实文件名的问题） */
     private fun extractInternalTitle(zip: ZipFile): String {
         val xml = readEntry(zip, "docProps/core.xml") ?: return ""

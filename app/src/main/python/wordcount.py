@@ -9459,6 +9459,53 @@ def _pdf_unreliable_pages(pdf_path, work_dir, meta):
 
 
 
+def _ooxml_media_pages(src, work_dir, name):
+    """从 OOXML 包（pptx/docx/xlsx 等）抽取嵌入图片，作为「导出不可识别内容」PDF 的页。
+
+    图片位于 ppt/media、word/media、xl/media 等目录，排除 .xml/.rels。
+    仅抽取可被 fitz 直接渲染的光栅图（png/jpg/jpeg/gif/bmp/tif/tiff/webp）；
+    EMF/WMF 等矢量图 fitz 无法渲染，跳过。
+    """
+    import os as _os, zipfile as _zf
+    out = []
+    try:
+        z = _zf.ZipFile(src)
+    except Exception:
+        return out
+    try:
+        n = 0
+        for info in z.infolist():
+            nm = (info.filename or "").lower()
+            if ("/media/" not in nm) and (not nm.startswith("media/")):
+                continue
+            if nm.endswith(".xml") or nm.endswith(".rels") or nm.endswith("/"):
+                continue
+            ext2 = _os.path.splitext(nm)[1]
+            if ext2 not in (".png", ".jpg", ".jpeg", ".gif", ".bmp",
+                            ".tif", ".tiff", ".webp"):
+                continue
+            try:
+                data = z.read(info)
+            except Exception:
+                continue
+            if not data:
+                continue
+            n += 1
+            dst = _os.path.join(work_dir, "ooxml_media_%d%s" % (n, ext2))
+            try:
+                with open(dst, "wb") as fh:
+                    fh.write(data)
+            except Exception:
+                continue
+            out.append((dst, "%s - 图片 %d" % (name, n)))
+    finally:
+        try:
+            z.close()
+        except Exception:
+            pass
+    return out
+
+
 def prepare_unreliable_entries(files_info, work_dir, converter=None):
 
 
@@ -9553,6 +9600,17 @@ def prepare_unreliable_entries(files_info, work_dir, converter=None):
 
 
 
+        elif ext in (".pptx", ".ppt", ".docx", ".doc", ".xlsx", ".xls"):
+            # v1.3.33: OOXML 嵌入图片（ppt/media、word/media、xl/media）视为不可识别内容
+            ic = 0
+            try:
+                ic = int(meta.get("image_count") or 0)
+            except Exception:
+                ic = 0
+            if ic > 0:
+                pages = _ooxml_media_pages(src, work_dir, name)
+            else:
+                pages = []
         else:
 
 

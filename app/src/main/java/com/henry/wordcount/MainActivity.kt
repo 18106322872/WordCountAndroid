@@ -1953,7 +1953,8 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
         // v1.3.32: 文件内部标题
         internalTitle = (meta["internal_title"] as? String) ?: "",
         inner = inner,
-        hasUnreliable = ext == ".pdf" && (imageOnly || !imgPages.isNullOrEmpty())
+        // v1.3.33: OOXML（pptx/docx/xlsx）含嵌入图片时，也视为"不可识别内容"可导出
+        hasUnreliable = (ext == ".pdf" && (imageOnly || !imgPages.isNullOrEmpty())) || imageCount > 0
     )
 }
 
