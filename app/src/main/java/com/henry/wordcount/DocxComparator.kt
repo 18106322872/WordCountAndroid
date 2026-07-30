@@ -203,25 +203,22 @@ object DocxComparator {
 
         writeOutputDocx(File(actualOrig), outPath, bodyParts)
 
-        // 涉及修改的句子总字数（多级 fallback 保证不为 0）
-        // v1.3.28: 原公式 revTotal - blackWhole 在 .doc 转换等场景可能返回 0，
-        //   现增加 fallback 链：公式结果 → 结果文档统计差 → ins 词数
+        // 涉及修改的句子总字数（v1.3.30: 优先直接统计法）
+        // v1.3.28~29 的三级 fallback 问题：formulaResult=46>0 时直接返回错误值，
+        //   永远走不到第三级 ins+del 兜底（ins+del 才是真正的修改量）。
+        //   根因：公式 revTotal-blackWhole 是间接计算，源文档与结果文档口径不一致时必偏。
+        // v1.3.30 策略：insWords+delWords（直接统计插入+删除）为首选；
+        //   仅当 ins+del=0 时才回退到间接公式（兼容无修订标记的极端场景）。
         val revTotalChars = computeRevDocTotalChars(actualRev)
         val resultStats = computeResultDocStats(outPath)
+        val directModified = resultStats.insWords + resultStats.delWords  // 直接统计：红+蓝
         val formulaResult = kotlin.math.max(0, revTotalChars - resultStats.blackWholeSentenceChars)
-        // v1.3.29: 三级 fallback 公式
-        //   1) 原公式：revTotal - blackWhole（依赖修订档读取，.doc 可能异常）
-        //   2) Fallback：结果文档 total - blackWhole（结果文档自身统计）
-        //   3) 兜底：insWords + delWords（直接统计插入+删除内容的词数）
-        val modifiedChars = if (formulaResult > 0) {
-            formulaResult
+        val modifiedChars = if (directModified > 0) {
+            directModified  // 首选：直接统计最可靠
         } else {
+            // 回退：间接公式（仅当直接统计为 0 时使用）
             val alt1 = kotlin.math.max(0, resultStats.totalChars - resultStats.blackWholeSentenceChars)
-            if (alt1 > 0) alt1
-            else {
-                // v1.3.29: ins+del 才是完整的修改量（此前只算 ins 漏掉 del）
-                resultStats.insWords + resultStats.delWords
-            }
+            if (formulaResult > 0) formulaResult else kotlin.math.max(1, alt1)
         }
         val summary = buildString {
             append("插入 $insCount 处(${totalInsChars}字) | 删除 $delCount 处(${totalDelChars}字) | 修改 $repCount 处")
