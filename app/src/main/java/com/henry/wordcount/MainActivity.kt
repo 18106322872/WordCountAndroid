@@ -2093,12 +2093,10 @@ private fun buildExportPdfKotlin(entries: List<FileEntry>, outPath: String): Int
                 var n = 0
                 for (pd in ppt.pictureData) {
                     n++
-                    // v1.3.38: 用 PictureData 的 suggestedFileExtension 或按 type 整数判断格式
-                    // POI HSLF PictureType: 1=EMF,2=WMF,3=PICT,4=JPEG,5=PNG,6=TIFF,7=WMF(EScher)
-                    // 仅导出光栅图（JPEG/PNG），跳过矢量格式
-                    val typeVal = pd.type?.ordinal ?: -1
-                    if (typeVal !in setOf(3, 4, 5)) continue  // 非光栅图跳过
-                    val ext2 = when (typeVal) { 4 -> "jpg"; 5 -> "png"; else -> "dat" }
+                    // v1.3.38: 用 suggestedFileExtension 判断格式（不依赖枚举 ordinal，更可靠）
+                    // 仅导出光栅图（jpg/jpeg/png），跳过矢量格式（emf/wmf 等无法在 PDF 中显示）
+                    val ext2 = (pd.suggestedFileExtension ?: "").lowercase()
+                    if (ext2 !in setOf("jpg", "jpeg", "png")) continue
                     val tmp = File(
                         System.getProperty("java.io.tmpdir"),
                         "wc_export_${System.currentTimeMillis()}_$n.$ext2"

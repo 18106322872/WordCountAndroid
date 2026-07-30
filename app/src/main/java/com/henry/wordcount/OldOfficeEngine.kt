@@ -287,7 +287,7 @@ object OldOfficeEngine {
      * - HSLFGroupShape: 编组 → 递归遍历子形状
      * - HSLFTextShape: 文本形状 → 取文字
      * - HSLFTable: 表格 → 逐单元格提取文字（电脑版 shape.Table，POI 此前漏掉导致 .ppt 字数严重偏低）
-     * - HSLFSimpleShape: 简单形状 → 尝试取文本（部分有文本的 auto-shape）
+     * - 其余形状（HSLFSimpleShape 线/连接符、HSLFPictureShape 图片等）无文本，忽略
      */
     private fun collectHslfShapeText(shape: org.apache.poi.hslf.usermodel.HSLFShape, sb: StringBuilder) {
         try {
@@ -315,16 +315,6 @@ object OldOfficeEngine {
                             }
                             val rowText: String = rowSb.toString().trim()
                             if (rowText.isNotEmpty()) sb.append(rowText).append("\n")
-                        }
-                    } catch (_: Throwable) {}
-                }
-                else -> {
-                    // v1.3.38: 其他形状（HSLFSimpleShape 等）尝试获取文本
-                    try {
-                        val simple = shape as? org.apache.poi.hslf.usermodel.HSLFSimpleShape
-                        if (simple != null) {
-                            val txt = simple.text
-                            if (!txt.isNullOrBlank()) sb.append(txt).append("\n")
                         }
                     } catch (_: Throwable) {}
                 }
