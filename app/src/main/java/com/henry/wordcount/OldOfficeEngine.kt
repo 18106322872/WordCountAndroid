@@ -238,10 +238,9 @@ object OldOfficeEngine {
                         catch (_: Throwable) {}
                     }
                 }
-                // 备注文本
+                // 备注文本（HSLF: 通过 ppt.notes 获取所有备注幻灯片）
                 try {
-                    val notes = slide.notesSheet
-                    if (notes != null) {
+                    for (notes in ppt.notes) {
                         val notesSb = StringBuilder()
                         for (nShape in notes.shapes) {
                             if (nShape is HSLFTextShape) {
