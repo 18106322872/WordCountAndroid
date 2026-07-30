@@ -216,8 +216,12 @@ object OldOfficeEngine {
     }
 
     /**
-     * v1.3.34: .ppt 完整提取（文本 + 备注幻灯片 + 嵌入图片数）。
+     * v1.3.36: .ppt 完整提取（文本 + 备注幻灯片 + 嵌入图片数 + 图表 + 批注）。
      * 与 extractPptx(pptx) 对齐：返回 notesSlides 和 imageCount 供 UI 展开显示。
+     * v1.3.36 改进：
+     *   - 递归编组形状（HSLFGroupShape），否则编组内文本整组丢失导致字数偏低
+     *   - 内嵌图表文字（图表标题 + 系列名）
+     *   - 批注/评论文字（ppt.comments）——这些是需要翻译的内容
      */
     internal fun extractPptFull(file: File): PptResult {
         val fis = FileInputStream(file)
@@ -226,39 +230,60 @@ object OldOfficeEngine {
         val notesList = mutableListOf<SheetStat>()
         var imgCount = 0
         try {
-            // 幻灯片文本
+            // 幻灯片文本（递归编组 + 图表 + 批注）
             for (slide in ppt.slides) {
-                for (shape in slide.shapes) {
-                    if (shape is HSLFTextShape) {
-                        val t = shape.text
-                        if (!t.isNullOrBlank()) textSb.append(t).append("\n")
-                    } else {
-                        // 统计图片（HSLFPictureData 是嵌入图片）
-                        try { if (org.apache.poi.hslf.usermodel.HSLFPictureShape::class.java.isInstance(shape)) imgCount++ }
-                        catch (_: Throwable) {}
-                    }
-                }
-                // 备注文本（HSLF: 通过 ppt.notes 获取所有备注幻灯片）
+                // 递归收集幻灯片内所有文本形状（含编组内子形状）
                 try {
-                    for (notes in ppt.notes) {
-                        val notesSb = StringBuilder()
-                        for (nShape in notes.shapes) {
-                            if (nShape is HSLFTextShape) {
-                                val nt = nShape.text
-                                if (!nt.isNullOrBlank()) notesSb.append(nt).append("\n")
-                            }
-                        }
-                        val notesText = notesSb.toString().trim()
-                        if (notesText.isNotEmpty()) {
-                            val nStats = countTextKotlin(notesText)
-                            notesList.add(SheetStat(
-                                name = "备注 ${notesList.size + 1}",
-                                words = nStats.first, fe = nStats.second, nc = nStats.third, chars = nStats.fourth
-                            ))
+                    for (shape in slide.shapes) {
+                        collectHslfShapeText(shape, textSb)
+                    }
+                } catch (_: Throwable) {}
+                // 统计图片（HSLFPictureShape 是嵌入图片）
+                try {
+                    for (shape in slide.shapes) {
+                        if (org.apache.poi.hslf.usermodel.HSLFPictureShape::class.java.isInstance(shape)) imgCount++
+                    }
+                } catch (_: Throwable) {}
+                // 内嵌图表文字（图表标题 + 系列名），与 xls 对齐
+                try {
+                    val charts = HSSFChart.getSheetCharts(slide)
+                    for (ch in charts) {
+                        val ct = ch.chartTitle
+                        if (!ct.isNullOrBlank()) textSb.append(ct).append("\n")
+                        for (s in ch.series) {
+                            val st = s.seriesTitle
+                            if (!st.isNullOrBlank()) textSb.append(st).append("\n")
                         }
                     }
                 } catch (_: Throwable) {}
             }
+            // 批注（演讲者注释/评论）文字——这些是需要翻译的内容
+            try {
+                for (comment in ppt.comments) {
+                    val ct = comment.text
+                    if (!ct.isNullOrBlank()) textSb.append(ct).append("\n")
+                }
+            } catch (_: Throwable) {}
+            // 备注文本（HSLF: 通过 ppt.notes 获取所有备注幻灯片）
+            try {
+                for (notes in ppt.notes) {
+                    val notesSb = StringBuilder()
+                    for (nShape in notes.shapes) {
+                        if (nShape is HSLFTextShape) {
+                            val nt = nShape.text
+                            if (!nt.isNullOrBlank()) notesSb.append(nt).append("\n")
+                        }
+                    }
+                    val notesText = notesSb.toString().trim()
+                    if (notesText.isNotEmpty()) {
+                        val nStats = countTextKotlin(notesText)
+                        notesList.add(SheetStat(
+                            name = "备注 ${notesList.size + 1}",
+                            words = nStats.first, fe = nStats.second, nc = nStats.third, chars = nStats.fourth
+                        ))
+                    }
+                }
+            } catch (_: Throwable) {}
         } finally {
             runCatching { ppt.close() }
         }
@@ -268,5 +293,23 @@ object OldOfficeEngine {
             notesSlides = notesList,
             imageCount = imgCount
         )
+    }
+
+    /**
+     * v1.3.36: 递归收集 HSLF 形状文字（含编组内子形状）。
+     * - HSLFGroupShape: 编组 → 递归遍历子形状（否则编组内文本整组丢失，导致 .ppt 字数偏低）
+     * - HSLFTextShape: 文本形状 → 取文字
+     * - 其他（图片等）→ 忽略
+     */
+    private fun collectHslfShapeText(shape: org.apache.poi.hslf.usermodel.HSLFShape, sb: StringBuilder) {
+        when (shape) {
+            is org.apache.poi.hslf.usermodel.HSLFGroupShape -> {
+                try { for (child in shape.shapes) collectHslfShapeText(child, sb) } catch (_: Throwable) {}
+            }
+            is HSLFTextShape -> {
+                val txt = shape.text
+                if (!txt.isNullOrBlank()) sb.append(txt).append("\n")
+            }
+        }
     }
 }

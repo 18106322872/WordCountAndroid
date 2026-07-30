@@ -479,8 +479,9 @@ fun FileCard(
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(checked = entry.selected, onCheckedChange = { onToggle(entry) })
+                // v1.3.36: 文件名行只显示纯文件名，不显示"备"/"图"/"隐"等前缀
                 Text(
-                    (if (prefixTags.isNotEmpty()) "$prefixTags " else "") + entry.displayName,
+                    entry.displayName,
                     fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier
@@ -1779,9 +1780,10 @@ private fun addFiles(
                             val pptRes = OldOfficeEngine.extractPptFull(f)
                             text = pptRes.text
                             docPages = pptRes.pages
-                            // 将 PPT 备注和图片数暂存，后面写入 resMap
-                            val pptNotes = pptRes.notesSlides
-                            val pptImages = pptRes.imageCount
+                            // v1.3.36 修复：直接赋值给外层 var，不能用 val（否则遮蔽外层变量，
+                            // 导致 resMap 写入的是初始空值——与 v1.3.33 imageCount bug 同因）
+                            pptNotes = pptRes.notesSlides
+                            pptImages = pptRes.imageCount
                         }
                         if (text.isBlank()) {
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = dName, cachePath = f.absolutePath, error = "此老格式文件内容为空或无法读取"))

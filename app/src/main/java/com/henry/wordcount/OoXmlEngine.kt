@@ -764,18 +764,54 @@ object OoXmlEngine {
                     if (clean.isNotEmpty()) nsb.append(clean).append(' ')
                 }
             }
-            notesList.add("备注${idx + 1}" to nsb.toString())
+            // v1.3.36: 仅当备注有实际文本时才计入——PowerPoint 默认给每页都建空的
+            // notesSlide XML（无文字），之前的代码无条件计入导致"无备注却显示备注 N"。
+            val notesText = nsb.toString().trim()
+            if (notesText.isNotEmpty()) {
+                notesList.add("备注${idx + 1}" to notesText)
+            }
         }
 
         // ── 图片计数（仅统计媒体文件，排除 .xml/.rels）──
         val imageCount = countMediaImages(zip)
 
-        val text = sb.toString()
+        // ── v1.3.36: 内嵌图表 + SmartArt 文本 ──
+        // 这些是需要翻译的内容，与桌面版 wordcount.py 一致（之前只读 slideN.xml 漏掉）。
+        // 图表文字在 ppt/charts/chartN.xml；SmartArt 文字在 ppt/diagrams/dataN.xml。
+        // 两者与 slideN.xml 不重叠（slide 里只是引用），不会重复计入。
+        val embeddedText = extractPptEmbeddedText(zip)
+
+        val text = sb.toString() + if (embeddedText.isNotBlank()) "\n$embeddedText" else ""
         val pages = max(1, slideEntries.size)
         return OoxmlResult(text, pages, "pptx",
             notesSlides = notesList,
             imageCount = imageCount,
             internalTitle = extractInternalTitle(zip))
+    }
+
+    /**
+     * v1.3.36: 提取 PPTX 内嵌图表(ppt/charts/chartN.xml)与 SmartArt(ppt/diagrams/dataN.xml)
+     * 的文字。这些是翻译内容，桌面版 python-pptx 也会遍历 shape.has_chart 计入图表标题/轴标题。
+     * SmartArt 在 python-pptx 下无法直接读取，这里从 diagrams/dataN.xml 补全。
+     * 只抽 <a:t>，与 slideN.xml 不重叠。
+     */
+    private fun extractPptEmbeddedText(zip: ZipFile): String {
+        val sb = StringBuilder()
+        try {
+            val entries = Collections.list(zip.entries())
+            for (e in entries) {
+                val nm = e.name.lowercase()
+                val isChart = nm.startsWith("ppt/charts/chart") && nm.endsWith(".xml")
+                val isDiagram = nm.startsWith("ppt/diagrams/data") && nm.endsWith(".xml")
+                if (!isChart && !isDiagram) continue
+                val xml = readEntry(zip, e.name) ?: continue
+                """<a:t[^>]*>(.*?)</a:t>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(xml).forEach {
+                    val t = decodeXml(it.groupValues[1]).trim()
+                    if (t.isNotEmpty()) sb.append(t).append('\n')
+                }
+            }
+        } catch (_: Throwable) {}
+        return sb.toString()
     }
 
     // ───────────────────────── 工具 ─────────────────────────
