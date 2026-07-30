@@ -2093,16 +2093,20 @@ private fun buildExportPdfKotlin(entries: List<FileEntry>, outPath: String): Int
                 var n = 0
                 for (pd in ppt.pictureData) {
                     n++
-                    // v1.3.38: 用 suggestedFileExtension 判断格式（不依赖枚举 ordinal，更可靠）
-                    // 仅导出光栅图（jpg/jpeg/png），跳过矢量格式（emf/wmf 等无法在 PDF 中显示）
-                    val ext2 = (pd.suggestedFileExtension ?: "").lowercase()
-                    if (ext2 !in setOf("jpg", "jpeg", "png")) continue
+                    // v1.3.38: 用图片数据魔数(magic number)判断真实格式，不依赖 POI 枚举命名
+                    // JPEG: FF D8 FF ; PNG: 89 50 4E 47 ; 其余(EMF/WMF 矢量)跳过无法在 PDF 显示
+                    val data = pd.data ?: continue
+                    val ext2 = when {
+                        data.size >= 3 && data[0] == 0xFF.toByte() && data[1] == 0xD8.toByte() && data[2] == 0xFF.toByte() -> "jpg"
+                        data.size >= 4 && data[0] == 0x89.toByte() && data[1] == 0x50.toByte() && data[2] == 0x4E.toByte() && data[3] == 0x47.toByte() -> "png"
+                        else -> null
+                    } ?: continue
                     val tmp = File(
                         System.getProperty("java.io.tmpdir"),
                         "wc_export_${System.currentTimeMillis()}_$n.$ext2"
                     )
                     try {
-                        tmp.outputStream().use { it.write(pd.data) }
+                        tmp.outputStream().use { it.write(data) }
                         imgEntries.add(tmp.absolutePath to "$name - 图片 $n")
                     } catch (_: Exception) {}
                 }
