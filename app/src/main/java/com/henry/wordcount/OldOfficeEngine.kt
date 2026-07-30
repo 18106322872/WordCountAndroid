@@ -282,20 +282,43 @@ object OldOfficeEngine {
     }
 
     /**
-     * v1.3.36: 递归收集 HSLF 形状文字（含编组内子形状）。
-     * - HSLFGroupShape: 编组 → 递归遍历子形状（否则编组内文本整组丢失，导致 .ppt 字数偏低）
+     * v1.3.38: 递归收集 HSLF 形状文字（含编组 + 表格 + 简单形状）。
+     * 与电脑版 COM 对齐：COM 遍历 slide.Shapes 检查 HasTextFrame + HasTable。
+     * - HSLFGroupShape: 编组 → 递归遍历子形状
      * - HSLFTextShape: 文本形状 → 取文字
-     * - 其他（图片等）→ 忽略
+     * - HSLFTable: 表格 → 逐单元格提取文字（电脑版 shape.Table，POI 此前漏掉导致 .ppt 字数严重偏低）
+     * - HSLFSimpleShape: 简单形状 → 尝试取文本（部分有文本的 auto-shape）
      */
     private fun collectHslfShapeText(shape: org.apache.poi.hslf.usermodel.HSLFShape, sb: StringBuilder) {
-        when (shape) {
-            is org.apache.poi.hslf.usermodel.HSLFGroupShape -> {
-                try { for (child in shape.shapes) collectHslfShapeText(child, sb) } catch (_: Throwable) {}
+        try {
+            when (shape) {
+                is org.apache.poi.hslf.usermodel.HSLFGroupShape -> {
+                    for (child in shape.shapes) collectHslfShapeText(child, sb)
+                }
+                is HSLFTextShape -> {
+                    val txt = shape.text
+                    if (!txt.isNullOrBlank()) sb.append(txt).append("\n")
+                }
+                is org.apache.poi.hslf.usermodel.HSLFTable -> {
+                    // v1.3.38: 表格文本（与电脑版 COM shape.Table 对齐）
+                    for (row in shape.rows) {
+                        val rowSb = StringBuilder()
+                        for (cell in row) {
+                            val ct = cell.text?.trim() ?: ""
+                            if (ct.isNotEmpty()) rowSb.append(ct).append(" ")
+                        }
+                        val rowText = rowSb.toString().trim()
+                        if (rowText.isNotEmpty()) sb.append(rowText).append("\n")
+                    }
+                }
+                else -> {
+                    // v1.3.38: 其他形状（HSLFSimpleShape 等）尝试获取文本
+                    try {
+                        val txt = (shape as? org.apache.poi.hslf.usermodel.HSLFSimpleShape)?.text
+                        if (!txt.isNullOrBlank()) sb.append(txt).append("\n")
+                    } catch (_: Throwable) {}
+                }
             }
-            is HSLFTextShape -> {
-                val txt = shape.text
-                if (!txt.isNullOrBlank()) sb.append(txt).append("\n")
-            }
-        }
+        } catch (_: Throwable) {}
     }
 }

@@ -761,7 +761,9 @@ object OoXmlEngine {
                 val line = pText.toString().trim()
                 if (line.isNotEmpty()) {
                     val clean = xmlTagRe.replace(line, "")
-                    if (clean.isNotEmpty()) nsb.append(clean).append(' ')
+                    // v1.3.38: 备注也过滤占位符默认文字（与幻灯片正文一致），
+                    // 否则 PowerPoint 默认建的空 notesSlide 含"点击此处添加备注"等文本会被误计入
+                    if (clean.isNotEmpty() && !isPlaceholderText(clean)) nsb.append(clean).append(' ')
                 }
             }
             // v1.3.36: 仅当备注有实际文本时才计入——PowerPoint 默认给每页都建空的

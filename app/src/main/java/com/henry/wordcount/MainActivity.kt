@@ -2058,7 +2058,8 @@ private fun buildExportPdfKotlin(entries: List<FileEntry>, outPath: String): Int
 
         val imgEntries = mutableListOf<Pair<String, String>>()
 
-        if (ext in setOf(".pptx", ".ppt", ".docx", ".xlsx", ".xls")) {
+        // v1.3.38: 分离 OOXML(ZIP) 和 OLE2(.ppt) 两种格式——.ppt 不是 ZIP，ZipFile 会静默失败
+        if (ext in setOf(".pptx", ".docx", ".xlsx", ".xls")) {
             try {
                 val zip = ZipFile(srcPath)
                 val zipEntries = java.util.Collections.list(zip.entries())
@@ -2083,6 +2084,31 @@ private fun buildExportPdfKotlin(entries: List<FileEntry>, outPath: String): Int
                     } catch (_: Exception) {}
                 }
                 zip.close()
+            } catch (_: Exception) {}
+        } else if (ext == ".ppt") {
+            // .ppt 是 OLE2 格式，需用 POI HSLF 提取嵌入图片（与 extractPptFull 统计 imageCount 对应）
+            try {
+                val fis = java.io.FileInputStream(srcPath)
+                val ppt = org.apache.poi.hslf.usermodel.HSLFSlideShow(fis)
+                var n = 0
+                for (pd in ppt.pictureData) {
+                    n++
+                    val ext2 = when (pd.type) {
+                        org.apache.poi.hslf.usermodel.Picture.PNG -> "png"
+                        org.apache.poi.hslf.usermodel.Picture.JPEG -> "jpg"
+                        else -> continue  // 跳过 EMF/WMF 等非光栅图
+                    }
+                    val tmp = File(
+                        System.getProperty("java.io.tmpdir"),
+                        "wc_export_${System.currentTimeMillis()}_$n.$ext2"
+                    )
+                    try {
+                        tmp.outputStream().use { it.write(pd.data) }
+                        imgEntries.add(tmp.absolutePath to "$name - 图片 $n")
+                    } catch (_: Exception) {}
+                }
+                ppt.close()
+                fis.close()
             } catch (_: Exception) {}
         }
 
