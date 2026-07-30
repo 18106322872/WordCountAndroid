@@ -2100,8 +2100,10 @@ fun CompareScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("修改涉及的句子总字数：", fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onPrimaryContainer, style = MaterialTheme.typography.titleMedium)
-                        Text("$modChars 字/词", fontWeight = FontWeight.Bold,
+                        Text("$modChars", fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onPrimaryContainer, style = MaterialTheme.typography.titleLarge)
+                        Text(" 字/词", fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer, style = MaterialTheme.typography.titleMedium)
                     }
                     Text("插入 $ins 处 ｜ 删除 $del 处 ｜ 修改 $rep 处", color = MaterialTheme.colorScheme.onPrimaryContainer)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

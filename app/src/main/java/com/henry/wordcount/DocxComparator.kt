@@ -203,28 +203,27 @@ object DocxComparator {
 
         writeOutputDocx(File(actualOrig), outPath, bodyParts)
 
-        // 涉及修改的句子总字数（v1.3.30: 优先直接统计法）
-        // v1.3.28~29 的三级 fallback 问题：formulaResult=46>0 时直接返回错误值，
-        //   永远走不到第三级 ins+del 兜底（ins+del 才是真正的修改量）。
-        //   根因：公式 revTotal-blackWhole 是间接计算，源文档与结果文档口径不一致时必偏。
-        // v1.3.30 策略：insWords+delWords（直接统计插入+删除）为首选；
-        //   仅当 ins+del=0 时才回退到间接公式（兼容无修订标记的极端场景）。
+        // 涉及修改的句子总字数（v1.3.31: 含修改句子的全句字数合计）
+        // v1.3.28~30 的问题：
+        //   - indirect formula (revTotal-blackWhole): 口径不一致，返回46
+        //   - insWords+delWords: 只算红蓝标记本身，返回7（漏掉同句未修改部分）
+        // 用户需求：找出所有含 <w:ins>/<w:del> 的句子，统计这些句子的**全句**字数合计。
+        //   翻译场景：整句都需要翻译，不只是被改的几个词。
         val revTotalChars = computeRevDocTotalChars(actualRev)
         val resultStats = computeResultDocStats(outPath)
-        val directModified = resultStats.insWords + resultStats.delWords  // 直接统计：红+蓝
-        val formulaResult = kotlin.math.max(0, revTotalChars - resultStats.blackWholeSentenceChars)
-        val modifiedChars = if (directModified > 0) {
-            directModified  // 首选：直接统计最可靠
+        val modifiedChars = if (resultStats.modifiedSentenceWords > 0) {
+            resultStats.modifiedSentenceWords  // 首选：含修改句子的全句字数
         } else {
-            // 回退：间接公式（仅当直接统计为 0 时使用）
-            val alt1 = kotlin.math.max(0, resultStats.totalChars - resultStats.blackWholeSentenceChars)
-            if (formulaResult > 0) formulaResult else kotlin.math.max(1, alt1)
+            // 回退：间接公式（无修订标记时的极端兼容）
+            kotlin.math.max(1, kotlin.math.max(
+                0, revTotalChars - resultStats.blackWholeSentenceChars
+            ))
         }
         val summary = buildString {
             append("插入 $insCount 处(${totalInsChars}字) | 删除 $delCount 处(${totalDelChars}字) | 修改 $repCount 处")
         }
 
-        Log.d(TAG, "result: ins=$insCount(${totalInsChars}字) del=$delCount(${totalDelChars}字) rep=$repCount chars=$modifiedChars (revTotal=$revTotalChars total=${resultStats.totalChars} blackWhole=${resultStats.blackWholeSentenceChars} insWords=${resultStats.insWords} delWords=${resultStats.delWords})")
+        Log.d(TAG, "result: ins=$insCount(${totalInsChars}字) del=$delCount(${totalDelChars}字) rep=$repCount chars=$modifiedChars (revTotal=$revTotalChars total=${resultStats.totalChars} blackWhole=${resultStats.blackWholeSentenceChars} insWords=${resultStats.insWords} delWords=${resultStats.delWords} modifiedSentenceWords=${resultStats.modifiedSentenceWords})")
 
         // 清理 .doc 转换产生的临时 .docx 文件
         for (tp in tempFiles) {
@@ -1488,7 +1487,8 @@ object DocxComparator {
         val totalChars: Int,                 // 修订侧总词数（words口径，<w:t> 黑+蓝）
         val blackWholeSentenceChars: Int,    // 无 <w:ins> 句子中的黑字词数（words口径）
         val insWords: Int = 0,              // <w:ins> 内的词数
-        val delWords: Int = 0               // <w:del> 内的词数（v1.3.29：ins+del=修改总量）
+        val delWords: Int = 0,              // <w:del> 内的词数
+        val modifiedSentenceWords: Int = 0   // v1.3.31：含修改的句子全句词数合计（用户需求）
     )
 
     /**
@@ -1570,6 +1570,7 @@ object DocxComparator {
         var blackWholeWords = 0
         var insWords = 0  // v1.3.28: 直接统计 <w:ins> 内的词数
         var delWords = 0  // v1.3.29: 直接统计 <w:del> 内的词数
+        var modifiedSentenceWords = 0  // v1.3.31：含修改的句子全句词数合计
 
         for (px in allBlocks) {
             // v1.3.24: 栈式解析。ins/del 深度与 seg 文本处于同一坐标系（fullText 顺序），
@@ -1621,16 +1622,20 @@ object DocxComparator {
                 delWords += countTextKotlin(delText).first
             }
 
-            // 切句：找出无 <w:ins> 的黑色整句，累加其词数
+            // 切句：同时统计黑色整句 + 含修改的句子（v1.3.31）
             val fullText = segs.joinToString("") { it.text }
             if (fullText.isEmpty()) continue
 
             val insArr = BooleanArray(fullText.length)
+            val modifiedArr = BooleanArray(fullText.length)  // v1.3.31: 标记含修改的位置(ins或del)
             var idx = 0
             for (seg in segs) {
                 for (i in 0 until seg.text.length) {
                     val p = idx + i
-                    if (p < fullText.length) insArr[p] = seg.isIns
+                    if (p < fullText.length) {
+                        insArr[p] = seg.isIns
+                        modifiedArr[p] = seg.isIns || seg.isDel
+                    }
                 }
                 idx += seg.text.length
             }
@@ -1639,44 +1644,60 @@ object DocxComparator {
             for (ci in fullText.indices) {
                 if (fullText[ci] in delim) {
                     val sEnd = ci + 1
-                    if (sEnd > sStart && !insArr.sliceArray(sStart until sEnd).any { it }) {
-                        // 黑色整句：收集其中黑字部分的文本，按词数统计
-                        val sentenceText = StringBuilder()
+                    if (sEnd > sStart) {
+                        val hasMod = modifiedArr.sliceArray(sStart until sEnd).any { it }
+                        // 收集该句全部非删除文本（用于统计全句字数）
+                        val sentenceAllText = StringBuilder()
                         var si = 0
                         for (seg in segs) {
                             for (i in 0 until seg.text.length) {
                                 val p = si + i
-                                if (p >= sStart && p < sEnd && seg.isBlack) {
-                                    sentenceText.append(seg.text[i])
+                                if (p >= sStart && p < sEnd && !seg.isDel) {
+                                    sentenceAllText.append(seg.text[i])
                                 }
                             }
                             si += seg.text.length
                         }
-                        val st = sentenceText.toString()
-                        if (st.isNotEmpty()) blackWholeWords += countTextKotlin(st).first
+                        val sat = sentenceAllText.toString()
+                        if (sat.isNotEmpty()) {
+                            if (!hasMod) {
+                                // 黑色整句：无任何修改 → 累加黑字词数
+                                blackWholeWords += countTextKotlin(sat).first
+                            } else {
+                                // v1.3.31: 含修改的句子 → 全句词数计入修改涉及的句子总字数
+                                modifiedSentenceWords += countTextKotlin(sat).first
+                            }
+                        }
                     }
                     sStart = sEnd
                 }
             }
             // 最后一句
-            if (sStart < fullText.length && !insArr.sliceArray(sStart until fullText.length).any { it }) {
-                val sentenceText = StringBuilder()
+            if (sStart < fullText.length) {
+                val hasMod = modifiedArr.sliceArray(sStart until fullText.length).any { it }
+                val sentenceAllText = StringBuilder()
                 var si = 0
                 for (seg in segs) {
                     for (i in 0 until seg.text.length) {
                         val p = si + i
-                        if (p >= sStart && p < fullText.length && seg.isBlack) {
-                            sentenceText.append(seg.text[i])
+                        if (p >= sStart && p < fullText.length && !seg.isDel) {
+                            sentenceAllText.append(seg.text[i])
                         }
                     }
                     si += seg.text.length
                 }
-                val st = sentenceText.toString()
-                if (st.isNotEmpty()) blackWholeWords += countTextKotlin(st).first
+                val sat = sentenceAllText.toString()
+                if (sat.isNotEmpty()) {
+                    if (!hasMod) {
+                        blackWholeWords += countTextKotlin(sat).first
+                    } else {
+                        modifiedSentenceWords += countTextKotlin(sat).first
+                    }
+                }
             }
         }
 
-        return ResultDocStats(totalWords, blackWholeWords, insWords, delWords)
+        return ResultDocStats(totalWords, blackWholeWords, insWords, delWords, modifiedSentenceWords)
     }
 
     /**
