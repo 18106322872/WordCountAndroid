@@ -2093,7 +2093,7 @@ private fun buildExportPdfKotlin(entries: List<FileEntry>, outPath: String): Int
             val dh = (opts.outHeight * scale).toInt()
             val canvasH = (headerH + dh + 4).toInt()
 
-            val pageInfo = PdfDocument PageInfo.Builder(pageW, maxOf(pageH, canvasH), totalPages + 1).create()
+            val pageInfo = PdfDocument.PageInfo.Builder(pageW, maxOf(pageH, canvasH), totalPages + 1).create()
             val page = pdf.startPage(pageInfo)
             val canvas = page.canvas
 
