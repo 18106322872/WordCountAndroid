@@ -82,7 +82,7 @@ import android.os.ParcelFileDescriptor
 import java.io.File
 import java.io.FileOutputStream
 import android.graphics.BitmapFactory
-import android.graphics.PdfDocument
+import android.graphics.pdf.PdfDocument
 import java.util.zip.ZipFile
 
 class MainActivity : ComponentActivity() {
@@ -2125,18 +2125,6 @@ private fun buildExportPdfKotlin(entries: List<FileEntry>, outPath: String): Int
 // ═══════════════════════════════════════════════════════════════════════════
 // v1.1.1: 文档比较界面（仿 Word「审阅 → 比较」）
 // ═══════════════════════════════════════════════════════════════════════════
-
-            // 清理临时文件
-            try { File(imgPath).delete() } catch (_: Exception) {}
-        }
-    }
-
-    if (totalPages > 0) {
-        pdf.writeTo(java.io.FileOutputStream(outPath))
-    }
-    pdf.close()
-    return totalPages
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // v1.1.1: 文档比较界面（仿 Word「审阅 → 比较」）
