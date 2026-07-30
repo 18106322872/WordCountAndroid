@@ -81,6 +81,9 @@ import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
 import java.io.File
 import java.io.FileOutputStream
+import android.graphics.BitmapFactory
+import android.graphics.PdfDocument
+import java.util.zip.ZipFile
 
 class MainActivity : ComponentActivity() {
     /** 外部可通过此引用向已有列表追加新文件（onNewIntent 时使用） */
@@ -603,7 +606,7 @@ fun FileCard(
                 Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("备", style = MaterialTheme.typography.labelSmall, color = Color(0xFFB00020))
                     Checkbox(checked = notesChecked, onCheckedChange = { onToggleHidden(entry.id, "notes::_summary_") }, modifier = Modifier.size(24.dp))
-                    Text("所有备注（${notes.size} 张幻灯片）", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    Text("备注（${notes.size}）", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                     Text("字 $totalNotesWords 中 $totalNotesFe 非 $totalNotesNc", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
             }
@@ -1995,23 +1998,16 @@ private fun exportUnreliable(
 ) {
     scope.launch(Dispatchers.Main) {
         try {
-            val sel = entries.filter { it.selected && it.result?.hasUnreliable == true && it.rawResult != null }
+            val sel = entries.filter { it.selected && it.result?.hasUnreliable == true && it.cachePath.isNotBlank() }
             if (sel.isEmpty()) { snackbar.showSnackbar("没有可导出的不可识别内容"); return@launch }
-            val filesInfo = sel.map {
-                listOf<Any?>(
-                    it.result!!.name,
-                    it.rawResult!!["stats"],
-                    it.rawResult!!["meta"],
-                    it.cachePath,
-                    it.result!!.ext
-                )
-            }
+
             val out = File(context.getExternalFilesDir(null), "无法准确统计内容_${System.currentTimeMillis()}.pdf")
-            var res: String? = null
+            var totalCount = 0
             withContext(Dispatchers.IO) {
-                res = PythonEngine.buildExportPdf(context, filesInfo, out.absolutePath)
+                // v1.3.35: 纯 Kotlin 实现（不依赖 Python/Chaquopy，彻底避免 AssetFinder 报错）
+                totalCount = buildExportPdfKotlin(sel, out.absolutePath)
             }
-            if (res != null) {
+            if (totalCount > 0) {
                 val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", out)
                 val intent = Intent(Intent.ACTION_VIEW).apply {
                     setDataAndType(uri, "application/pdf")
@@ -2019,12 +2015,127 @@ private fun exportUnreliable(
                 }
                 context.startActivity(Intent.createChooser(intent, "打开导出的 PDF"))
             } else {
-                snackbar.showSnackbar("无可导出内容（需 fitz；当前构建未含 pymupdf）")
+                snackbar.showSnackbar("无可导出内容")
+                out.delete()
             }
-            } catch (e: Exception) {
+        } catch (e: Exception) {
             snackbar.showSnackbar("导出失败：${e.message}")
         }
     }
+}
+
+/** v1.3.35: 纯 Kotlin 实现 PDF 导出——从 OOXML 包抽取嵌入图片，每张图片一页 PDF。
+ *  返回成功写入的页数。 */
+private fun buildExportPdfKotlin(entries: List<FileEntry>, outPath: String): Int {
+    val pdf = PdfDocument()
+    var totalPages = 0
+    val pageW = 595
+    val pageH = 842
+    val maxImgW = pageW - 40
+    val headerH = 36f
+    val headerPaint = android.graphics.Paint().apply {
+        textSize = 12f; isAntiAlias = true; color = android.graphics.Color.BLACK
+    }
+    val mediaExts = setOf(".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp")
+
+    for (entry in entries) {
+        val srcPath = entry.cachePath
+        val ext = entry.result?.ext ?: ""
+        val name = entry.result?.name ?: entry.displayName
+        val words = entry.result?.words ?: 0
+        val fe = entry.result?.fe ?: 0
+        val nc = entry.result?.nc ?: 0
+        val imageCount = entry.result?.imageCount ?: 0
+
+        if (imageCount <= 0 && ext != ".pdf") continue
+
+        val imgEntries = mutableListOf<Pair<String, String>>()
+
+        if (ext in setOf(".pptx", ".ppt", ".docx", ".xlsx", ".xls")) {
+            try {
+                val zip = ZipFile(srcPath)
+                val zipEntries = java.util.Collections.list(zip.entries())
+                    .filter { ze ->
+                        val nm = ze.name.lowercase()
+                        (("/media/" in nm || nm.startsWith("media/")) &&
+                                !nm.endsWith("/") && mediaExts.any { nm.endsWith(it) })
+                    }
+                    .sortedBy { it.name }
+                var n = 0
+                for (ze in zipEntries) {
+                    n++
+                    val tmp = File(
+                        System.getProperty("java.io.tmpdir"),
+                        "wc_export_${System.currentTimeMillis()}_$n${ze.name.substringAfterLast('.')}"
+                    )
+                    try {
+                        zip.getInputStream(ze).use { input ->
+                            tmp.outputStream().use { output -> input.copyTo(output) }
+                        }
+                        imgEntries.add(tmp.absolutePath to "$name - 图片 $n")
+                    } catch (_: Exception) {}
+                }
+                zip.close()
+            } catch (_: Exception) {}
+        }
+
+        for ((imgPath, label) in imgEntries) {
+            val opts = BitmapFactory.Options()
+            opts.inJustDecodeBounds = true
+            BitmapFactory.decodeFile(imgPath, opts)
+            if (opts.outWidth <= 0 || opts.outHeight <= 0) {
+                try { File(imgPath).delete() } catch (_: Exception) {}
+                continue
+            }
+
+            val scale = minOf(maxImgW.toFloat() / opts.outWidth, 1f)
+            val dw = (opts.outWidth * scale).toInt()
+            val dh = (opts.outHeight * scale).toInt()
+            val canvasH = (headerH + dh + 4).toInt()
+
+            val pageInfo = PdfDocument PageInfo.Builder(pageW, maxOf(pageH, canvasH), totalPages + 1).create()
+            val page = pdf.startPage(pageInfo)
+            val canvas = page.canvas
+
+            val headerText = "$name  |  $label  |  字数$words 中文$fe 非中文$nc"
+            canvas.drawText(headerText, 10f, 20f, headerPaint)
+
+            val bmpOpts = BitmapFactory.Options()
+            bmpOpts.inSampleSize = if (scale < 0.5f) 2 else 1
+            val bmp = BitmapFactory.decodeFile(imgPath, bmpOpts)
+            if (bmp != null) {
+                val left = ((pageW - dw) / 2f).coerceAtLeast(0f)
+                canvas.drawBitmap(bmp, null, android.graphics.RectF(left, headerH + 2, left + dw, headerH + 2 + dh), null)
+                bmp.recycle()
+            }
+
+            pdf.finishPage(page)
+            totalPages++
+            try { File(imgPath).delete() } catch (_: Exception) {}
+        }
+    }
+
+    if (totalPages > 0) {
+        pdf.writeTo(FileOutputStream(outPath))
+    }
+    pdf.close()
+    return totalPages
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v1.1.1: 文档比较界面（仿 Word「审阅 → 比较」）
+// ═══════════════════════════════════════════════════════════════════════════
+
+            // 清理临时文件
+            try { File(imgPath).delete() } catch (_: Exception) {}
+        }
+    }
+
+    if (totalPages > 0) {
+        pdf.writeTo(java.io.FileOutputStream(outPath))
+    }
+    pdf.close()
+    return totalPages
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

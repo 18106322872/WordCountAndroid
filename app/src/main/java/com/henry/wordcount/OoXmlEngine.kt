@@ -698,11 +698,32 @@ object OoXmlEngine {
         val pRe = """<a:p[^>]*>(.*?)</a:p>""".toRegex(RegexOption.DOT_MATCHES_ALL)
         // 清洗残留 XML 标签（某些 PPTX 的 <a:t> 内容包含 <a:rPr> 等标签片段）
         val xmlTagRe = """<[^>]+>""".toRegex()
+        // v1.3.35: 占位符默认文字过滤（与电脑版 python-pptx 对齐——python-pptx 不返回占位符默认文本）
+        // 中英文常见 PPT 占位符文本（大小写不敏感匹配）
+        val placeholderPatterns = listOf(
+            "click to add title", "click to add subtitle", "click to add text",
+            "click to add slide title", "click to add slide subtitle",
+            "点击此处添加标题", "点击此处添加副标题", "点击此处添加文本",
+            "点击此处添加幻灯片标题", "点击此处添加幻灯片副标题",
+            "date", "footer", "slide number", "页脚", "页码",
+            " presenter name ", " company name ", "作者", "单位"
+        ).map { Regex("^\\s*${Regex.escape(it)}\\s*$", RegexOption.IGNORE_CASE) }
+
+        /** 判断一段文本是否为占位符默认文字 */
+        fun isPlaceholderText(text: String): Boolean {
+            val trimmed = text.trim()
+            if (trimmed.length <= 15) {  // 占位符通常很短
+                for (p in placeholderPatterns) {
+                    if (p.matches(trimmed)) return true
+                }
+            }
+            return false
+        }
 
         val sb = StringBuilder()
         slideEntries.forEachIndexed { idx, entry ->
             val xml = readEntry(zip, entry.name) ?: return@forEachIndexed
-            sb.append("\n[幻灯片${idx + 1}]\n")
+            // v1.3.35: 不再加 [幻灯片N] 标记（此前这些标记被计入字数，导致偏高 ~3fe/页）
             // 按段落提取：同段落内的 <a:t> 直接拼接，段落间用空格分隔
             val paras = pRe.findAll(xml)
             for (para in paras) {
@@ -714,7 +735,8 @@ object OoXmlEngine {
                 if (line.isNotEmpty()) {
                     // 二次清洗：去除可能泄漏的 XML 标签
                     val clean = xmlTagRe.replace(line, "")
-                    if (clean.isNotEmpty()) sb.append(clean).append(' ')
+                    // v1.3.35: 跳过占位符默认文字（与电脑版 python-pptx 对齐）
+                    if (clean.isNotEmpty() && !isPlaceholderText(clean)) sb.append(clean).append(' ')
                 }
             }
             sb.append('\n')
@@ -775,7 +797,8 @@ object OoXmlEngine {
 
     /** 从 docProps/core.xml 提取 <dc:title> 作为文件内部标题（用于修复 URI 无法获取真实文件名的问题）。
      *  v1.3.34: 过滤 WPS/Office 默认模板标题（如"PowerPoint Presentation"、"PowerPoint 演示文稿"等），
-     *  这些不是真实文件名，使用它们替换显示名反而更差。 */
+     *  这些不是真实文件名，使用它们替换显示名反而更差。
+     *  v1.3.35: 过滤后若为空，fallback 取第一张幻灯片首个非占位符文本作为标题。 */
     private fun extractInternalTitle(zip: ZipFile): String {
         val xml = readEntry(zip, "docProps/core.xml") ?: return ""
         // Dublin Core title: <dc:title>...</dc:title> or <cp:coreProperties> namespace variants
@@ -784,18 +807,43 @@ object OoXmlEngine {
         val title = decodeXml(m.groupValues[1]).trim()
         if (title.length < 2 || title.length > 200) return ""
         // 过滤 Office/WPS 默认模板标题——这些不是真实文件名
+        val lower = title.lowercase()
         val defaultTitles = setOf(
-            "PowerPoint Presentation", "PowerPoint 演示文稿",
-            "Word Document", "Word 文档",
-            "Excel Worksheet", "Excel 工作表",
-            "新建 Microsoft Word 文档", "新建 Microsoft Excel 工作表",
-            "新建 Microsoft PowerPoint 演示文稿",
-            "新建 XLSX 工作表", "新建 XLS 工作表", "新建 DOCX 文档",
+            "powerpoint presentation", "powerpoint 演示文稿",
+            "word document", "word 文档",
+            "excel worksheet", "excel 工作表",
+            "新建 microsoft word 文档", "新建 microsoft excel 工作表",
+            "新建 microsoft powerpoint 演示文稿",
+            "新建 xlsx 工作表", "新建 xls 工作表", "新建 docx 文档",
             "演示文稿", "工作簿1", "工作簿2", "工作簿3",
-            "Presentation1", "Workbook1", "Document1"
+            "presentation1", "workbook1", "document1"
         )
-        if (title in defaultTitles) return ""
+        if (lower in defaultTitles) {
+            // v1.3.35: fallback 到第一张幻灯片的第一个有意义文本
+            return extractFallbackTitle(zip)
+        }
         return title
+    }
+
+    /** 当 dc:title 为默认模板名时，尝试从第一张幻灯片提取标题文本作为 fallback。 */
+    private fun extractFallbackTitle(zip: ZipFile): String {
+        val tRe = """<a:t[^>]*>(.*?)</a:t>""".toRegex(RegexOption.DOT_MATCHES_ALL)
+        // 占位符模式（与 extractPptx 内一致）
+        val placeholders = setOf(
+            "click to add title", "click to add subtitle", "click to add text",
+            "点击此处添加标题", "点击此处添加副标题", "点击此处添加文本",
+            "date", "footer", "页脚"
+        ).map { it.lowercase() }
+        // 尝试读取 slide1.xml
+        val slideXml = readEntry(zip, "ppt/slides/slide1.xml") ?: return ""
+        val texts = mutableListOf<String>()
+        tRe.findAll(slideXml).forEach { texts.add(decodeXml(it.groupValues[1]).trim()) }
+        for (t in texts) {
+            if (t.length >= 2 && t.length <= 100 && t.lowercase() !in placeholders) {
+                return t
+            }
+        }
+        return ""
     }
 
     private fun readSharedStrings(zip: ZipFile): List<String> {
