@@ -9664,170 +9664,72 @@ def prepare_unreliable_entries(files_info, work_dir, converter=None):
 
 
 def build_unreliable_pdf(entries, out_path):
-
-
-
     """把 entries 合并为一个 PDF：每页 = 页头标注 + 内容图。
-
-
-
+    v1.3.34: 改用 Pillow（fitz/PyMuPDF 在 Chaquopy 下不可用）。
     页头：文件名 / 页标签 / 本程序统计 → 字数·中文·非中文。
-
-
-
     内容图统一缩放到固定宽度，页头字号随宽度缩放，保证标注始终可读。"""
-
-
-
-    import fitz
-
-
-
-    doc = fitz.open()
-
-
+    from PIL import Image as PILImage, ImageDraw, ImageFont
 
     total = 0
+    TW = 595  # 页面内容宽度（点，A4 宽度约 595）
+    HEAD_H = 36  # 页头区域高度（点）
 
+    _font = None
+    for _fontpath in (
+        "/system/fonts/NotoSansCJK-Regular.ttc",
+        "/system/fonts/NotoSansSC-Regular.otf",
+        "/system/fonts/DroidSansFallbackFull.ttf",
+        "/system/fonts/Roboto.ttf",
+    ):
+        try:
+            _font = ImageFont.truetype(_fontpath, size=12)
+            break
+        except Exception:
+            continue
+    if _font is None:
+        _font = ImageFont.load_default()
 
-
-    TW = 1240  # 页面内容宽度（点），CAD 截图/PDF 页均缩放到此宽度
-
-
-
+    pdf_pages = []
     for (name, stats, pages) in entries:
-
-
-
         words = int(stats.get("words", 0) or 0)
-
-
-
         fe = int(stats.get("fe", 0) or 0)
-
-
-
         nc = int(stats.get("nc", 0) or 0)
-
-
-
-        for (png, label) in pages:
-
-
-
+        for (img_path, label) in pages:
             try:
-
-
-
-                ip = fitz.open(png)
-
-
-
-                ipix = ip[0]
-
-
-
-                iw, ih = ipix.rect.width, ipix.rect.height
-
-
-
-                ip.close()
-
-
-
+                img = PILImage.open(img_path).convert("RGB")
             except Exception:
-
-
-
                 continue
-
-
-
+            iw, ih = img.size
             if iw <= 0 or ih <= 0:
-
-
-
+                img.close()
                 continue
-
-
-
-            scale = TW / iw
-
-
-
-            draw_w = TW
-
-
-
-            draw_h = ih * scale
-
-
-
-            font = max(12, int(TW / 90))
-
-
-
-            head_h = font + 16
-
-
-
-            page = doc.new_page(width=draw_w, height=head_h + draw_h)
-
-
-
-            header = ("文件: %s    %s    本程序统计 → 字数 %d | 中文 %d | 非中文 %d"
-
-
-
-                      % (name, label, words, fe, nc))
-
-
-
-            page.insert_text((10, font + 4), header, fontsize=font, color=(0, 0, 0))
-
-
-
-            page.insert_image(fitz.Rect(0, head_h, draw_w, head_h + draw_h),
-
-
-
-                              filename=png)
-
-
-
+            scale = min(TW / iw, 1.0)
+            dw = int(iw * scale)
+            dh = int(ih * scale)
+            if scale < 1.0:
+                img = img.resize((dw, dh), PILImage.LANCZOS)
+            canvas_w = max(TW, dw)
+            canvas = PILImage.new("RGB", (canvas_w, HEAD_H + dh + 4), (255, 255, 255))
+            draw = ImageDraw.Draw(canvas)
+            header = "%s  |  %s  |  字数%d 中文%d 非中文%d" % (name, label, words, fe, nc)
+            if len(header) > 80:
+                header = header[:77] + "..."
+            draw.text((6, 8), header, fill=(0, 0, 0), font=_font)
+            x_off = (canvas_w - dw) // 2
+            canvas.paste(img, (x_off, HEAD_H + 2))
+            img.close()
+            pdf_pages.append(canvas)
             total += 1
 
-
-
-    doc.save(out_path)
-
-
-
-    doc.close()
-
-
-
+    if pdf_pages:
+        pdf_pages[0].save(
+            out_path, "PDF", resolution=100.0,
+            save_all=True, append_images=pdf_pages[1:]
+        )
+        for _p in pdf_pages:
+            _p.close()
     return total
 
-
-
-
-
-
-
-
-
-
-
-# ---------------------------------------------------------------------------
-
-
-
-# 移动端 API（供 Chaquopy / Kotlin 调用，返回 JSON 可序列化 dict）
-
-
-
-# ---------------------------------------------------------------------------
 
 
 

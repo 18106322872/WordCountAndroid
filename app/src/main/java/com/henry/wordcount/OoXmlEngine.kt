@@ -773,15 +773,29 @@ object OoXmlEngine {
         return n
     }
 
-    /** 从 docProps/core.xml 提取 <dc:title> 作为文件内部标题（用于修复 URI 无法获取真实文件名的问题） */
+    /** 从 docProps/core.xml 提取 <dc:title> 作为文件内部标题（用于修复 URI 无法获取真实文件名的问题）。
+     *  v1.3.34: 过滤 WPS/Office 默认模板标题（如"PowerPoint Presentation"、"PowerPoint 演示文稿"等），
+     *  这些不是真实文件名，使用它们替换显示名反而更差。 */
     private fun extractInternalTitle(zip: ZipFile): String {
         val xml = readEntry(zip, "docProps/core.xml") ?: return ""
         // Dublin Core title: <dc:title>...</dc:title> or <cp:coreProperties> namespace variants
         val dcTitleRe = """<dc:title[^>]*>(.*?)</dc:title>""".toRegex(RegexOption.DOT_MATCHES_ALL)
         val m = dcTitleRe.find(xml) ?: return ""
         val title = decodeXml(m.groupValues[1]).trim()
-        if (title.length >= 2 && title.length <= 200) return title
-        return ""
+        if (title.length < 2 || title.length > 200) return ""
+        // 过滤 Office/WPS 默认模板标题——这些不是真实文件名
+        val defaultTitles = setOf(
+            "PowerPoint Presentation", "PowerPoint 演示文稿",
+            "Word Document", "Word 文档",
+            "Excel Worksheet", "Excel 工作表",
+            "新建 Microsoft Word 文档", "新建 Microsoft Excel 工作表",
+            "新建 Microsoft PowerPoint 演示文稿",
+            "新建 XLSX 工作表", "新建 XLS 工作表", "新建 DOCX 文档",
+            "演示文稿", "工作簿1", "工作簿2", "工作簿3",
+            "Presentation1", "Workbook1", "Document1"
+        )
+        if (title in defaultTitles) return ""
+        return title
     }
 
     private fun readSharedStrings(zip: ZipFile): List<String> {

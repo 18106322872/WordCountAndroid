@@ -41,6 +41,14 @@ object OldOfficeEngine {
         val chars: Int = 0   // PID 16 CharCount = 字符数(不计空格)
     )
 
+    /** v1.3.34: .ppt 完整提取结果（文本 + 备注列表 + 嵌入图片数） */
+    data class PptResult(
+        val text: String,
+        val pages: Int = 0,
+        val notesSlides: List<SheetStat> = emptyList(),
+        val imageCount: Int = 0
+    )
+
     fun extractText(file: File): String {
         val ext = file.extension.lowercase()
         FileInputStream(file).use { fis ->
@@ -205,5 +213,61 @@ object OldOfficeEngine {
             runCatching { ppt.close() }
         }
         return sb.toString()
+    }
+
+    /**
+     * v1.3.34: .ppt 完整提取（文本 + 备注幻灯片 + 嵌入图片数）。
+     * 与 extractPptx(pptx) 对齐：返回 notesSlides 和 imageCount 供 UI 展开显示。
+     */
+    internal fun extractPptFull(file: File): PptResult {
+        val fis = FileInputStream(file)
+        val ppt = HSLFSlideShow(fis)
+        val textSb = StringBuilder()
+        val notesList = mutableListOf<SheetStat>()
+        var imgCount = 0
+        try {
+            // 幻灯片文本
+            for (slide in ppt.slides) {
+                for (shape in slide.shapes) {
+                    if (shape is HSLFTextShape) {
+                        val t = shape.text
+                        if (!t.isNullOrBlank()) textSb.append(t).append("\n")
+                    } else {
+                        // 统计图片（HSLFPictureData 是嵌入图片）
+                        try { if (org.apache.poi.hslf.usermodel.HSLFPictureShape::class.java.isInstance(shape)) imgCount++ }
+                        catch (_: Throwable) {}
+                    }
+                }
+                // 备注文本
+                try {
+                    val notes = slide.notesSheet
+                    if (notes != null) {
+                        val notesSb = StringBuilder()
+                        for (nShape in notes.shapes) {
+                            if (nShape is HSLFTextShape) {
+                                val nt = nShape.text
+                                if (!nt.isNullOrBlank()) notesSb.append(nt).append("\n")
+                            }
+                        }
+                        val notesText = notesSb.toString().trim()
+                        if (notesText.isNotEmpty()) {
+                            val nStats = countTextKotlin(notesText)
+                            notesList.add(SheetStat(
+                                name = "备注 ${notesList.size + 1}",
+                                words = nStats.first, fe = nStats.second, nc = nStats.third, chars = nStats.fourth
+                            ))
+                        }
+                    }
+                } catch (_: Throwable) {}
+            }
+        } finally {
+            runCatching { ppt.close() }
+        }
+        return PptResult(
+            text = textSb.toString(),
+            pages = maxOf(1, ppt.slides.size),
+            notesSlides = notesList,
+            imageCount = imgCount
+        )
     }
 }

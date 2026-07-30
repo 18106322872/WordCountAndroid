@@ -293,9 +293,9 @@ fun WordCountApp(initialUris: List<Uri>) {
                     w += hs.words; fe += hs.fe; nc += hs.nc; ch += hs.chars
                 }
             }
-            // v1.3.32: 勾选的 PPT 备注幻灯片计入合计
-            r.result!!.notesSlides.forEach { ns ->
-                if (hiddenSelected["${r.id}::notes::${ns.name}"] == true) {
+            // v1.3.32/v1.3.34: 勾选的 PPT 备注汇总计入合计（一条汇总勾选控制全部备注）
+            if (hiddenSelected["${r.id}::notes::_summary_"] == true) {
+                r.result!!.notesSlides.forEach { ns ->
                     w += ns.words; fe += ns.fe; nc += ns.nc; ch += ns.chars
                 }
             }
@@ -468,10 +468,17 @@ fun FileCard(
     ) {
         Column(Modifier.padding(12.dp)) {
             // 第一行：文件名横跨全宽（方便显示长文件名和点击打开）
+            // v1.3.34: 有备注/图片的 PPT 在文件名前加红"备"/"图"标记（和隐藏工作表的"隐"一样醒目）
+            val r = entry.result
+            val prefixTags = buildString {
+                if (r?.notesSlides?.isNotEmpty() == true) append("备")
+                if ((r?.imageCount ?: 0) > 0) append("图")
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(checked = entry.selected, onCheckedChange = { onToggle(entry) })
                 Text(
-                    entry.displayName, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    (if (prefixTags.isNotEmpty()) "$prefixTags " else "") + entry.displayName,
+                    fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier
                         .weight(1f)
@@ -485,7 +492,7 @@ fun FileCard(
             // 第二行：左边统计信息（占更多空间）+ 右边文件类型/Word/Excel按钮（上下排列）
             Row(verticalAlignment = Alignment.Top) {
                 Column(Modifier.weight(1f)) {
-                    val r = entry.result
+                    // r 已在文件名行前定义（用于 prefixTags 和此处共用）
                     if (r != null) {
                         val isEstimated = r.pagesReason?.contains("estimate") == true ||
                             r.pagesReason?.contains("layout") == true
@@ -497,8 +504,10 @@ fun FileCard(
                             style = MaterialTheme.typography.bodySmall, color = Color.Gray
                         )
                         // v1.3.6: 明细折叠/展开切换（点击统计行展开）
+                        // v1.3.34: 备注合并为一条汇总，所以 notesSlides 只算 1
                         val detailCount = (r.inner?.size ?: 0) + (r.sheets?.size ?: 0) +
-                            (r.hiddenSheets?.size ?: 0) + (r.notesSlides?.size ?: 0) +
+                            (r.hiddenSheets?.size ?: 0) +
+                            (if (r.notesSlides?.isNotEmpty() == true) 1 else 0) +
                             if (r.imageCount > 0) 1 else 0
                         if (detailCount > 0) {
                             Text(
@@ -525,14 +534,14 @@ fun FileCard(
                         Text("隐", style = MaterialTheme.typography.labelSmall, color = Color(0xFFB00020),
                             modifier = Modifier.padding(bottom = 2.dp))
                     }
-                    // v1.3.32: 有备注的 PPT，显示蓝色小"备"字
+                    // v1.3.32/v1.3.34: 有备注的 PPT，显示红色小"备"字（和"隐"同色）
                     if (entry.result?.notesSlides?.isNotEmpty() == true) {
-                        Text("备", style = MaterialTheme.typography.labelSmall, color = Color(0xFF1565C0),
+                        Text("备", style = MaterialTheme.typography.labelSmall, color = Color(0xFFB00020),
                             modifier = Modifier.padding(bottom = 2.dp))
                     }
-                    // v1.3.32: 有嵌入图片的 PPT，显示绿色小"图"字
+                    // v1.3.32/v1.3.34: 有嵌入图片的 PPT，显示红色小"图"字（和"隐"同色）
                     if ((entry.result?.imageCount ?: 0) > 0) {
-                        Text("图", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2E7D32),
+                        Text("图", style = MaterialTheme.typography.labelSmall, color = Color(0xFFB00020),
                             modifier = Modifier.padding(bottom = 2.dp))
                     }
                     Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.small) {
@@ -581,20 +590,27 @@ fun FileCard(
                     Text("字 ${hs.words} 中 ${hs.fe} 非 ${hs.nc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
             }
-            // v1.3.32: PPT 备注幻灯片（蓝"备" + 勾选框 + 名称 + 字数），勾选后并入合计
-            entry.result?.notesSlides?.forEach { ns ->
-                val checked = hiddenSelected["${entry.id}::notes::${ns.name}"] ?: false
+            // v1.3.34: PPT 备注汇总（红"备" + 勾选框 + "所有备注(N张)" + 汇总字数），勾选后并入合计
+            val notes = entry.result?.notesSlides
+            if (!notes.isNullOrEmpty()) {
+                // 汇总所有备注的字数
+                val totalNotesWords = notes.sumOf { it.words }
+                val totalNotesFe = notes.sumOf { it.fe }
+                val totalNotesNc = notes.sumOf { it.nc }
+                // 用第一条备注的 key 作为勾选状态 key（勾选=全部并入）
+                val notesKey = "${entry.id}::notes::_summary_"
+                val notesChecked = hiddenSelected[notesKey] ?: false
                 Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("备", style = MaterialTheme.typography.labelSmall, color = Color(0xFF1565C0))
-                    Checkbox(checked = checked, onCheckedChange = { onToggleHidden(entry.id, "notes::${ns.name}") }, modifier = Modifier.size(24.dp))
-                    Text(ns.name, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text("字 ${ns.words} 中 ${ns.fe} 非 ${ns.nc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    Text("备", style = MaterialTheme.typography.labelSmall, color = Color(0xFFB00020))
+                    Checkbox(checked = notesChecked, onCheckedChange = { onToggleHidden(entry.id, "notes::_summary_") }, modifier = Modifier.size(24.dp))
+                    Text("所有备注（${notes.size} 张幻灯片）", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    Text("字 $totalNotesWords 中 $totalNotesFe 非 $totalNotesNc", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
             }
-            // v1.3.32: PPT 嵌入图片（绿"图" + 张数），页数列显示张数，字数列显示"—"
+            // v1.3.32/v1.3.34: PPT 嵌入图片（红"图" + 张数），页数列显示张数，字数列显示"—"
             if ((entry.result?.imageCount ?: 0) > 0) {
                 Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("图", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2E7D32))
+                    Text("图", style = MaterialTheme.typography.labelSmall, color = Color(0xFFB00020))
                     Text("嵌入图片", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                     Text("—", style = MaterialTheme.typography.bodySmall, color = Color.Gray,
                         modifier = Modifier.padding(end = 8.dp))
@@ -1741,6 +1757,8 @@ private fun addFiles(
                         var docChars: Int = 0  // 0 = 无元数据
                         var hiddenText: List<Pair<String, String>> = emptyList() // v1.3.3: .xls 隐藏表
                         var xlsVisible: List<String> = emptyList() // v1.3.4: .xls 可见表名（明细展示用）
+                        var pptNotes: List<SheetStat> = emptyList()  // v1.3.34: .ppt 备注列表
+                        var pptImages: Int = 0                       // v1.3.34: .ppt 嵌入图片数
                         if (extLower == "doc") {
                             val docRes = OldOfficeEngine.extractDocFull(f)
                             text = docRes.text
@@ -1754,7 +1772,13 @@ private fun addFiles(
                             hiddenText = xlsRes.hiddenSheets
                             xlsVisible = xlsRes.visibleNames
                         } else {
-                            text = OldOfficeEngine.extractText(f)
+                            // v1.3.34: .ppt 用 extractPptFull 获取文本+备注+图片（与 .pptx 对齐）
+                            val pptRes = OldOfficeEngine.extractPptFull(f)
+                            text = pptRes.text
+                            docPages = pptRes.pages
+                            // 将 PPT 备注和图片数暂存，后面写入 resMap
+                            val pptNotes = pptRes.notesSlides
+                            val pptImages = pptRes.imageCount
                         }
                         if (text.isBlank()) {
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = dName, cachePath = f.absolutePath, error = "此老格式文件内容为空或无法读取"))
@@ -1788,7 +1812,10 @@ private fun addFiles(
                             val resMap = mutableMapOf<String, Any?>(
                                 "name" to dName, "ext" to extDot,
                                 "stats" to mapOf("words" to outWords, "fe" to outFe, "nc" to outNc, "chars" to outChars),
-                                "meta" to mapOf("sheets" to xlsVisible, "hidden_sheets" to hiddenStats)
+                                "meta" to mapOf(
+                                    "sheets" to xlsVisible, "hidden_sheets" to hiddenStats,
+                                    "notes_slides" to pptNotes, "image_count" to pptImages
+                                )
                             )
                             if (pagesValue != null) {
                                 resMap["pages"] = pagesValue
