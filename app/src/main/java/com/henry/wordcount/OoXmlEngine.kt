@@ -448,7 +448,7 @@ object OoXmlEngine {
 
         val text = visibleSb.toString()
         val pages = max(1, visibleNames.size)
-        return OoxmlResult(text, pages, "xlsx", visibleNames, hiddenSheets, "",
+        return OoxmlResult(text, pages, "xlsx", visibleNames, hiddenSheets,
             internalTitle = extractInternalTitle(zip))
     }
 
@@ -706,7 +706,7 @@ object OoXmlEngine {
             for (para in paras) {
                 val pText = StringBuilder()
                 tRe.findAll(para.groupValues[1]).forEach { match ->
-                    pText.append(decodeXml(match.groupValues(1)))
+                    pText.append(decodeXml(match.groupValues[1]))
                 }
                 val line = pText.toString().trim()
                 if (line.isNotEmpty()) {
@@ -731,8 +731,8 @@ object OoXmlEngine {
             val paras = pRe.findAll(xml)
             for (para in paras) {
                 val pText = StringBuilder()
-                tRe.findAll(para.groupValues(1)).forEach { match ->
-                    pText.append(decodeXml(match.groupValues(1)))
+                tRe.findAll(para.groupValues[1]).forEach { match ->
+                    pText.append(decodeXml(match.groupValues[1]))
                 }
                 val line = pText.toString().trim()
                 if (line.isNotEmpty()) {
