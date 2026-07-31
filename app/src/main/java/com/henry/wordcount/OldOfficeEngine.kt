@@ -150,8 +150,8 @@ object OldOfficeEngine {
                     if (patriarch != null) {
                         for (shape in patriarch.children) {
                             collectShapeText(shape, sb)
-                            // v1.3.40: 统计嵌入图片（与 xlsx 的 countMediaImages 对齐）
-                            if (shape is org.apache.poi.hssf.usermodel.HSSFPicture) totalImages++
+                            // v1.3.42: 递归统计嵌入图片（含编组内图片）
+                            countImagesRecursive(shape)
                         }
                     }
                 } catch (_: Throwable) { }
@@ -200,6 +200,18 @@ object OldOfficeEngine {
         }
     }
 
+    /**
+     * v1.3.42: 递归统计 HSSF 形状中的图片（含编组内嵌套图片）。
+     * v1.3.40 只检查 patriarch 顶层 children 的 HSSFPicture，
+     * 但 Excel 中图片常被放入编组（HSSFShapeGroup）导致漏检。
+     */
+    private fun countImagesRecursive(shape: org.apache.poi.hssf.usermodel.HSSFShape) {
+        when (shape) {
+            is org.apache.poi.hssf.usermodel.HSSFPicture -> totalImages++
+            is HSSFShapeGroup -> for (child in shape.children) countImagesRecursive(child)
+        }
+    }
+
     private fun extractPpt(fis: FileInputStream): String {
         // HSLF 读取二进制 PowerPoint；逐页提取文本形状文字。
         // 安卓缺 java.awt 时此处可能抛出 NoClassDefFoundError，由调用方捕获降级。
@@ -235,19 +247,24 @@ object OldOfficeEngine {
         var imgCount = 0
         val textSb = StringBuilder()
         try {
-            // ── 主文本：用 POI 标准文本模型 API ──
-            // v1.3.40: getTextParagraphs() 返回幻灯片/母版所有文本块
-            // （标题栏 / 文本框 / 自选图形 / 表格单元格 / 占位符等）。
-            // v1.3.40 fix: 不再并行使用 collectHslfShapeText 形状遍历——两者粒度不同
-            // （shape.text=整段 vs getRawText()=逐run）导致 seen 去重失效、字数超了。
-            // getTextParagraphs() 是 POI 推荐的全量文本提取 API，单独使用已足够。
+            // ── 主文本：形状遍历（v1.3.42 恢复为唯一来源） ──
+            // v1.3.39~v1.3.41 经验总结：
+            //   - 形状遍历 collectHslfShapeText（shape.text 整段粒度）→ 接近电脑版（差 ~1.3%）
+            //   - getTextParagraphs()（getRawText 逐 run 粒度）→ 单独用反而更少
+            //   - 双来源并用 → seen 精确匹配去重失效（粒度不同）→ 字数超了
+            // 结论：只用形状遍历，结果最稳定、最接近电脑 COM 遍历。
             val allSheets: List<HSLFSheet> = buildList {
                 addAll(ppt.slides)
                 try { addAll(ppt.slideMasters) } catch (_: Throwable) {}
             }
             for (sheet in allSheets) {
-                try { extractSheetTextParagraphs(sheet, textSb) }
-                catch (_: Throwable) {}
+                try {
+                    val seen = mutableSetOf<String>()
+                    when (sheet) {
+                        is HSLFSlide -> for (shape in sheet.shapes) collectHslfShapeText(shape, textSb, seen)
+                        is HSLFSlideMaster -> for (shape in sheet.shapes) collectHslfShapeText(shape, textSb, seen)
+                    }
+                } catch (_: Throwable) {}
             }
 
             // ── 图片计数 ──
