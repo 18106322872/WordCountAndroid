@@ -2129,7 +2129,7 @@ private fun buildExportPdfKotlin(entries: List<FileEntry>, outPath: String): Int
                     val patriarch = sheet.drawingPatriarch ?: continue
                     for (shape in patriarch.children) {
                         if (shape is org.apache.poi.hssf.usermodel.HSSFPicture) {
-                            val data = shape.pictureData?.data ?: continue
+                            val data = shape.getPictureData()?.getData() ?: continue
                             n++
                             val ext2 = when {
                                 data.size >= 3 && data[0] == 0xFF.toByte() && data[1] == 0xD8.toByte() && data[2] == 0xFF.toByte() -> "jpg"
