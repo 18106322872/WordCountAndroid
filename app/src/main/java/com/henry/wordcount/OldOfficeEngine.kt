@@ -220,43 +220,36 @@ object OldOfficeEngine {
      * 与 extractPptx(pptx) 对齐：返回 notesSlides 和 imageCount 供 UI 展开显示。
      *
      * 文本提取策略（v1.3.39 重写）：
-     *   主文本用 PowerPointExtractor.getText() —— POI 官方提取器，能拿到全部文字
-     *   （含表格单元格、Master/Layout、所有形状），与电脑版 COM 对齐。
-     *   手动遍历 shape 仅用于：备注分离统计 + 图片计数（extractor 不区分这两者）。
+     *   遍历 Slide + SlideMaster + SlideLayout 的所有形状（含编组/表格），
+     *   解决之前只遍历 Slide 漏掉表格/Master 文字导致字数严重偏低的问题。
      */
     internal fun extractPptFull(file: File): PptResult {
         val fis = FileInputStream(file)
         val ppt = HSLFSlideShow(fis)
         val notesList = mutableListOf<SheetStat>()
         var imgCount = 0
+        val textSb = StringBuilder()
         try {
-            // ── 主文本：用 PowerPointExtractor 一次性提取全部文字（含表格/Master/布局等）──
-            // 这解决了手动遍历 HSLFShape 漏掉表格/某些形状类型导致字数严重偏低的问题
-            var allText = ""
-            try {
-                val extractor = org.apache.poi.hslf.extractor.PowerPointExtractor(ppt)
-                allText = extractor.text ?: ""
-                // 清理：去掉纯空白段落、统一换行
-                allText = allText.replace("\r\n", "\n").replace("\r", "\n")
-                    .replace("\t", " ").trim()
-            } catch (_: Throwable) {
-                // extractor 不可用时回退到手动遍历
-                val fallbackSb = StringBuilder()
-                for (slide in ppt.slides) {
-                    try {
-                        for (shape in slide.shapes) collectHslfShapeText(shape, fallbackSb)
-                    } catch (_: Throwable) {}
-                }
-                allText = fallbackSb.toString()
+            // ── 主文本：遍历幻灯片 + 母版 + 版式的所有形状 ──
+            for (slide in ppt.slides) {
+                try { for (shape in slide.shapes) collectHslfShapeText(shape, textSb) }
+                catch (_: Throwable) {}
             }
+            // v1.3.39: 母版和版式也可能包含文字（电脑版 COM 的范围更广）
+            try {
+                for (master in ppt.slideMasters)
+                    for (shape in master.shapes) collectHslfShapeText(shape, textSb)
+            } catch (_: Throwable) {}
+            try {
+                for (layout in ppt.slideLayouts)
+                    for (shape in layout.shapes) collectHslfShapeText(shape, textSb)
+            } catch (_: Throwable) {}
 
             // ── 图片计数 ──
             try {
-                for (slide in ppt.slides) {
-                    for (shape in slide.shapes) {
+                for (slide in ppt.slides)
+                    for (shape in slide.shapes)
                         if (org.apache.poi.hslf.usermodel.HSLFPictureShape::class.java.isInstance(shape)) imgCount++
-                    }
-                }
             } catch (_: Throwable) {}
 
             // ── 备注文本（HSLF: 通过 ppt.notes 获取所有备注幻灯片）──
@@ -283,7 +276,7 @@ object OldOfficeEngine {
             runCatching { ppt.close() }
         }
         return PptResult(
-            text = allText,
+            text = textSb.toString(),
             pages = maxOf(1, ppt.slides.size),
             notesSlides = notesList,
             imageCount = imgCount
