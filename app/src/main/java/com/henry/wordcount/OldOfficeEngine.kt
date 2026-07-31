@@ -235,14 +235,10 @@ object OldOfficeEngine {
                 try { for (shape in slide.shapes) collectHslfShapeText(shape, textSb) }
                 catch (_: Throwable) {}
             }
-            // v1.3.39: 母版和版式也可能包含文字（电脑版 COM 的范围更广）
+            // v1.3.39: 母版也可能包含文字（电脑版 COM 的范围更广）
             try {
                 for (master in ppt.slideMasters)
                     for (shape in master.shapes) collectHslfShapeText(shape, textSb)
-            } catch (_: Throwable) {}
-            try {
-                for (layout in ppt.slideLayouts)
-                    for (shape in layout.shapes) collectHslfShapeText(shape, textSb)
             } catch (_: Throwable) {}
 
             // ── 图片计数 ──
