@@ -126,7 +126,7 @@ object OldOfficeEngine {
         val visibleSb = StringBuilder()
         val visibleNames = mutableListOf<String>()
         val hidden = mutableListOf<Pair<String, String>>()
-        var totalImages = 0  // v1.3.40: .xls 嵌入图片计数（与 xlsx 的 countMediaImages 对齐）
+        val imgCounter = intArrayOf(0)  // v1.3.42: 用数组做可变计数器（嵌套函数需要引用语义）
         try {
             for (i in 0 until wb.numberOfSheets) {
                 val sheet = wb.getSheetAt(i) ?: continue
@@ -151,7 +151,7 @@ object OldOfficeEngine {
                         for (shape in patriarch.children) {
                             collectShapeText(shape, sb)
                             // v1.3.42: 递归统计嵌入图片（含编组内图片）
-                            countImagesRecursive(shape)
+                            countImagesRecursive(shape, imgCounter)
                         }
                     }
                 } catch (_: Throwable) { }
@@ -179,7 +179,7 @@ object OldOfficeEngine {
             runCatching { wb.close() }
             runCatching { fis.close() }
         }
-        return XlsResult(visibleSb.toString(), visibleNames, hidden, totalImages)
+        return XlsResult(visibleSb.toString(), visibleNames, hidden, imgCounter[0])
     }
 
     /**
@@ -205,10 +205,10 @@ object OldOfficeEngine {
      * v1.3.40 只检查 patriarch 顶层 children 的 HSSFPicture，
      * 但 Excel 中图片常被放入编组（HSSFShapeGroup）导致漏检。
      */
-    private fun countImagesRecursive(shape: org.apache.poi.hssf.usermodel.HSSFShape) {
+    private fun countImagesRecursive(shape: org.apache.poi.hssf.usermodel.HSSFShape, counter: IntArray) {
         when (shape) {
-            is org.apache.poi.hssf.usermodel.HSSFPicture -> totalImages++
-            is HSSFShapeGroup -> for (child in shape.children) countImagesRecursive(child)
+            is org.apache.poi.hssf.usermodel.HSSFPicture -> counter[0]++
+            is HSSFShapeGroup -> for (child in shape.children) countImagesRecursive(child, counter)
         }
     }
 
