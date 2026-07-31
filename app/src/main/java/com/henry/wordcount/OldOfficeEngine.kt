@@ -240,9 +240,12 @@ object OldOfficeEngine {
      * v1.3.39: .ppt 完整提取（文本 + 备注幻灯片 + 嵌入图片数）。
      * 与 extractPptx(pptx) 对齐：返回 notesSlides 和 imageCount 供 UI 展开显示。
      *
-     * 文本提取策略（v1.3.39 重写）：
-     *   遍历 Slide + SlideMaster + SlideLayout 的所有形状（含编组/表格），
-     *   解决之前只遍历 Slide 漏掉表格/Master 文字导致字数严重偏低的问题。
+     * 文本提取策略（v1.3.50 重写）：
+     *   主提取：每页 slide 用 getTextParagraphs()→getTextRuns()→getRawText()
+     *   （这是 POI 5.2.5 最完整的文本链路，HSLFTextShape.text 内部可能丢文本）
+     *   补充：形状遍历专门处理 HSLFTable（表格单元格文本可能不被 getTextParagraphs 覆盖）
+     *   辅助：遍历 slideLayouts（不含 slideMasters），某些 PPT 文件的可见文本存在 layout 层
+     *   不做去重（对齐电脑版 COM 行为：每个 shape 独立计入）
      */
     internal fun extractPptFull(file: File): PptResult {
         val fis = FileInputStream(file)
@@ -251,15 +254,34 @@ object OldOfficeEngine {
         var imgCount = 0
         val textSb = StringBuilder()
         try {
-            // ── 主文本：形状遍历（v1.3.44 对齐电脑版 COM 行为） ──
-            // 电脑版 extract_ppt() 只遍历 pres.Slides（不含 Master/Layout），
-            // 且不做任何去重——每个 shape 的 TextFrame.TextRange.Text 独立计入 items。
-            // v1.3.39~v1.3.43 的 seen 去重导致同页重复文本只计一次（如多个相同
-            // 文本框/占位符），这是 D7B1(256 vs 344)和 60F8(54 vs 82)字数偏少的主因。
+            // ── 主文本：Slides ──
             for (slide in ppt.slides) {
-                try { for (shape in slide.shapes) collectHslfShapeText(shape, textSb) }
-                catch (_: Throwable) {}
+                try {
+                    // Primary: POI 完整文本链路（覆盖标题/文本框/占位符等所有文本形状）
+                    extractSheetTextParagraphs(slide, textSb)
+                    // Supplement: 表格单元格（getTextParagraphs 可能不完全覆盖表格结构文本）
+                    for (shape in slide.shapes) {
+                        if (shape is org.apache.poi.hslf.usermodel.HSLFTable) {
+                            extractHslfTableText(shape, textSb)
+                        }
+                    }
+                } catch (_: Throwable) {}
             }
+
+            // ── 辅助：SlideLayouts（不含 Masters）──
+            // 某些 PPT 文件的可见内容文本存储在 layout 层而非 slide 自身形状中。
+            // 电脑版 COM 不遍历 Layouts 但通过 TextFrame.TextRange 能取到全部文本；
+            // POI 的 slide.shapes 可能遗漏这些，需额外遍历 layout 补充。
+            try {
+                for (layout in ppt.slideMasters.flatMap { it.slideLayouts }) {
+                    extractSheetTextParagraphs(layout, textSb)
+                    for (shape in layout.shapes) {
+                        if (shape is org.apache.poi.hslf.usermodel.HSLFTable) {
+                            extractHslfTableText(shape, textSb)
+                        }
+                    }
+                }
+            } catch (_: Throwable) {}
 
             // ── 图片计数 ──
             try {
@@ -300,19 +322,31 @@ object OldOfficeEngine {
     }
 
     /**
+     * v1.3.50: 提取 HSLFTable 表格文本（逐单元格）。
+     * getTextParagraphs() 可能不完全覆盖表格结构中的文本，需显式提取补充。
+     */
+    private fun extractHslfTableText(table: org.apache.poi.hslf.usermodel.HSLFTable, sb: StringBuilder) {
+        try {
+            for (r in 0 until table.numberOfRows) {
+                val rowSb = StringBuilder()
+                for (c in 0 until table.numberOfColumns) {
+                    val cell = table.getCell(r, c)
+                    if (cell != null) {
+                        val ct = (cell as? HSLFTextShape)?.text?.trim() ?: ""
+                        if (ct.isNotEmpty()) rowSb.append(ct).append(" ")
+                    }
+                }
+                val rowText: String = rowSb.toString().trim()
+                if (rowText.isNotEmpty()) sb.append(rowText).append("\n")
+            }
+        } catch (_: Throwable) {}
+    }
+
+    /**
      * v1.3.38: 递归收集 HSLF 形状文字（含编组 + 表格 + 简单形状）。
      * 与电脑版 COM 对齐：COM 遍历 slide.Shapes 检查 HasTextFrame + HasTable。
      * - HSLFGroupShape: 编组 → 递归遍历子形状
-     * - HSLFTextShape: 文本形状 → 取文字
-     * - HSLFTable: 表格 → 逐单元格提取文字（电脑版 shape.Table，POI 此前漏掉导致 .ppt 字数严重偏低）
-     * - 其余形状（HSLFSimpleShape 线/连接符、HSLFPictureShape 图片等）无文本，忽略
-     * v1.3.40: 增加 seen 集合（per-sheet），与 extractSheetTextParagraphs 共用，避免同页重复计入。
-     */
-    /**
-     * v1.3.44: 递归收集 HSLF 形状文字（含编组 + 表格）。
-     * 与电脑版 COM 对齐：COM 遍历 slide.Shapes 检查 HasTextFrame + HasTable，无去重。
-     * - HSLFGroupShape: 编组 → 递归遍历子形状
-     * - HSLFTextShape: 文本形状 → 取文字
+     * - HSLFTextShape: 文本形状 → 用 POI 完整链路 getTextParagraphs→getTextRuns→getRawText（v1.3.50: shape.text 可能丢文本）
      * - HSLFTable: 表格 → 逐单元格提取文字
      */
     private fun collectHslfShapeText(shape: org.apache.poi.hslf.usermodel.HSLFShape, sb: StringBuilder) {
@@ -322,8 +356,9 @@ object OldOfficeEngine {
                     for (child in shape.shapes) collectHslfShapeText(child, sb)
                 }
                 is HSLFTextShape -> {
-                    val t = shape.text
-                    if (!t.isNullOrBlank()) sb.append(t).append("\n")
+                    // v1.3.50: 用 POI 完整文本链路替代 shape.text（可能丢文本）
+                    val t = extractTextShapeFullText(shape)
+                    if (t.isNotEmpty()) sb.append(t).append("\n")
                 }
                 is org.apache.poi.hslf.usermodel.HSLFTable -> {
                     try {
@@ -373,7 +408,29 @@ object OldOfficeEngine {
         }
     }
 
-    /** 归一化后去重追加（collectHslfShapeText 使用） */
+    /**
+     * v1.3.50: 用 POI 完整文本链路提取 HSLFTextShape 的全部文本。
+     * 链路：getTextParagraphs() → HSLFTextParagraph → getTextRuns() → HSLFTextRun → getRawText()
+     * 这比 shape.text 更完整（后者内部可能跳过某些 run 或段落）。
+     * 降级：如果链路失败，fallback 到 shape.text。
+     */
+    private fun extractTextShapeFullText(shape: HSLFTextShape): String {
+        return try {
+            val sb = StringBuilder()
+            val paras = shape.textParagraphs
+            for (p in paras) {
+                for (run in p.textRuns) {
+                    val t = run.rawText
+                    if (!t.isNullOrEmpty()) sb.append(t)
+                }
+            }
+            sb.toString()
+        } catch (_: Throwable) {
+            shape.text ?: ""
+        }
+    }
+
+    /** 归一化后去重追加（历史保留，当前主路径不再使用 seen 去重） */
     private fun appendUnique(text: String?, sb: StringBuilder, seen: MutableSet<String>) {
         if (!text.isNullOrBlank()) {
             val norm = text.trim()
