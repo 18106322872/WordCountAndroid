@@ -347,10 +347,13 @@ object OldOfficeEngine {
         } catch (_: Throwable) {}
     }
 
-    /** v1.3.40: 递归处理 getTextParagraphs 返回的文本段落（兼容扁平/嵌套列表两种结构） */
+    /** v1.3.40: 递归处理 getTextParagraphs 返回的文本段落（兼容扁平/嵌套列表两种结构）。
+     *  POI 5.2.5: HSLFTextParagraph 无 getText()，文本在逐 run 的 HSLFTextRun.getText() 上。 */
     private fun extractTextParagraphTree(obj: Any?, sb: StringBuilder, seen: MutableSet<String>) {
         when (obj) {
-            is HSLFTextParagraph -> appendUnique(obj.getText(), sb, seen)
+            is HSLFTextParagraph -> {
+                for (run in obj.getTextRuns()) appendUnique(run.getText(), sb, seen)
+            }
             is List<*> -> for (item in obj) extractTextParagraphTree(item, sb, seen)
         }
     }
