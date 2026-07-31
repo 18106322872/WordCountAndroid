@@ -110,8 +110,8 @@ object OldOfficeEngine {
         }
     }
 
-    /** .xls 抽取结果：可见表文本(计入默认字数) + 可见表名 + 隐藏表(名称, 文本)列表 */
-    data class XlsResult(val text: String, val visibleNames: List<String>, val hiddenSheets: List<Pair<String, String>>)
+    /** .xls 抽取结果：可见表文本(计入默认字数) + 可见表名 + 隐藏表(名称, 文本)列表 + 嵌入图片数 */
+    data class XlsResult(val text: String, val visibleNames: List<String>, val hiddenSheets: List<Pair<String, String>>, val imageCount: Int = 0)
 
     /**
      * v1.3.3: .xls 逐工作表抽取（含隐藏表）。
@@ -126,6 +126,7 @@ object OldOfficeEngine {
         val visibleSb = StringBuilder()
         val visibleNames = mutableListOf<String>()
         val hidden = mutableListOf<Pair<String, String>>()
+        var totalImages = 0  // v1.3.40: .xls 嵌入图片计数（与 xlsx 的 countMediaImages 对齐）
         try {
             for (i in 0 until wb.numberOfSheets) {
                 val sheet = wb.getSheetAt(i) ?: continue
@@ -149,6 +150,8 @@ object OldOfficeEngine {
                     if (patriarch != null) {
                         for (shape in patriarch.children) {
                             collectShapeText(shape, sb)
+                            // v1.3.40: 统计嵌入图片（与 xlsx 的 countMediaImages 对齐）
+                            if (shape is org.apache.poi.hssf.usermodel.HSSFPicture) totalImages++
                         }
                     }
                 } catch (_: Throwable) { }
@@ -176,7 +179,7 @@ object OldOfficeEngine {
             runCatching { wb.close() }
             runCatching { fis.close() }
         }
-        return XlsResult(visibleSb.toString(), visibleNames, hidden)
+        return XlsResult(visibleSb.toString(), visibleNames, hidden, totalImages)
     }
 
     /**
@@ -232,26 +235,20 @@ object OldOfficeEngine {
         var imgCount = 0
         val textSb = StringBuilder()
         try {
-            // ── 主文本：每页用「形状遍历 + getTextParagraphs」双来源，互补避免漏统 ──
-            // v1.3.40: 增加 getTextParagraphs() 来源。该 API 返回幻灯片所有文本块
-            // （标题栏 / 文本框 / 自选图形文字 / 占位符等），比逐形状 when 分支更全面，
-            // 可补齐 collectHslfShapeText 可能漏掉的形状类型。两者用 per-sheet 去重，
-            // 同页内不重复；跨页重复文本正常各计一次（对齐 COM 逐页统计）。
-            for (slide in ppt.slides) {
-                val seen = mutableSetOf<String>()
-                try { for (shape in slide.shapes) collectHslfShapeText(shape, textSb, seen) }
-                catch (_: Throwable) {}
-                try { extractSheetTextParagraphs(slide, textSb, seen) }
+            // ── 主文本：用 POI 标准文本模型 API ──
+            // v1.3.40: getTextParagraphs() 返回幻灯片/母版所有文本块
+            // （标题栏 / 文本框 / 自选图形 / 表格单元格 / 占位符等）。
+            // v1.3.40 fix: 不再并行使用 collectHslfShapeText 形状遍历——两者粒度不同
+            // （shape.text=整段 vs getRawText()=逐run）导致 seen 去重失效、字数超了。
+            // getTextParagraphs() 是 POI 推荐的全量文本提取 API，单独使用已足够。
+            val allSheets: List<HSLFSheet> = buildList {
+                addAll(ppt.slides)
+                try { addAll(ppt.slideMasters) } catch (_: Throwable) {}
+            }
+            for (sheet in allSheets) {
+                try { extractSheetTextParagraphs(sheet, textSb) }
                 catch (_: Throwable) {}
             }
-            // v1.3.39: 母版也可能包含文字（电脑版 COM 的范围更广）
-            try {
-                for (master in ppt.slideMasters) {
-                    val seen = mutableSetOf<String>()
-                    for (shape in master.shapes) collectHslfShapeText(shape, textSb, seen)
-                    extractSheetTextParagraphs(master, textSb, seen)
-                }
-            } catch (_: Throwable) {}
 
             // ── 图片计数 ──
             try {
@@ -334,35 +331,27 @@ object OldOfficeEngine {
 
     /**
      * v1.3.40: 用 POI 标准文本模型 API 获取幻灯片/母版的所有文本块。
-     * getTextParagraphs() 返回该页所有文本区域（标题栏、文本框、自选图形、占位符等），
-     * 比逐形状 when 分支更全面，可补齐 collectHslfShapeText 漏掉的形状类型。
-     * 与 collectHslfShapeText 共用 seen 集合，避免同页重复计入。
+     * getTextParagraphs() 返回该页所有文本区域（标题栏、文本框、自选图形、表格单元格、占位符等）。
+     * 单一来源提取，不再与 collectHslfShapeText 并用（v1.3.40 fix: 双来源粒度不同导致重复计数）。
      */
-    private fun extractSheetTextParagraphs(sheet: HSLFSheet, sb: StringBuilder, seen: MutableSet<String>) {
+    private fun extractSheetTextParagraphs(sheet: HSLFSheet, sb: StringBuilder) {
         try {
             val paras = sheet.getTextParagraphs()
-            // getTextParagraphs() 返回类型在不同 POI 版本可能是
-            // List<HSLFTextParagraph> 或 List<List<HSLFTextParagraph>>，递归处理任意嵌套。
-            for (p in paras) extractTextParagraphTree(p, sb, seen)
+            extractTextParagraphTree(paras, sb)
         } catch (_: Throwable) {}
     }
 
-    /** v1.3.40: 递归处理 getTextParagraphs 返回的文本段落（兼容扁平/嵌套列表两种结构）。
+    /** v1.3.40: 递归处理 getTextParagraphs 返回的文本段落树。
      *  POI 5.2.5: HSLFTextParagraph.getText() 不存在，文本在逐 run 的 HSLFTextRun.getRawText() 上。 */
-    private fun extractTextParagraphTree(obj: Any?, sb: StringBuilder, seen: MutableSet<String>) {
+    private fun extractTextParagraphTree(obj: Any?, sb: StringBuilder) {
         when (obj) {
             is HSLFTextParagraph -> {
-                for (run in obj.getTextRuns()) appendUnique(run.getRawText(), sb, seen)
+                for (run in obj.getTextRuns()) {
+                    val t = run.getRawText()
+                    if (!t.isNullOrBlank()) sb.append(t)
+                }
             }
-            is List<*> -> for (item in obj) extractTextParagraphTree(item, sb, seen)
-        }
-    }
-
-    /** v1.3.40: 归一化后去重追加（同页内同段文本只计一次） */
-    private fun appendUnique(text: String?, sb: StringBuilder, seen: MutableSet<String>) {
-        if (!text.isNullOrBlank()) {
-            val norm = text.trim()
-            if (norm.isNotEmpty() && seen.add(norm)) sb.append(norm).append("\n")
+            is List<*> -> for (item in obj) extractTextParagraphTree(item, sb)
         }
     }
 }

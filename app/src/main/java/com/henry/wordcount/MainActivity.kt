@@ -1765,6 +1765,7 @@ private fun addFiles(
                         var xlsVisible: List<String> = emptyList() // v1.3.4: .xls 可见表名（明细展示用）
                         var pptNotes: List<SheetStat> = emptyList()  // v1.3.34: .ppt 备注列表
                         var pptImages: Int = 0                       // v1.3.34: .ppt 嵌入图片数
+                        var xlsImages: Int = 0                       // v1.3.40: .xls 嵌入图片数
                         if (extLower == "doc") {
                             val docRes = OldOfficeEngine.extractDocFull(f)
                             text = docRes.text
@@ -1777,6 +1778,7 @@ private fun addFiles(
                             text = xlsRes.text
                             hiddenText = xlsRes.hiddenSheets
                             xlsVisible = xlsRes.visibleNames
+                            xlsImages = xlsRes.imageCount  // v1.3.40: .xls 嵌入图片计数
                         } else {
                             // v1.3.34: .ppt 用 extractPptFull 获取文本+备注+图片（与 .pptx 对齐）
                             val pptRes = OldOfficeEngine.extractPptFull(f)
@@ -1821,7 +1823,7 @@ private fun addFiles(
                                 "stats" to mapOf("words" to outWords, "fe" to outFe, "nc" to outNc, "chars" to outChars),
                                 "meta" to mapOf(
                                     "sheets" to xlsVisible, "hidden_sheets" to hiddenStats,
-                                    "notes_slides" to pptNotes, "image_count" to pptImages
+                                    "notes_slides" to pptNotes, "image_count" to (pptImages + xlsImages)
                                 )
                             )
                             if (pagesValue != null) {
@@ -2060,8 +2062,9 @@ private fun buildExportPdfKotlin(entries: List<FileEntry>, outPath: String): Int
 
         val imgEntries = mutableListOf<Pair<String, String>>()
 
-        // v1.3.38: 分离 OOXML(ZIP) 和 OLE2(.ppt) 两种格式——.ppt 不是 ZIP，ZipFile 会静默失败
-        if (ext in setOf(".pptx", ".docx", ".xlsx", ".xls")) {
+        // v1.3.38/v1.3.40: 分三种格式——OOXML(ZIP)、OLE2(.ppt)、OLE2(.xls)
+        // .xls 也是 OLE2 格式（非 ZIP），ZipFile 会静默失败，需用 POI HSSF 提取
+        if (ext in setOf(".pptx", ".docx", ".xlsx")) {
             try {
                 val zip = ZipFile(srcPath)
                 val zipEntries = java.util.Collections.list(zip.entries())
@@ -2113,6 +2116,38 @@ private fun buildExportPdfKotlin(entries: List<FileEntry>, outPath: String): Int
                     } catch (_: Exception) {}
                 }
                 ppt.close()
+                fis.close()
+            } catch (_: Exception) {}
+        } else if (ext == ".xls") {
+            // v1.3.40: .xls 是 OLE2 格式，需用 POI HSSF 提取嵌入图片（与 extractXlsDetailed 的 imageCount 对应）
+            try {
+                val fis = java.io.FileInputStream(srcPath)
+                val wb = org.apache.poi.hssf.usermodel.HSSFWorkbook(fis)
+                var n = 0
+                for (si in 0 until wb.numberOfSheets) {
+                    val sheet = wb.getSheetAt(si) ?: continue
+                    val patriarch = sheet.drawingPatriarch ?: continue
+                    for (shape in patriarch.children) {
+                        if (shape is org.apache.poi.hssf.usermodel.HSSFPicture) {
+                            val data = shape.pictureData?.data ?: continue
+                            n++
+                            val ext2 = when {
+                                data.size >= 3 && data[0] == 0xFF.toByte() && data[1] == 0xD8.toByte() && data[2] == 0xFF.toByte() -> "jpg"
+                                data.size >= 4 && data[0] == 0x89.toByte() && data[1] == 0x50.toByte() && data[2] == 0x4E.toByte() && data[3] == 0x47.toByte() -> "png"
+                                else -> null
+                            } ?: continue
+                            val tmp = File(
+                                System.getProperty("java.io.tmpdir"),
+                                "wc_export_${System.currentTimeMillis()}_$n.$ext2"
+                            )
+                            try {
+                                tmp.outputStream().use { it.write(data) }
+                                imgEntries.add(tmp.absolutePath to "$name - 图片 $n")
+                            } catch (_: Exception) {}
+                        }
+                    }
+                }
+                wb.close()
                 fis.close()
             } catch (_: Exception) {}
         }
