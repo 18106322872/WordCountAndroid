@@ -10,6 +10,8 @@ import org.apache.poi.hssf.usermodel.HSSFWorkbook
 import org.apache.poi.hssf.usermodel.HSSFChart
 import org.apache.poi.hslf.usermodel.HSLFSlideShow
 import org.apache.poi.hslf.usermodel.HSLFSheet
+import org.apache.poi.hslf.usermodel.HSLFSlide
+import org.apache.poi.hslf.usermodel.HSLFSlideMaster
 import org.apache.poi.hslf.usermodel.HSLFShape
 import org.apache.poi.hslf.usermodel.HSLFTextShape
 import org.apache.poi.hslf.usermodel.HSLFTextParagraph
