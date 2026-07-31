@@ -240,11 +240,13 @@ object OldOfficeEngine {
      * v1.3.39: .ppt 完整提取（文本 + 备注幻灯片 + 嵌入图片数）。
      * 与 extractPptx(pptx) 对齐：返回 notesSlides 和 imageCount 供 UI 展开显示。
      *
-     * 文本提取策略（v1.3.50 重写）：
-     *   主提取：每页 slide 用 getTextParagraphs()→getTextRuns()→getRawText()
-     *   （这是 POI 5.2.5 最完整的文本链路，HSLFTextShape.text 内部可能丢文本）
-     *   补充：形状遍历专门处理 HSLFTable（表格单元格文本可能不被 getTextParagraphs 覆盖）
-     *   不做去重（对齐电脑版 COM 行为：每个 shape 独立计入）
+     * 文本提取策略（v1.3.51 重写）：
+     *   主提取：每页 sheet 用 getTextParagraphs()→getTextRuns()→getRawText()
+     *   （POI 5.2.5 最完整文本链路）
+     *   补充：形状遍历专门处理 HSLFTable（表格单元格可能不被 getTextParagraphs 完全覆盖）
+     *   范围：Slides + SlideMasters（v1.3.50 只遍历 Slides 导致 D7B1 从256降到178，
+     *         某些 PPT 的可见内容存储在 Master 层；v1.3.43 含 Master 时 D7B1=256 最高）
+     *   不做去重
      */
     internal fun extractPptFull(file: File): PptResult {
         val fis = FileInputStream(file)
@@ -256,10 +258,23 @@ object OldOfficeEngine {
             // ── 主文本：Slides ──
             for (slide in ppt.slides) {
                 try {
-                    // Primary: POI 完整文本链路（覆盖标题/文本框/占位符等所有文本形状）
                     extractSheetTextParagraphs(slide, textSb)
-                    // Supplement: 表格单元格（getTextParagraphs 可能不完全覆盖表格结构文本）
                     for (shape in slide.shapes) {
+                        if (shape is org.apache.poi.hslf.usermodel.HSLFTable) {
+                            extractHslfTableText(shape, textSb)
+                        }
+                    }
+                } catch (_: Throwable) {}
+            }
+
+            // ── 补充：SlideMasters ──
+            // 某些 PPT 文件的可见内容文本存储在 Master 层（如公司 logo 旁的文字、
+            // 页脚模板文字等）。v1.3.43 含 Master 遍历时 D7B1=256，
+            // v1.3.45/1.3.50 砍掉 Master 后暴跌到 182/178。
+            for (master in ppt.slideMasters) {
+                try {
+                    extractSheetTextParagraphs(master, textSb)
+                    for (shape in master.shapes) {
                         if (shape is org.apache.poi.hslf.usermodel.HSLFTable) {
                             extractHslfTableText(shape, textSb)
                         }
