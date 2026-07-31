@@ -745,31 +745,43 @@ object OoXmlEngine {
         }
 
         // ── 备注幻灯片 ──
+        // v1.3.40: 只从备注正文框（<p:sp> 内 <p:cNvPr type="body">）提取文本。
+        // 对齐电脑版 python-pptx 的 ns.notes_text_frame——它只返回备注正文形状的文本，
+        // 不会把 notesSlide 里其他形状（幻灯片缩略图/日期/页脚占位符等）的文本混入。
+        // v1.38~v1.39 用 isPlaceholderText 过滤全量 <a:t> 仍有漏网之鱼（某些占位符文本
+        // 不在已知列表中），彻底修复方式是源头只读 body 形状。
         val noteEntries = Collections.list(zip.entries())
             .filter { it.name.matches("""ppt/notesSlides/notesSlide\d+\.xml""".toRegex()) }
             .sortedBy { """\d+""".toRegex().find(it.name)?.value?.toInt() ?: 0 }
 
         val notesList = mutableListOf<Pair<String, String>>()
+        // 匹配单个 <p:sp>...</p:sp> 形状块（PPTX 中形状互不嵌套，非贪婪即可）
+        val spRe = """<p:sp[\s\S]*?</p:sp>""".toRegex(RegexOption.DOT_MATCHES_ALL)
+        // 判断形状是否为备注正文框
+        val bodyTypeRe = """<p:cNvPr[^>]*\btype\s*=\s*"body"""".toRegex(RegexOption.IGNORE_CASE)
+
         noteEntries.forEachIndexed { idx, entry ->
             val xml = readEntry(zip, entry.name) ?: return@forEachIndexed
             val nsb = StringBuilder()
-            // 备注也按段落提取
-            val paras = pRe.findAll(xml)
-            for (para in paras) {
-                val pText = StringBuilder()
-                tRe.findAll(para.groupValues[1]).forEach { match ->
-                    pText.append(decodeXml(match.groupValues[1]))
-                }
-                val line = pText.toString().trim()
-                if (line.isNotEmpty()) {
-                    val clean = xmlTagRe.replace(line, "")
-                    // v1.3.38: 备注也过滤占位符默认文字（与幻灯片正文一致），
-                    // 否则 PowerPoint 默认建的空 notesSlide 含"点击此处添加备注"等文本会被误计入
-                    if (clean.isNotEmpty() && !isPlaceholderText(clean)) nsb.append(clean).append(' ')
+            // 只遍历 type="body" 的形状（备注正文框）
+            for (spMatch in spRe.findAll(xml)) {
+                val spXml = spMatch.value
+                if (!bodyTypeRe.containsMatchIn(spXml)) continue
+                // 在正文框内按段落提取
+                val paras = pRe.findAll(spXml)
+                for (para in paras) {
+                    val pText = StringBuilder()
+                    tRe.findAll(para.groupValues[1]).forEach { match ->
+                        pText.append(decodeXml(match.groupValues[1]))
+                    }
+                    val line = pText.toString().trim()
+                    if (line.isNotEmpty()) {
+                        val clean = xmlTagRe.replace(line, "")
+                        if (clean.isNotEmpty() && !isPlaceholderText(clean)) nsb.append(clean).append(' ')
+                    }
                 }
             }
-            // v1.3.36: 仅当备注有实际文本时才计入——PowerPoint 默认给每页都建空的
-            // notesSlide XML（无文字），之前的代码无条件计入导致"无备注却显示备注 N"。
+            // 仅当备注有实际文本时才计入
             val notesText = nsb.toString().trim()
             if (notesText.isNotEmpty()) {
                 notesList.add("备注${idx + 1}" to notesText)
