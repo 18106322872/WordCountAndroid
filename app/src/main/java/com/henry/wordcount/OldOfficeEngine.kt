@@ -244,7 +244,6 @@ object OldOfficeEngine {
      *   主提取：每页 slide 用 getTextParagraphs()→getTextRuns()→getRawText()
      *   （这是 POI 5.2.5 最完整的文本链路，HSLFTextShape.text 内部可能丢文本）
      *   补充：形状遍历专门处理 HSLFTable（表格单元格文本可能不被 getTextParagraphs 覆盖）
-     *   辅助：遍历 slideLayouts（不含 slideMasters），某些 PPT 文件的可见文本存在 layout 层
      *   不做去重（对齐电脑版 COM 行为：每个 shape 独立计入）
      */
     internal fun extractPptFull(file: File): PptResult {
@@ -267,21 +266,6 @@ object OldOfficeEngine {
                     }
                 } catch (_: Throwable) {}
             }
-
-            // ── 辅助：SlideLayouts（不含 Masters）──
-            // 某些 PPT 文件的可见内容文本存储在 layout 层而非 slide 自身形状中。
-            // 电脑版 COM 不遍历 Layouts 但通过 TextFrame.TextRange 能取到全部文本；
-            // POI 的 slide.shapes 可能遗漏这些，需额外遍历 layout 补充。
-            try {
-                for (layout in ppt.slideMasters.flatMap { it.slideLayouts }) {
-                    extractSheetTextParagraphs(layout, textSb)
-                    for (shape in layout.shapes) {
-                        if (shape is org.apache.poi.hslf.usermodel.HSLFTable) {
-                            extractHslfTableText(shape, textSb)
-                        }
-                    }
-                }
-            } catch (_: Throwable) {}
 
             // ── 图片计数 ──
             try {
