@@ -128,7 +128,11 @@ object OldOfficeEngine {
         val visibleSb = StringBuilder()
         val visibleNames = mutableListOf<String>()
         val hidden = mutableListOf<Pair<String, String>>()
-        val imgCounter = intArrayOf(0)  // v1.3.42: 用数组做可变计数器（嵌套函数需要引用语义）
+        // v1.3.44: .xls 图片计数优先用工作簿级 API（getAllPictures 覆盖全部嵌入图片，
+        // 比 drawingPatriarch 遍历更全面——后者只返回锚定到某 sheet 绘图层的形状，
+        // 而 OLE2 容器中可能存在未锚定到任何绘图层的图片数据）
+        var totalImages = 0
+        try { totalImages = wb.allPictures.size } catch (_: Throwable) {}
         try {
             for (i in 0 until wb.numberOfSheets) {
                 val sheet = wb.getSheetAt(i) ?: continue
@@ -152,8 +156,6 @@ object OldOfficeEngine {
                     if (patriarch != null) {
                         for (shape in patriarch.children) {
                             collectShapeText(shape, sb)
-                            // v1.3.42: 递归统计嵌入图片（含编组内图片）
-                            countImagesRecursive(shape, imgCounter)
                         }
                     }
                 } catch (_: Throwable) { }
@@ -181,7 +183,7 @@ object OldOfficeEngine {
             runCatching { wb.close() }
             runCatching { fis.close() }
         }
-        return XlsResult(visibleSb.toString(), visibleNames, hidden, imgCounter[0])
+        return XlsResult(visibleSb.toString(), visibleNames, hidden, totalImages)
     }
 
     /**
@@ -249,24 +251,14 @@ object OldOfficeEngine {
         var imgCount = 0
         val textSb = StringBuilder()
         try {
-            // ── 主文本：形状遍历（v1.3.42 恢复为唯一来源） ──
-            // v1.3.39~v1.3.41 经验总结：
-            //   - 形状遍历 collectHslfShapeText（shape.text 整段粒度）→ 接近电脑版（差 ~1.3%）
-            //   - getTextParagraphs()（getRawText 逐 run 粒度）→ 单独用反而更少
-            //   - 双来源并用 → seen 精确匹配去重失效（粒度不同）→ 字数超了
-            // 结论：只用形状遍历，结果最稳定、最接近电脑 COM 遍历。
-            val allSheets: List<HSLFSheet> = buildList {
-                addAll(ppt.slides)
-                try { addAll(ppt.slideMasters) } catch (_: Throwable) {}
-            }
-            for (sheet in allSheets) {
-                try {
-                    val seen = mutableSetOf<String>()
-                    when (sheet) {
-                        is HSLFSlide -> for (shape in sheet.shapes) collectHslfShapeText(shape, textSb, seen)
-                        is HSLFSlideMaster -> for (shape in sheet.shapes) collectHslfShapeText(shape, textSb, seen)
-                    }
-                } catch (_: Throwable) {}
+            // ── 主文本：形状遍历（v1.3.44 对齐电脑版 COM 行为） ──
+            // 电脑版 extract_ppt() 只遍历 pres.Slides（不含 Master/Layout），
+            // 且不做任何去重——每个 shape 的 TextFrame.TextRange.Text 独立计入 items。
+            // v1.3.39~v1.3.43 的 seen 去重导致同页重复文本只计一次（如多个相同
+            // 文本框/占位符），这是 D7B1(256 vs 344)和 60F8(54 vs 82)字数偏少的主因。
+            for (slide in ppt.slides) {
+                try { for (shape in slide.shapes) collectHslfShapeText(shape, textSb) }
+                catch (_: Throwable) {}
             }
 
             // ── 图片计数 ──
@@ -316,17 +308,24 @@ object OldOfficeEngine {
      * - 其余形状（HSLFSimpleShape 线/连接符、HSLFPictureShape 图片等）无文本，忽略
      * v1.3.40: 增加 seen 集合（per-sheet），与 extractSheetTextParagraphs 共用，避免同页重复计入。
      */
-    private fun collectHslfShapeText(shape: org.apache.poi.hslf.usermodel.HSLFShape, sb: StringBuilder, seen: MutableSet<String>) {
+    /**
+     * v1.3.44: 递归收集 HSLF 形状文字（含编组 + 表格）。
+     * 与电脑版 COM 对齐：COM 遍历 slide.Shapes 检查 HasTextFrame + HasTable，无去重。
+     * - HSLFGroupShape: 编组 → 递归遍历子形状
+     * - HSLFTextShape: 文本形状 → 取文字
+     * - HSLFTable: 表格 → 逐单元格提取文字
+     */
+    private fun collectHslfShapeText(shape: org.apache.poi.hslf.usermodel.HSLFShape, sb: StringBuilder) {
         try {
             when (shape) {
                 is org.apache.poi.hslf.usermodel.HSLFGroupShape -> {
-                    for (child in shape.shapes) collectHslfShapeText(child, sb, seen)
+                    for (child in shape.shapes) collectHslfShapeText(child, sb)
                 }
                 is HSLFTextShape -> {
-                    appendUnique(shape.text, sb, seen)
+                    val t = shape.text
+                    if (!t.isNullOrBlank()) sb.append(t).append("\n")
                 }
                 is org.apache.poi.hslf.usermodel.HSLFTable -> {
-                    // v1.3.38: 表格文本（与电脑版 COM shape.Table 对齐）
                     try {
                         val numRows = shape.numberOfRows
                         val numCols = shape.numberOfColumns
@@ -340,7 +339,7 @@ object OldOfficeEngine {
                                 }
                             }
                             val rowText: String = rowSb.toString().trim()
-                            if (rowText.isNotEmpty()) appendUnique(rowText, sb, seen)
+                            if (rowText.isNotEmpty()) sb.append(rowText).append("\n")
                         }
                     } catch (_: Throwable) {}
                 }

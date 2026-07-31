@@ -2119,33 +2119,27 @@ private fun buildExportPdfKotlin(entries: List<FileEntry>, outPath: String): Int
                 fis.close()
             } catch (_: Exception) {}
         } else if (ext == ".xls") {
-            // v1.3.40: .xls 是 OLE2 格式，需用 POI HSSF 提取嵌入图片（与 extractXlsDetailed 的 imageCount 对应）
+            // v1.3.44: .xls 用工作簿级 getAllPictures() 提取（覆盖全部嵌入图片，不限于绘图层）
             try {
                 val fis = java.io.FileInputStream(srcPath)
                 val wb = org.apache.poi.hssf.usermodel.HSSFWorkbook(fis)
                 var n = 0
-                for (si in 0 until wb.numberOfSheets) {
-                    val sheet = wb.getSheetAt(si) ?: continue
-                    val patriarch = sheet.drawingPatriarch ?: continue
-                    for (shape in patriarch.children) {
-                        if (shape is org.apache.poi.hssf.usermodel.HSSFPicture) {
-                            val data = shape.getPictureData()?.getData() ?: continue
-                            n++
-                            val ext2 = when {
-                                data.size >= 3 && data[0] == 0xFF.toByte() && data[1] == 0xD8.toByte() && data[2] == 0xFF.toByte() -> "jpg"
-                                data.size >= 4 && data[0] == 0x89.toByte() && data[1] == 0x50.toByte() && data[2] == 0x4E.toByte() && data[3] == 0x47.toByte() -> "png"
-                                else -> null
-                            } ?: continue
-                            val tmp = File(
-                                System.getProperty("java.io.tmpdir"),
-                                "wc_export_${System.currentTimeMillis()}_$n.$ext2"
-                            )
-                            try {
-                                tmp.outputStream().use { it.write(data) }
-                                imgEntries.add(tmp.absolutePath to "$name - 图片 $n")
-                            } catch (_: Exception) {}
-                        }
-                    }
+                for (picData in wb.allPictures) {
+                    val data = picData.data
+                    n++
+                    val ext2 = when {
+                        data.size >= 3 && data[0] == 0xFF.toByte() && data[1] == 0xD8.toByte() && data[2] == 0xFF.toByte() -> "jpg"
+                        data.size >= 4 && data[0] == 0x89.toByte() && data[1] == 0x50.toByte() && data[2] == 0x4E.toByte() && data[3] == 0x47.toByte() -> "png"
+                        else -> null
+                    } ?: continue
+                    val tmp = File(
+                        System.getProperty("java.io.tmpdir"),
+                        "wc_export_${System.currentTimeMillis()}_$n.$ext2"
+                    )
+                    try {
+                        tmp.outputStream().use { it.write(data) }
+                        imgEntries.add(tmp.absolutePath to "$name - 图片 $n")
+                    } catch (_: Exception) {}
                 }
                 wb.close()
                 fis.close()
