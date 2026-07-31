@@ -108,7 +108,7 @@ object XmlDom {
 
     private fun newFactory(): XmlPullParserFactory {
         val f = XmlPullParserFactory.newInstance()
-        f.isNamespaceProcessingEnabled = true
+        f.namespaceAware = true
         return f
     }
 

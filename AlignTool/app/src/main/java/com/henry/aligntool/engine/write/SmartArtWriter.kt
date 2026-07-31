@@ -1,9 +1,9 @@
 package com.henry.aligntool.engine.write
 
-import com.henry.aligntool.engine.AlignOptions
+import com.henry.aligntool.model.AlignOptions
 import com.henry.aligntool.engine.Anchor
 import com.henry.aligntool.engine.Block
-import com.henry.aligntool.engine.MarkMode
+import com.henry.aligntool.model.MarkMode
 import com.henry.aligntool.engine.Slot
 import com.henry.aligntool.engine.XmlDom
 import com.henry.aligntool.engine.XElement
