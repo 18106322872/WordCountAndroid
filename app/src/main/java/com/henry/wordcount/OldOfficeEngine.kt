@@ -240,12 +240,11 @@ object OldOfficeEngine {
      * v1.3.39: .ppt 完整提取（文本 + 备注幻灯片 + 嵌入图片数）。
      * 与 extractPptx(pptx) 对齐：返回 notesSlides 和 imageCount 供 UI 展开显示。
      *
-     * 文本提取策略（v1.3.52 重写）：
-     *   双来源合并：getTextParagraphs()→getRawText() + collectHslfShapeText() 形状遍历
-     *   两者都用 POI 完整 run 链路（粒度一致，重复风险低）。
-     *   v1.3.40 双来源超了是因为 shape.text(整段) vs getRawText(逐run) 粒度不同；
-     *   现在 collectHslfShapeText 也用 extractTextShapeFullText(run链)，粒度对齐。
-     *   范围：Slides + SlideMasters
+     * 文本提取策略（v1.3.53 重写）：
+     *   纯形状遍历：collectHslfShapeText() 使用完整 run 链路（extractTextShapeFullText）
+     *   这是最接近电脑版 COM 的方式——COM 也是遍历 slide.Shapes 检查 HasTextFrame/HasTable。
+     *   v1.3.52 双来源（getTextParagraphs + shape traversal）导致约 2x 重复计数。
+     *   范围：Slides + SlideMasters（某些 PPT 可见文本在 Master 层）
      *   不做去重
      */
     internal fun extractPptFull(file: File): PptResult {
@@ -255,25 +254,23 @@ object OldOfficeEngine {
         var imgCount = 0
         val textSb = StringBuilder()
         try {
-            // ── 辅助函数：对单个 HSLFSheet 执行双来源提取 ──
-            fun extractSheetDual(sheet: HSLFSheet) {
+            // ── 主文本：Slides（形状遍历，对齐 COM slide.Shapes）──
+            for (slide in ppt.slides) {
                 try {
-                    // 来源1: POI 文本模型 API（覆盖标题/文本框/占位符等标准文本区域）
-                    extractSheetTextParagraphs(sheet, textSb)
-                    // 来源2: 形状遍历（可能抓到 getTextParagraphs 遗漏的编组内形状、特殊容器等）
-                    for (shape in sheet.shapes) {
+                    for (shape in slide.shapes)
                         collectHslfShapeText(shape, textSb)
-                    }
                 } catch (_: Throwable) {}
             }
 
-            // ── 主文本：Slides ──
-            for (slide in ppt.slides) extractSheetDual(slide)
-
             // ── 补充：SlideMasters ──
-            // 某些 PPT 的可见内容存储在 Master 层。v1.3.51 含 Master 时 D7B1=252，
-            // 砍掉 Master 后暴跌到 178。
-            for (master in ppt.slideMasters) extractSheetDual(master)
+            // 某些 PPT 可见内容文本存储在 Master 层。
+            // v1.3.43 含 Master 时 D7B1=256，砍掉 Master 后暴跌到 182。
+            for (master in ppt.slideMasters) {
+                try {
+                    for (shape in master.shapes)
+                        collectHslfShapeText(shape, textSb)
+                } catch (_: Throwable) {}
+            }
 
             // ── 图片计数 ──
             try {
