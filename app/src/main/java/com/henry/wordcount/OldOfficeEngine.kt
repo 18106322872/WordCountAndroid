@@ -354,4 +354,12 @@ object OldOfficeEngine {
             is List<*> -> for (item in obj) extractTextParagraphTree(item, sb)
         }
     }
+
+    /** 归一化后去重追加（collectHslfShapeText 使用） */
+    private fun appendUnique(text: String?, sb: StringBuilder, seen: MutableSet<String>) {
+        if (!text.isNullOrBlank()) {
+            val norm = text.trim()
+            if (norm.isNotEmpty() && seen.add(norm)) sb.append(norm).append("\n")
+        }
+    }
 }
