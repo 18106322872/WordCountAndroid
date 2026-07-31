@@ -1,0 +1,7 @@
+<resources>
+    <!-- Compose 使用 material3 的 MaterialTheme，Manifest 主题仅作兜底(启动闪屏/外部打开) -->
+    <style name="Theme.AlignTool" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:colorBackground">@android:color/white</item>
+        <item name="colorSurface">@android:color/white</item>
+    </style>
+</resources>

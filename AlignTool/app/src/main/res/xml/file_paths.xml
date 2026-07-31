@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 导出目录：getExternalFilesDir / 应用私有文件，用 FileProvider 分享 -->
+    <external-files-path name="export" path="." />
+    <cache-path name="cache" path="." />
+</paths>

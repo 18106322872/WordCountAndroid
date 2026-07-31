@@ -1,0 +1,131 @@
+name: Build AlignTool APK
+
+on:
+  push:
+    branches: [aligntool-build]
+  workflow_dispatch:
+
+# 单任务：在 GitHub 云端编译 AlignTool 的 debug APK（纯 Kotlin + 纯 XML OOXML，无 Python/Chaquopy）。
+# 与 WordCount 同法：ubuntu-latest + JDK17 + Android SDK34 + Gradle 8.9。
+
+# 允许默认 GITHUB_TOKEN 创建 Release（否则发布 APK 会 403）
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 34
+          build-tools: 34.0.0
+          components: 'platform-tools'
+
+      - name: Accept SDK licenses
+        run: yes | sdkmanager --licenses || true
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+          cache-disabled: true
+
+      # 版本号抽成独立步骤，后续步骤统一引用，避免作用域为空
+      - name: Read version
+        id: ver
+        run: |
+          VER=$(grep versionName AlignTool/app/build.gradle | head -1 | grep -oP "[\d.]+" || echo "1.0.1")
+          echo "VER=$VER" >> "$GITHUB_OUTPUT"
+          echo "版本号: $VER"
+
+      - name: Clean & Build debug APK（强制 clean + --no-build-cache，确保打包的是最新 Kotlin 源码）
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+        run: |
+          set -o pipefail
+          cd AlignTool
+          gradle clean --no-daemon > build.log 2>&1 || true
+          gradle assembleDebug --no-build-cache --rerun-tasks --no-daemon >> build.log 2>&1
+          echo "BUILD OK"
+
+      # 构建失败时：用 python3 正确 JSON 编码，把编译错误行 + 日志尾部 POST 到 commit comment（匿名可读，无需 admin 权限）
+      - name: Post build failure diagnostics
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import os, json, urllib.request
+          try:
+              lines = open('AlignTool/build.log', encoding='utf-8', errors='replace').read().splitlines()
+          except Exception as e:
+              lines = ['(build.log 不存在: %s)' % e]
+          tail = '\n'.join(lines[-160:])
+          keys = ('e: ', 'error:', 'Error:', 'FAILURE', 'What went wrong', 'Caused by', 'Unresolved', 'Compilation error', 'A problem occurred', '> Task')
+          errlines = [l for l in lines if any(k in l for k in keys)]
+          body = ("## CI Build Diagnostics (%s)\n\n### 关键错误行\n```\n%s\n```\n\n### 日志尾部\n```\n%s\n```" %
+                  (os.environ.get('SHA','')[:7], '\n'.join(errlines[-70:]) or '(未匹配到错误关键字)', tail[-4500:]))
+          print(body)
+          data = json.dumps({"body": body}).encode('utf-8')
+          req = urllib.request.Request(
+              "https://api.github.com/repos/%s/commits/%s/comments" % (os.environ['GITHUB_REPOSITORY'], os.environ['SHA']),
+              data=data,
+              headers={"Authorization": "Bearer " + os.environ['GH_TOKEN'],
+                       "Accept": "application/vnd.github+json",
+                       "Content-Type": "application/json"},
+              method="POST")
+          try:
+              r = urllib.request.urlopen(req)
+              print("comment posted:", r.status)
+          except Exception as e:
+              print("comment post failed:", e)
+          PY
+
+      - name: Rename APK（AlignTool-版本号格式）
+        run: |
+          echo "APK 输出目录："
+          ls -lh AlignTool/app/build/outputs/apk/debug/ || true
+          cp AlignTool/app/build/outputs/apk/debug/app-debug.apk "AlignTool/app/build/outputs/apk/debug/AlignTool-${{ steps.ver.outputs.VER }}.apk"
+          echo "APK: AlignTool-${{ steps.ver.outputs.VER }}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: align-tool-apk
+          path: AlignTool/app/build/outputs/apk/debug/AlignTool-*.apk
+
+      # 重发前清理旧 release 与 tag，避免 app-debug.apk 残留、保证只留 AlignTool-<ver>.apk
+      - name: Remove stale release/tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REL=$(curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/releases/tags/aligntool-apk)
+          RID=$(printf '%s' "$REL" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
+          if [ -n "$RID" ]; then
+            echo "deleting release id=$RID"
+            curl -s -X DELETE -H "Authorization: Bearer $GH_TOKEN" \
+              https://api.github.com/repos/${{ github.repository }}/releases/$RID
+          fi
+          curl -s -X DELETE -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/${{ github.repository }}/git/refs/tags/aligntool-apk || true
+
+      - name: Create GitHub Release (APK only)
+        uses: softprops/action-gh-release@v2
+        if: success()
+        with:
+          tag_name: aligntool-apk
+          name: Align Tool v${{ steps.ver.outputs.VER }} APK
+          make_latest: false
+          files: AlignTool/app/build/outputs/apk/debug/AlignTool-*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

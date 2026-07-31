@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">Align Tool</string>
+    <string name="pick_source">选择原文文件</string>
+    <string name="pick_target">选择译文文件</string>
+    <string name="start_align">开始对照</string>
+</resources>

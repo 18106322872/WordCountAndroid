@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- SAF 选文件无需任何存储权限；分享用 FileProvider -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@drawable/ic_launcher"
+        android:label="${appName}"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AlignTool">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="${appName}"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- 接收微信/邮件等「分享」的两份文件 -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+                <data android:mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+                <data android:mimeType="application/vnd.openxmlformats-officedocument.presentationml.presentation" />
+                <data android:mimeType="application/msword" />
+                <data android:mimeType="application/vnd.ms-excel" />
+                <data android:mimeType="application/vnd.ms-powerpoint" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+
+        <!-- 导出后用系统分享(微信/邮件/文件管理)打开 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+
+</manifest>
