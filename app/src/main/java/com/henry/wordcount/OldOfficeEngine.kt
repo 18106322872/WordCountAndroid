@@ -240,12 +240,12 @@ object OldOfficeEngine {
      * v1.3.39: .ppt 完整提取（文本 + 备注幻灯片 + 嵌入图片数）。
      * 与 extractPptx(pptx) 对齐：返回 notesSlides 和 imageCount 供 UI 展开显示。
      *
-     * 文本提取策略（v1.3.51 重写）：
-     *   主提取：每页 sheet 用 getTextParagraphs()→getTextRuns()→getRawText()
-     *   （POI 5.2.5 最完整文本链路）
-     *   补充：形状遍历专门处理 HSLFTable（表格单元格可能不被 getTextParagraphs 完全覆盖）
-     *   范围：Slides + SlideMasters（v1.3.50 只遍历 Slides 导致 D7B1 从256降到178，
-     *         某些 PPT 的可见内容存储在 Master 层；v1.3.43 含 Master 时 D7B1=256 最高）
+     * 文本提取策略（v1.3.52 重写）：
+     *   双来源合并：getTextParagraphs()→getRawText() + collectHslfShapeText() 形状遍历
+     *   两者都用 POI 完整 run 链路（粒度一致，重复风险低）。
+     *   v1.3.40 双来源超了是因为 shape.text(整段) vs getRawText(逐run) 粒度不同；
+     *   现在 collectHslfShapeText 也用 extractTextShapeFullText(run链)，粒度对齐。
+     *   范围：Slides + SlideMasters
      *   不做去重
      */
     internal fun extractPptFull(file: File): PptResult {
@@ -255,32 +255,25 @@ object OldOfficeEngine {
         var imgCount = 0
         val textSb = StringBuilder()
         try {
-            // ── 主文本：Slides ──
-            for (slide in ppt.slides) {
+            // ── 辅助函数：对单个 HSLFSheet 执行双来源提取 ──
+            fun extractSheetDual(sheet: HSLFSheet) {
                 try {
-                    extractSheetTextParagraphs(slide, textSb)
-                    for (shape in slide.shapes) {
-                        if (shape is org.apache.poi.hslf.usermodel.HSLFTable) {
-                            extractHslfTableText(shape, textSb)
-                        }
+                    // 来源1: POI 文本模型 API（覆盖标题/文本框/占位符等标准文本区域）
+                    extractSheetTextParagraphs(sheet, textSb)
+                    // 来源2: 形状遍历（可能抓到 getTextParagraphs 遗漏的编组内形状、特殊容器等）
+                    for (shape in sheet.shapes) {
+                        collectHslfShapeText(shape, textSb)
                     }
                 } catch (_: Throwable) {}
             }
 
+            // ── 主文本：Slides ──
+            for (slide in ppt.slides) extractSheetDual(slide)
+
             // ── 补充：SlideMasters ──
-            // 某些 PPT 文件的可见内容文本存储在 Master 层（如公司 logo 旁的文字、
-            // 页脚模板文字等）。v1.3.43 含 Master 遍历时 D7B1=256，
-            // v1.3.45/1.3.50 砍掉 Master 后暴跌到 182/178。
-            for (master in ppt.slideMasters) {
-                try {
-                    extractSheetTextParagraphs(master, textSb)
-                    for (shape in master.shapes) {
-                        if (shape is org.apache.poi.hslf.usermodel.HSLFTable) {
-                            extractHslfTableText(shape, textSb)
-                        }
-                    }
-                } catch (_: Throwable) {}
-            }
+            // 某些 PPT 的可见内容存储在 Master 层。v1.3.51 含 Master 时 D7B1=252，
+            // 砍掉 Master 后暴跌到 178。
+            for (master in ppt.slideMasters) extractSheetDual(master)
 
             // ── 图片计数 ──
             try {
