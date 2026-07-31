@@ -703,8 +703,10 @@ object OoXmlEngine {
         val placeholderPatterns = listOf(
             "click to add title", "click to add subtitle", "click to add text",
             "click to add slide title", "click to add slide subtitle",
+            "click to add notes",
             "点击此处添加标题", "点击此处添加副标题", "点击此处添加文本",
             "点击此处添加幻灯片标题", "点击此处添加幻灯片副标题",
+            "点击此处添加备注",
             "date", "footer", "slide number", "页脚", "页码",
             " presenter name ", " company name ", "作者", "单位"
         ).map { Regex("^\\s*${Regex.escape(it)}\\s*$", RegexOption.IGNORE_CASE) }

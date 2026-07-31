@@ -216,41 +216,50 @@ object OldOfficeEngine {
     }
 
     /**
-     * v1.3.36: .ppt 完整提取（文本 + 备注幻灯片 + 嵌入图片数 + 图表 + 批注）。
+     * v1.3.39: .ppt 完整提取（文本 + 备注幻灯片 + 嵌入图片数）。
      * 与 extractPptx(pptx) 对齐：返回 notesSlides 和 imageCount 供 UI 展开显示。
-     * v1.3.36 改进：
-     *   - 递归编组形状（HSLFGroupShape），否则编组内文本整组丢失导致字数偏低
-     *   - 内嵌图表文字（图表标题 + 系列名）
-     *   - 批注/评论文字（ppt.comments）——这些是需要翻译的内容
+     *
+     * 文本提取策略（v1.3.39 重写）：
+     *   主文本用 PowerPointExtractor.getText() —— POI 官方提取器，能拿到全部文字
+     *   （含表格单元格、Master/Layout、所有形状），与电脑版 COM 对齐。
+     *   手动遍历 shape 仅用于：备注分离统计 + 图片计数（extractor 不区分这两者）。
      */
     internal fun extractPptFull(file: File): PptResult {
         val fis = FileInputStream(file)
         val ppt = HSLFSlideShow(fis)
-        val textSb = StringBuilder()
         val notesList = mutableListOf<SheetStat>()
         var imgCount = 0
         try {
-            // 幻灯片文本（递归编组 + 图表 + 批注）
-            for (slide in ppt.slides) {
-                // 递归收集幻灯片内所有文本形状（含编组内子形状）
-                try {
-                    for (shape in slide.shapes) {
-                        collectHslfShapeText(shape, textSb)
-                    }
-                } catch (_: Throwable) {}
-                // 统计图片（HSLFPictureShape 是嵌入图片）
-                try {
+            // ── 主文本：用 PowerPointExtractor 一次性提取全部文字（含表格/Master/布局等）──
+            // 这解决了手动遍历 HSLFShape 漏掉表格/某些形状类型导致字数严重偏低的问题
+            var allText = ""
+            try {
+                val extractor = org.apache.poi.hslf.extractor.PowerPointExtractor(ppt)
+                allText = extractor.text ?: ""
+                // 清理：去掉纯空白段落、统一换行
+                allText = allText.replace("\r\n", "\n").replace("\r", "\n")
+                    .replace("\t", " ").trim()
+            } catch (_: Throwable) {
+                // extractor 不可用时回退到手动遍历
+                val fallbackSb = StringBuilder()
+                for (slide in ppt.slides) {
+                    try {
+                        for (shape in slide.shapes) collectHslfShapeText(shape, fallbackSb)
+                    } catch (_: Throwable) {}
+                }
+                allText = fallbackSb.toString()
+            }
+
+            // ── 图片计数 ──
+            try {
+                for (slide in ppt.slides) {
                     for (shape in slide.shapes) {
                         if (org.apache.poi.hslf.usermodel.HSLFPictureShape::class.java.isInstance(shape)) imgCount++
                     }
-                } catch (_: Throwable) {}
-                // 注意：POI HSLF 不像 HSSF(Excel)那样有 getSheetCharts() API，
-                // .ppt 内嵌图表是 OLE 对象，POI scratchpad 无法直接提取文字。
-                // 字数差距主要靠递归编组形状弥补（见上方的 collectHslfShapeText）。
-            }
-            // 批注：POI HSLF scratchpad 未暴露 comments 属性，暂无法通过 POI 提取
-            // （电脑版用 COM PowerPoint.Application 可取到）
-            // 备注文本（HSLF: 通过 ppt.notes 获取所有备注幻灯片）
+                }
+            } catch (_: Throwable) {}
+
+            // ── 备注文本（HSLF: 通过 ppt.notes 获取所有备注幻灯片）──
             try {
                 for (notes in ppt.notes) {
                     val notesSb = StringBuilder()
@@ -274,7 +283,7 @@ object OldOfficeEngine {
             runCatching { ppt.close() }
         }
         return PptResult(
-            text = textSb.toString(),
+            text = allText,
             pages = maxOf(1, ppt.slides.size),
             notesSlides = notesList,
             imageCount = imgCount

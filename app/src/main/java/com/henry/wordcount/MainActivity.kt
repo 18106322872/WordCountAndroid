@@ -357,7 +357,7 @@ fun WordCountApp(initialUris: List<Uri>) {
                                 onClick = { exportUnreliable(context, scope, snackbar, entries, onStateChange = { isExporting = it }) },
                                 modifier = Modifier.weight(1f),
                                 enabled = entries.any { it.selected && it.result?.hasUnreliable == true } && !isExporting
-                            ) { Text(if (isExporting) "导出中…" else "导出不可识别内容") }
+                            ) { Text(if (isExporting) "导出中…" else "导出未统计图片") }
                         }
                     }
                 }
@@ -392,9 +392,10 @@ fun WordCountApp(initialUris: List<Uri>) {
                         Spacer(Modifier.padding(12.dp))
                         // v1.3.4: 空状态说明改为 11.txt 内容；左对齐、黑色字体；新增说明时往 helpLines 追加（编号顺延）
                         val helpLines = listOf(
-                            "1、从千牛/微信→长按文件→用其他应用打开→选「字数统计」，或点下方「选择文件」从本机选取；",
-                            "2、Word核对方法：手机安装Word后，doc/docx文件2页以上的可点文件名右侧「Word」直接在 Word 里打开，左下角选「页面视图」，上下滚动查看页数和总字数；",
-                            "3、Excel 核对方式：手机安装Wps后，xls、xlsx文件，点击文件右侧「Wps」直接在WPS里打开，左下角选「逐页输出图片」，右下角可看到页数。"
+                            "1、导入文件：从千牛/微信→长按文件→用其他应用打开→选「字数统计」，或点下方「选择文件」从本机选取；",
+                            "2、Word字数页数核对：手机安装Word后，doc/docx文件2页以上的可点文件名右侧「Word」直接在 Word 里打开，左下角选「页面视图」，上下滚动查看页数和总字数；",
+                            "3、PPT/Excel 页数核对：手机安装Wps后，点击文件右侧「Wps」直接在Wps里打开，PPT直接下拉，Excel左下角选「逐页输出图片」，右下角可看到页数。",
+                            "4、\"导出未统计图片\"按钮功能：导出Word/Excel/PPT里的内嵌图片，这部分内容未统计字数。"
                         )
                         Column(
                             Modifier.fillMaxWidth().padding(horizontal = 8.dp),
@@ -524,7 +525,7 @@ fun FileCard(
                                     .clickable { expanded.value = !expanded.value }
                             )
                         }
-                        if (r.hasUnreliable) Text("含无法准确统计的内容（可导出）", style = MaterialTheme.typography.bodySmall, color = Color(0xFFB26A00))
+                        if (r.hasUnreliable) Text("含未统计图片（可导出）", style = MaterialTheme.typography.bodySmall, color = Color(0xFFB26A00))
                     } else if (entry.error != null) {
                         val shortErr = entry.error!!.substringBefore('\n').take(200)
                         Text("处理出错：$shortErr", style = MaterialTheme.typography.bodySmall, color = Color(0xFFB00020))
@@ -1988,8 +1989,9 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
         // v1.3.32: 文件内部标题
         internalTitle = (meta["internal_title"] as? String) ?: "",
         inner = inner,
-        // v1.3.33: OOXML（pptx/docx/xlsx）含嵌入图片时，也视为"不可识别内容"可导出
-        hasUnreliable = (ext == ".pdf" && (imageOnly || !imgPages.isNullOrEmpty())) || imageCount > 0
+        // v1.3.39: 仅 Office 文档（pptx/ppt/docx/xlsx/xls）含嵌入图片时才显示"导出未统计图片"按钮
+        // 图片型 PDF 不再触发导出按钮（PDF 无法像 OOXML 那样解压提取内嵌图片）
+        hasUnreliable = imageCount > 0
     )
 }
 
@@ -2004,7 +2006,7 @@ private fun exportUnreliable(
         onStateChange(true)
         try {
             val sel = entries.filter { it.selected && it.result?.hasUnreliable == true && it.cachePath.isNotBlank() }
-            if (sel.isEmpty()) { snackbar.showSnackbar("没有可导出的不可识别内容"); return@launch }
+            if (sel.isEmpty()) { snackbar.showSnackbar("没有可导出的未统计图片"); return@launch }
 
             val out = File(context.getExternalFilesDir(null), "无法准确统计内容_${System.currentTimeMillis()}.pdf")
             var totalCount = 0
