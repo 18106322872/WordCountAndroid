@@ -1692,11 +1692,12 @@ private fun addFiles(
                         val usePython = pyOk && (pyChars > ktStats.fourth || ktLooksLikeCidGarbage)
                         Log.d("WordCount", "PDF决策 $dName: pyOk=$pyOk pyChars=$pyChars ktChars=${ktStats.fourth} usePython=$usePython cidGarbage=$ktLooksLikeCidGarbage pyError=$pyError")
 
-                        // v1.3.64: 拼出可直接显示到界面的诊断信息
+                        // v1.3.66: 拼出可直接显示到界面的诊断信息（含 PdfExtractor 内部诊断）
                         val pdfDiag = buildString {
                             appendLine("【PDF诊断】")
                             appendLine("Python测试: ${pyDiag ?: "(未执行)"}")
                             appendLine("Kotlin提取: ${ktStats.fourth}字(fe=${ktStats.second},可靠=${ktRes.reliable})")
+                            if (ktRes.diag.isNotEmpty()) appendLine("KT内部: ${ktRes.diag}")
                             appendLine("Python提取: ${if (pyOk) "${pyChars}字(fe=$pyFe)" else "失败"}")
                             if (!pyOk && pyError != null) appendLine("Python错误: $pyError")
                             appendLine("决策: ${if (usePython) "用Python" else "用Kotlin"}(pyOk=$pyOk)")

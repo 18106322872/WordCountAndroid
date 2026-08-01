@@ -30,10 +30,11 @@ import kotlin.math.min
  */
 object PdfExtractor {
 
-    data class PdfResult(val text: String, val pages: Int, val reliable: Boolean = true)
+    data class PdfResult(val text: String, val pages: Int, val reliable: Boolean = true,
+                          val diag: String = "")  // v1.3.66: 内部诊断信息
 
     /** 标记文本是否来自路径B（原始字节扫描）—— 路径B内容永远不可靠 */
-    data class TextSource(val text: String, val fromRawScan: Boolean)
+    data class TextSource(val text: String, val fromRawScan: Boolean, val diag: String = "")
 
     /** 单个 PDF 文件大小上限（50MB） */
     private const val MAX_FILE_SIZE = 50 * 1024 * 1024
@@ -58,24 +59,22 @@ object PdfExtractor {
 
     /**
      * 提取 PDF 文本。**永远不返回 null**，最坏情况返回 ("", 1)。
+     * v1.3.66: 返回值含 diag 字段，携带内部诊断信息（用于 UI 显示）。
      */
     fun extract(file: File): PdfResult {
-        // ── 防御性检查：确保能快速退出 ──
         val fileSize: Long = try { file.length() } catch (_: Throwable) { return PdfResult("", 1) }
         if (fileSize > MAX_FILE_SIZE || fileSize < 5) return PdfResult("", 1)
 
-        // ── 读取文件前部（有大小和超时保护） ──
         val bytes: ByteArray = try {
             val toRead = min(fileSize.toInt(), MAX_READ_BYTES)
             val buf = ByteArray(toRead)
             val nRead = file.inputStream().use { it.read(buf) }
             if (nRead <= 0) return PdfResult("", 1)
-            buf.copyOf(nRead)  // 只保留实际读到的字节
+            buf.copyOf(nRead)
         } catch (_: Throwable) {
             return PdfResult("", 1)
         }
 
-        // 验证 PDF 头
         val header = try {
             String(bytes, 0, min(8, bytes.size), StandardCharsets.ISO_8859_1)
         } catch (_: Throwable) {
@@ -83,22 +82,24 @@ object PdfExtractor {
         }
         if (!header.startsWith("%PDF") && !header.startsWith("%PDF-")) return PdfResult("", 1)
 
-        // ── 带时间预算的提取 ──
         val deadline = System.currentTimeMillis() + TIME_BUDGET_MS
+        val diagSb = StringBuilder()
         return try {
             val pages = countPagesSafe(bytes, deadline)
-            if (System.currentTimeMillis() > deadline) return PdfResult("", max(1, pages), false)
+            if (System.currentTimeMillis() > deadline) return PdfResult("", max(1, pages), false, "超时[页数=$pages]")
 
-            val source = extractTextRobust(bytes, deadline)
-            // v1.0.29: 判断文本可靠性——
-            //   1) 路径B(原始字节扫描) → 永远不可靠（PDF二进制中的ASCII片段不是真正的文字内容）
-            //   2) 走了路径A但含大量PDF结构残留 → 不可靠
-            //   3) 空文本 → 不可靠
+            val source = extractTextRobust(bytes, deadline, diagSb)
             val reliable = !source.fromRawScan && isTextReliable(source.text, bytes)
-            PdfResult(source.text.ifBlank { "" }, max(1, pages), reliable)
-        } catch (_: Throwable) {
-            // 任何异常都降级为空结果
-            PdfResult("", 1, false)
+            val finalText = source.text.ifBlank { "" }
+
+            val stats = quickStats(finalText)
+            diagSb.insert(0, "流处理: ${source.diag}\n")
+            diagSb.append("最终: ${stats.first}字(fe=${stats.second},可靠=$reliable)\n")
+            if (source.fromRawScan) diagSb.append("⚠️ 使用路径B(原始扫描)\n")
+
+            PdfResult(finalText, max(1, pages), reliable, diagSb.toString().trim())
+        } catch (e: Throwable) {
+            PdfResult("", 1, false, "异常:${e.message}")
         }
     }
 
@@ -166,61 +167,99 @@ object PdfExtractor {
 
     // ───────────────────────── 文本提取（鲁棒版） ─────────────────────────
     /**
-     * @return TextSource(提取文本, 是否来自路径B原始扫描)
+     * @return TextSource(提取文本, 是否来自路径B原始扫描, 诊断信息)
      *         路径A=标准流解析(较可靠), 路径B=原始字节扫描(永远不可靠)
      */
-    private fun extractTextRobust(bytes: ByteArray, deadline: Long): TextSource {
+    private fun extractTextRobust(bytes: ByteArray, deadline: Long, diagSb: StringBuilder): TextSource {
         val sb = StringBuilder()
         var usedRawScan = false
+        val d = StringBuilder()  // 局部诊断
 
         // 路径 A：标准流解析（带严格限制）
         try {
             if (System.currentTimeMillis() <= deadline) {
                 // 一次性解析全文件 ToUnicode 映射（文件上限 2MB，安全）
                 val toUnicode = if (System.currentTimeMillis() <= deadline) parseToUnicodeSafe(bytes, deadline) else emptyMap()
+                d.append("ToUnicode=${toUnicode.size}条; ")
+
+                
                 var textCount = 0
                 var streamIdx = 0
+                var totalStreams = 0
+                var tjCount = 0
+                var hexTjCount = 0
+                var litTjCount = 0
+                var sampleHex = ""
+                var cidTriggered = false
+                var feBeforeCID = 0
+                var feAfterCID = 0
+                
                 findStreamsSafe(bytes, deadline) { rawBytes, dictSlice ->
                     streamIdx++
+                    totalStreams++
                     if (streamIdx > MAX_STREAMS) return@findStreamsSafe false
                     if (System.currentTimeMillis() > deadline) return@findStreamsSafe false
 
                     try {
-                        // v1.0.27 修复：精确检测图片 XObject 流。
-                        // 旧版用 dictStr.contains("/Image") 简单匹配，会把
-                        //   ProcSet[/PDF/Text/ImageB/ImageC/ImageI]（页面级资源声明）
-                        // 误判为图片流而跳过，导致纯文字 PDF 的内容流被整体丢弃。
-                        // 新版只匹配真正的 XObject 图片子类型：
-                        //   /Subtype/Image 或 /S/Image（在 XObject 字典上下文中）
                         val dictStr = String(dictSlice, StandardCharsets.ISO_8859_1)
                         if (isImageXObject(dictStr)) return@findStreamsSafe true
 
-                        // 关键修复 v1.0.24：先在内存解压，再在「解压后」的内容流里查找 Tj/TJ/BT。
-                        // 之前在原始（已压缩）字节上搜索，导致所有 FlateDecode 文字流被整体跳过，
-                        // 绝大多数数字 PDF 也因此提取不到文字。
                         val data = tryDecompressSafe(rawBytes) ?: rawBytes
                         val probe = String(data, StandardCharsets.ISO_8859_1)
                         if (!probe.contains("Tj") && !probe.contains("TJ") && !probe.contains("BT"))
                             return@findStreamsSafe true
 
-                        val text = decodeContentStream(data, toUnicode)
+                        // 收集内容流样本（第一个含 Tj 的流的前300字符）
+                        if (sampleHex.isEmpty() && probe.length > 20) {
+                            sampleHex = probe.take(300)
+                            // 统计 hex vs literal 比例
+                            val hexMatches = """<[0-9A-Fa-f]{2,}>""".toRegex().findAll(probe).count()
+                            val litMatches = """\([^)]{2,}\)""".toRegex().findAll(probe).count()
+                            d.append("样本hex=$hexMatches个, 样本lit=$litMatches个; ")
+                        }
+
+                        // 先用标准模式解码
+                        val text1 = decodeContentStream(data, toUnicode)
+                        val s1 = quickStats(text1)
+                        feBeforeCID += s1.second
+                        
+                        // v1.3.66: 再单独用 CID 模式解码对比
+                        val textCid = decodeContentStreamInternal(
+                            String(data, StandardCharsets.ISO_8859_1), toUnicode, true
+                        )
+                        val sCid = quickStats(textCid)
+                        feAfterCID += sCid.second
+                        if (sCid.second > s1.second) cidTriggered = true
+                        
+                        // 统计 Tj/TJ 操作符数量
+                        val tjInStream = """Tj\b""".toRegex().findAll(probe).count()
+                        val tjArrInStream = """TJ\b""".toRegex().findAll(probe).count()
+                        tjCount += tjInStream + tjArrInStream
+                        
+                        // 用更好的结果
+                        val text = if (sCid.second > s1.second) textCid else text1
                         if (text.isNotBlank()) { sb.append(text).append('\n'); textCount++ }
                         if (sb.length > MAX_OUTPUT) return@findStreamsSafe false
                     } catch (_: Throwable) { }
                     true
                 }
 
+                d.append("扫描${totalStreams}流(限${MAX_STREAMS}), 有文本${textCount}流, Tj=${tjCount}; ")
+                d.append("CID模式${if(cidTriggered)"生效"else "未胜出"}(fe1B=$feBeforeCID feCID=$feAfterCID); ")
+                if (sampleHex.isNotEmpty()) d.append("流样本: ${sampleHex.take(200)}")
+
                 if (textCount > 0 && System.currentTimeMillis() <= deadline) {
                     val cleaned = cleanExtractedText(sb.toString())
-                    if (cleaned.isNotBlank()) return TextSource(cleaned, false)
+                    if (cleaned.isNotBlank()) return TextSource(cleaned, false, d.toString())
                 }
             }
-        } catch (_: Throwable) { }
+        } catch (_: Throwable) { d.append("路径A异常:${_} ") }
 
         // 路径 B：备用——直接从原始字节扫描可读字符串
-        if (System.currentTimeMillis() > deadline) return TextSource(sb.toString(), false)
+        if (System.currentTimeMillis() > deadline) return TextSource(sb.toString(), false, d.toString())
         usedRawScan = true
-        return TextSource(extractRawReadableStrings(bytes, deadline), true)
+        d.append("→路径B")
+        return TextSource(extractRawReadableStrings(bytes, deadline), true, d.toString())
     }
 
     /**
