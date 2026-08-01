@@ -119,13 +119,14 @@ object PythonEngine {
             val py = Python.getInstance()
             val mod = py.getModule("wordcount")
             // v1.3.58: 用 json.dumps 在 Python 端序列化为标准 JSON
-            // 之前直接对 Python list 调用 toString() 得到的是 Python repr 格式
-            // （单引号、True/False、None），不是合法 JSON（需要双引号、true/false、null），
-            // 导致 JSONArray(s) 始终解析失败 → pyOk 永远为 false → PDF 统计从未用过 Python pdfminer！
             val jsonMod = py.getModule("json")
             val pyResult = mod.callAttr("count_files", paths)
+            // v1.3.59: 加诊断日志确认 json.dumps 输出
             val s = jsonMod.callAttr("dumps", pyResult).toString()
+            Log.d("WordCount", "PythonEngine.countFiles: json length=${s.length}, first 500=${s.take(500)}")
             val native = toNative(JSONArray(s))
+            Log.d("WordCount", "PythonEngine.countFiles: native type=${native?.javaClass?.simpleName}, size=" +
+                (if (native is List<*>) native.size else "N/A"))
             native ?: emptyList<Any?>()
         }
     }

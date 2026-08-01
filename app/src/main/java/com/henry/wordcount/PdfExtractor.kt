@@ -54,7 +54,7 @@ object PdfExtractor {
     private const val MAX_OUTPUT = 100_000
 
     /** 最多处理的 stream 块数 */
-    private const val MAX_STREAMS = 20
+    private const val MAX_STREAMS = 100  // v1.3.59: 20→100（多页 PDF 可能超过 20 个内容流）
 
     /**
      * 提取 PDF 文本。**永远不返回 null**，最坏情况返回 ("", 1)。
