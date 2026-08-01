@@ -4,10 +4,10 @@ import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.material3.MaterialTheme
 import androidx.core.content.FileProvider
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.henry.aligntool.ui.MainScreen
 import com.henry.aligntool.ui.PreviewScreen
@@ -30,7 +30,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme {
                 val vm: AlignViewModel = viewModel()
-                val state by vm.state.collectAsStateWithLifecycle()
+                val state by vm.state.collectAsState()
 
                 if (state.phase == AlignViewModel.Phase.DONE && state.result != null) {
                     PreviewScreen(

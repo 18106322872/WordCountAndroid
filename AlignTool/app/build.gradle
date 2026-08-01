@@ -13,9 +13,9 @@ android {
         // 纯 XML 方案不依赖 POI/StAX，无需更高 SDK，26 已覆盖绝大多数在网 Android 设备。
         minSdk 26
         targetSdk 34
-        versionCode 4
+        versionCode 5
         // 手机版独立版本号（沿用跳过 4 与 7 的约定，与桌面版号不冲突）
-        versionName '1.0.4'
+        versionName '1.0.5'
 
         // 只编 arm64-v8a（现代手机），缩小体积、功能零影响
         ndk {
@@ -72,9 +72,9 @@ android {
         compose true
     }
     composeOptions {
-        // 必须与 compose-bom:2024.06.00(运行时 1.6.8 / material3 1.2.1) 匹配，
-        // 否则编译能过、但首次 Compose 组合会在运行时抛 NoSuchMethodError 闪退。
-        kotlinCompilerExtensionVersion '1.6.8'
+        // androidx.compose.compiler 仅发布 1.5.x（无 1.6.x）。
+        // 1.5.15 是 Kotlin 1.9.22 下最新的 1.5.x，与 compose-bom:2024.06.00(运行时 1.6.x) 为官方支持搭配。
+        kotlinCompilerExtensionVersion '1.5.15'
     }
 }
 
