@@ -1622,6 +1622,13 @@ private fun addFiles(
                         var pyWords = 0; var pyFe = 0; var pyNc = 0; var pyChars = 0; var pyPages = 0
                         var pyOk = false
                         var pyError: String? = null
+                        // v1.3.63: 先测试 Python 引擎是否正常工作
+                        try {
+                            val pyDiag = PythonEngine.testPython(context)
+                            Log.d("WordCount", "PDF Python诊断 $dName: $pyDiag")
+                        } catch (e: Throwable) {
+                            Log.w("WordCount", "PDF Python诊断失败 $dName: ${e.javaClass.simpleName}: ${e.message}")
+                        }
                         try {
                             val pyResults = PythonEngine.countFiles(context, listOf(f.absolutePath))
                             @Suppress("UNCHECKED_CAST")
@@ -1669,6 +1676,7 @@ private fun addFiles(
                         val ktLooksLikeCidGarbage = ktStats.fourth > 100 && ktStats.second == 0
                                                 && ktStats.third > ktStats.fourth * 0.5
                         val usePython = pyOk && (pyChars > ktStats.fourth || ktLooksLikeCidGarbage)
+                        Log.d("WordCount", "PDF决策 $dName: pyOk=$pyOk pyChars=$pyChars ktChars=${ktStats.fourth} usePython=$usePython cidGarbage=$ktLooksLikeCidGarbage pyError=$pyError")
 
                         val bestWords = if (usePython) pyWords else ktStats.first
                         val bestFe = if (usePython) pyFe else ktStats.second

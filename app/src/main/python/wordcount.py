@@ -9920,8 +9920,39 @@ def count_files_json(paths, sheet_filter="all", with_notes=False):
       改为在 Python 端序列化，Kotlin 端只接收纯字符串。
     """
     import json
-    result = count_files(paths, sheet_filter, with_notes)
-    return json.dumps(result, default=str, ensure_ascii=False)
+    try:
+        result = count_files(paths, sheet_filter, with_notes)
+        return json.dumps(result, default=str, ensure_ascii=False)
+    except Exception as e:
+        import traceback
+        # v1.3.63: 绝不让异常冒泡到 Chaquopy/Kotlin（会导致 pyOk=false）
+        # 任何错误都包装成 JSON 返回，让 Kotlin 端能看到具体错误信息
+        err_info = "%s: %s\n%s" % (type(e).__name__, e, traceback.format_exc()[-2000:])
+        return json.dumps([{"ok": False, "error": err_info, "name": "count_files_json_inner"}],
+                          ensure_ascii=False)
+
+
+def python_test():
+    """v1.3.63: 诊断函数——验证 Python 引擎正常工作。返回已知值供 Kotlin 确认链路畅通。"""
+    import json, sys, os
+    info = {
+        "python_version": sys.version,
+        "pdfminer_available": False,
+        "fitz_available": False,
+        "cwd": os.getcwd(),
+        "test_str": "你好世界 Hello World \u4e2d\u6587\u6d4b\u8bd5",
+    }
+    try:
+        import pdfminer.high_level
+        info["pdfminer_available"] = True
+    except ImportError:
+        pass
+    try:
+        import fitz
+        info["fitz_available"] = True
+    except ImportError:
+        pass
+    return json.dumps(info, default=str, ensure_ascii=False)
 
 
 

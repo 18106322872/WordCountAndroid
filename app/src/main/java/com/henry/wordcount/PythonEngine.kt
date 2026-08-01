@@ -129,6 +129,15 @@ object PythonEngine {
         }
     }
 
+    /** v1.3.63: 诊断函数——验证 Python 引擎正常工作并返回环境信息 */
+    fun testPython(context: Context): String {
+        return withRetry(context) {
+            val py = Python.getInstance()
+            val mod = py.getModule("wordcount")
+            mod.callAttr("python_test").toString()
+        }
+    }
+
     fun countText(context: Context, text: String, name: String): Map<*, *> {
         return withRetry(context) {
             val py = Python.getInstance()
