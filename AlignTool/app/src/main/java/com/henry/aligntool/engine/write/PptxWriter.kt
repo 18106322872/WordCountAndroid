@@ -51,7 +51,13 @@ object PptxWriter {
         if (font?.bold == true) sb.append(" b=\"1\"")
         if (font?.italic == true) sb.append(" i=\"1\"")
         sb.append(">")
-        if (font?.name != null) {
+        if (font?.latin != null || font?.ea != null || font?.cs != null) {
+            // 分字样写回：西文 latin 与中文 ea 各自保留，与译文文件一致
+            if (font.latin != null) sb.append("<a:latin typeface=\"${escAttr(font.latin!!)}\"/>")
+            if (font.ea != null) sb.append("<a:ea typeface=\"${escAttr(font.ea!!)}\"/>")
+            if (font.cs != null) sb.append("<a:cs typeface=\"${escAttr(font.cs!!)}\"/>")
+        } else if (font?.name != null) {
+            // 兜底：仅合并名时统一三种字样
             val n = escAttr(font.name)
             sb.append("<a:latin typeface=\"$n\"/><a:ea typeface=\"$n\"/><a:cs typeface=\"$n\"/>")
         }

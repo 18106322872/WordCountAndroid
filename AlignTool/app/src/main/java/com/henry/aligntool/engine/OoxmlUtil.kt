@@ -38,22 +38,30 @@ object OoxmlUtil {
     fun docxFontFromRpr(rPr: XElement?): Font? {
         if (rPr == null) return null
         val rFonts = rPr.findFirst("rFonts")
-        val name = rFonts?.let {
-            it.getAttrValue("ascii") ?: it.getAttrValue("hAnsi") ?: it.getAttrValue("eastAsia")
-        }
+        // 四种字样分别保留，不能直接压成一个 name（中文 eastAsia 与西文 ascii 往往不同）
+        val ascii = rFonts?.getAttrValue("ascii")
+        val hAnsi = rFonts?.getAttrValue("hAnsi")
+        val eastAsia = rFonts?.getAttrValue("eastAsia")
+        val cs = rFonts?.getAttrValue("cs")
+        val name = ascii ?: hAnsi ?: eastAsia ?: cs
         val sz = rPr.findFirst("sz")?.getAttrValue("val")?.toDoubleOrNull()?.let { it / 2 }
         val bold = rPr.findFirst("b")?.let { it.getAttrValue("val") != "0" } ?: false
         val italic = rPr.findFirst("i")?.let { it.getAttrValue("val") != "0" } ?: false
         val underline = rPr.findFirst("u") != null
         val color = rPr.findFirst("color")?.getAttrValue("val")
-        if (name == null && sz == null && !bold && !italic && !underline && color == null) return null
+        if (name == null && sz == null && !bold && !italic && !underline && color == null
+            && ascii == null && hAnsi == null && eastAsia == null && cs == null) return null
         return Font(
             name = name,
             sizePt = sz,
             bold = if (bold) true else null,
             italic = if (italic) true else null,
             underline = if (underline) true else null,
-            color = color
+            color = color,
+            ascii = ascii,
+            hAnsi = hAnsi,
+            eastAsia = eastAsia,
+            cs = cs
         )
     }
 
@@ -64,17 +72,24 @@ object OoxmlUtil {
         val bold = boolAttrOrChild(rPr, "b")
         val italic = boolAttrOrChild(rPr, "i")
         val underline = rPr.getAttrValue("u") != null || rPr.findFirst("u") != null
-        val name = rPr.findFirst("latin")?.getAttrValue("typeface")
-            ?: rPr.findFirst("ea")?.getAttrValue("typeface")
+        // 西文(latin)与中文(ea)分开保留
+        val latin = rPr.findFirst("latin")?.getAttrValue("typeface")
+        val ea = rPr.findFirst("ea")?.getAttrValue("typeface")
+        val cs = rPr.findFirst("cs")?.getAttrValue("typeface")
+        val name = latin ?: ea ?: cs
         val color = rPr.findFirst("solidFill")?.findFirst("srgbClr")?.getAttrValue("val")
-        if (name == null && sz == null && !bold && !italic && !underline && color == null) return null
+        if (name == null && sz == null && !bold && !italic && !underline && color == null
+            && latin == null && ea == null && cs == null) return null
         return Font(
             name = name,
             sizePt = sz,
             bold = if (bold) true else null,
             italic = if (italic) true else null,
             underline = if (underline) true else null,
-            color = color
+            color = color,
+            latin = latin,
+            ea = ea,
+            cs = cs
         )
     }
 

@@ -7,12 +7,19 @@ package com.henry.aligntool.engine
  * 等价桌面 align_core._docx_run_font (:196) / _pptx_para_font (:1121) 的字体 dict。
  */
 data class Font(
-    val name: String? = null,        // 字体名（中/英）
+    val name: String? = null,        // 兜底字体名（中/英）；分字样不全时回退用
     val sizePt: Double? = null,      // 字号（磅）
     val bold: Boolean? = null,
     val italic: Boolean? = null,
     val underline: Boolean? = null,
-    val color: String? = null        // 十六进制 RRGGBB，大写，不含 '#'
+    val color: String? = null,       // 十六进制 RRGGBB，大写，不含 '#'
+    // 分字样（OOXML 原生）：保证中/英/复杂文字各用原文对应字体，避免中文被套英文西文字体
+    val ascii: String? = null,       // docx/xlsx w:ascii
+    val hAnsi: String? = null,       // docx/xlsx w:hAnsi
+    val eastAsia: String? = null,    // docx/xlsx w:eastAsia（中文等关键）
+    val cs: String? = null,          // docx/xlsx w:cs 或 pptx a:cs
+    val latin: String? = null,       // pptx a:latin
+    val ea: String? = null           // pptx a:ea（中文等关键）
 )
 
 /**

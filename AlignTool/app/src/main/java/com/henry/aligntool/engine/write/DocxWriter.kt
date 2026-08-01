@@ -81,7 +81,16 @@ object DocxWriter {
 
     private fun buildRpr(font: Font?, mark: MarkMode): String {
         val sb = StringBuilder("<w:rPr>")
-        if (font?.name != null) {
+        // 分字样写回：原文有几个字样就写几个，保证中文 eastAsia ≠ 西文 ascii（与译文文件一致）
+        val rf = mutableListOf<String>()
+        if (font?.ascii != null) rf += "w:ascii=\"${escAttr(font.ascii!!)}\""
+        if (font?.hAnsi != null) rf += "w:hAnsi=\"${escAttr(font.hAnsi!!)}\""
+        if (font?.eastAsia != null) rf += "w:eastAsia=\"${escAttr(font.eastAsia!!)}\""
+        if (font?.cs != null) rf += "w:cs=\"${escAttr(font.cs!!)}\""
+        if (rf.isNotEmpty()) {
+            sb.append("<w:rFonts ${rf.joinToString(" ")}/>")
+        } else if (font?.name != null) {
+            // 兜底：仅有一个合并名时，四种字样统一（xlsx 等单名字体场景）
             val n = escAttr(font.name)
             sb.append("<w:rFonts w:ascii=\"$n\" w:hAnsi=\"$n\" w:eastAsia=\"$n\" w:cs=\"$n\"/>")
         }
