@@ -211,7 +211,7 @@ object PdfExtractor {
                             // 统计 hex vs literal 比例
                             val hexMatches = """<[0-9A-Fa-f]{2,}>""".toRegex().findAll(probe).count()
                             val litMatches = """\([^)]{2,}\)""".toRegex().findAll(probe).count()
-                            diagSb.append("样本hex=$hexMatches个, 样本lit=$litMatches个; ")
+                            diagSb.append("样本hex=").append(hexMatches).append("个, 样本lit=").append(litMatches).append("个; ")
                         }
 
                         // 先用标准模式解码
@@ -240,8 +240,9 @@ object PdfExtractor {
                     true
                 }
 
+                val cidStatus = if (cidTriggered) "生效" else "未胜出"
                 diagSb.append("扫描${totalStreams}流(限${MAX_STREAMS}), 有文本${textCount}流, Tj=${tjCount}; ")
-                diagSb.append("CID模式${if(cidTriggered)"生效"else "未胜出"}(fe1B=$feBeforeCID feCID=$feAfterCID); ")
+                diagSb.append("CID模式${cidStatus}(fe1B=$feBeforeCID feCID=$feAfterCID); ")
                 if (sampleHex.isNotEmpty()) diagSb.append("流样本: ${sampleHex.take(200)}")
 
                 if (textCount > 0 && System.currentTimeMillis() <= deadline) {
