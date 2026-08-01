@@ -1654,12 +1654,21 @@ private fun addFiles(
                             Log.w("WordCount", "PDF Python pdfminer 异常: $dName - ${e.javaClass.simpleName}: ${e.message}")
                         }
 
-                        Log.d("WordCount", "PDF $dName → KT:${ktStats.fourth}ch PY:${pyChars}ch(pyOk=$pyOk) KT_rel=${ktRes.reliable}")
+                        Log.d("WordCount", "PDF $dName → KT:${ktStats.fourth}ch(fe=${ktStats.second}) PY:${pyChars}ch(fe=$pyFe)(pyOk=$pyOk) KT_rel=${ktRes.reliable}")
 
-                        // ── 决策：选 Kolt 或 Python 的较好结果 ──
+                        // ── 决策：选 Kotlin 或 Python 的较好结果 ──
                         //   pdfminer 通常更准确（处理了 ToUnicode CMap / ObjStm 等）
-                        //   但如果两者都很少字符，说明可能是图片型 PDF → 需要 OCR
-                        val usePython = pyOk && pyChars > ktStats.fourth
+                        //
+                        //   v1.3.53 修复：Kotlin PdfExtractor 对 Identity-H / 多字节 CID 编码的中文 PDF
+                        //   会产生大量 Latin-1 乱码（fe=0 但 char 数虚高）。此时不能单纯比较 char 数，
+                        //   而应检测 Kotlin 结果是否为"假阳性"（fe=0 + 大量 nc）。
+                        //
+                        //   选择逻辑：
+                        //     a) Kotlin 结果像 CID 乱码（fe=0 且 chars>100）→ 只要 Python 成功就用 Python
+                        //     b) 否则 → Python chars 更多时用 Python（原有逻辑）
+                        val ktLooksLikeCidGarbage = ktStats.fourth > 100 && ktStats.second == 0
+                                                && ktStats.third > ktStats.fourth * 0.5
+                        val usePython = pyOk && (pyChars > ktStats.fourth || ktLooksLikeCidGarbage)
 
                         val bestWords = if (usePython) pyWords else ktStats.first
                         val bestFe = if (usePython) pyFe else ktStats.second
