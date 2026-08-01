@@ -2,6 +2,7 @@ package com.henry.aligntool.ui
 
 import android.content.Context
 import android.net.Uri
+import java.io.File
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -41,6 +42,8 @@ fun MainScreen(
     var showOptions by remember { mutableStateOf(false) }
 
     val ctx = LocalContext.current
+    // 启动即读取上次崩溃日志（若有），读后删除，避免重复显示
+    val crashLog = remember { readCrashLog(ctx) }
 
     val sourcePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         uri?.let { viewModel.setSource(queryName(ctx, it), it) }
@@ -64,6 +67,25 @@ fun MainScreen(
             modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            if (crashLog != null) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    // 用 error 色强调
+                ) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text(
+                            "⚠️ 上次运行崩溃，请把下面内容发我定位：",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        Text(
+                            crashLog,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            }
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
                     Text("原文文件", style = MaterialTheme.typography.labelMedium)
@@ -107,4 +129,15 @@ fun queryName(context: Context, uri: Uri): String {
         }
     }
     return name
+}
+
+/** 读取并清除崩溃日志（若存在）。下次启动由主界面展示。 */
+fun readCrashLog(context: Context): String? {
+    val f = File(context.filesDir, "crash.log")
+    if (!f.exists()) return null
+    return try {
+        f.readText().also { f.delete() }
+    } catch (_: Throwable) {
+        null
+    }
 }

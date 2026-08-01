@@ -12,6 +12,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.henry.aligntool.ui.MainScreen
 import com.henry.aligntool.ui.PreviewScreen
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * 应用入口：Compose + ViewModel。
@@ -21,6 +24,8 @@ import java.io.File
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // 在 super.onCreate 之前安装全局崩溃捕获，确保能抓到 theme/组合期的崩溃
+        installCrashHandler()
         super.onCreate(savedInstanceState)
         setContent {
             MaterialTheme {
@@ -58,5 +63,28 @@ class MainActivity : ComponentActivity() {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         startActivity(Intent.createChooser(intent, "分享双语对照文档"))
+    }
+
+    /**
+     * 全局未捕获异常捕获：把真实堆栈写入 filesDir/crash.log，
+     * 下次启动由 MainScreen 读取并显示，便于无调试环境下定位闪退。
+     * 写完仍交给系统默认处理器，保持原生崩溃行为。
+     */
+    private fun installCrashHandler() {
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        val crashFile = File(filesDir, "crash.log")
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            try {
+                val ts = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
+                val sb = StringBuilder()
+                sb.append("CRASH @ $ts\n")
+                sb.append("thread: ${thread.name}\n\n")
+                sb.append(android.util.Log.getStackTraceString(throwable))
+                crashFile.writeText(sb.toString())
+            } catch (_: Throwable) {
+                // 忽略写入失败
+            }
+            defaultHandler?.uncaughtException(thread, throwable)
+        }
     }
 }
