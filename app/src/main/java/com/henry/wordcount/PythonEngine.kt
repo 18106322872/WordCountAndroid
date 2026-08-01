@@ -118,7 +118,13 @@ object PythonEngine {
         return withRetry(context) {
             val py = Python.getInstance()
             val mod = py.getModule("wordcount")
-            val s = mod.callAttr("count_files", paths).toString()
+            // v1.3.58: 用 json.dumps 在 Python 端序列化为标准 JSON
+            // 之前直接对 Python list 调用 toString() 得到的是 Python repr 格式
+            // （单引号、True/False、None），不是合法 JSON（需要双引号、true/false、null），
+            // 导致 JSONArray(s) 始终解析失败 → pyOk 永远为 false → PDF 统计从未用过 Python pdfminer！
+            val jsonMod = py.getModule("json")
+            val pyResult = mod.callAttr("count_files", paths)
+            val s = jsonMod.callAttr("dumps", pyResult).toString()
             val native = toNative(JSONArray(s))
             native ?: emptyList<Any?>()
         }
@@ -128,7 +134,10 @@ object PythonEngine {
         return withRetry(context) {
             val py = Python.getInstance()
             val mod = py.getModule("wordcount")
-            val s = mod.callAttr("count_text", text, name).toString()
+            // v1.3.58: 同样用 json.dumps 确保标准 JSON 序列化
+            val jsonMod = py.getModule("json")
+            val pyResult = mod.callAttr("count_text", text, name)
+            val s = jsonMod.callAttr("dumps", pyResult).toString()
             @Suppress("UNCHECKED_CAST")
             (toNative(JSONObject(s)) as? Map<*, *>) ?: emptyMap<String, Any?>()
         }
