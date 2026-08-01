@@ -312,6 +312,24 @@ object PdfExtractor {
                         for (src in start..end) { map[src] = codePointsToStr(d.toString(16)); d++ }
                     }
                 }
+                // v1.3.56: 增加 begincidchar / begincidrange 解析
+                // 很多中文 PDF（尤其是 Word → PDF 转换的）使用 CID 映射而非 bfchar
+                """(?s)begincidchar\s*(.*?)\s*endcidchar""".toRegex().findAll(cm).forEach { blk ->
+                    """<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>""".toRegex().findAll(blk.groupValues[1]).forEach { e ->
+                        val src = e.groupValues[1].toIntOrNull(16) ?: return@forEach
+                        val dst = codePointsToStr(e.groupValues[2])
+                        if (dst.isNotEmpty()) map[src] = dst
+                    }
+                }
+                """(?s)begincidrange\s*(.*?)\s*endcidrange""".toRegex().findAll(cm).forEach { blk ->
+                    """<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>""".toRegex().findAll(blk.groupValues[1]).forEach { e ->
+                        val start = e.groupValues[1].toIntOrNull(16) ?: return@forEach
+                        val end = e.groupValues[2].toIntOrNull(16) ?: return@forEach
+                        val dstStart = e.groupValues[3].toIntOrNull(16) ?: return@forEach
+                        var d = dstStart
+                        for (src in start..end) { map[src] = codePointsToStr(d.toString(16)); d++ }
+                    }
+                }
             }
         } catch (_: Throwable) { }
         return map
@@ -565,7 +583,16 @@ object PdfExtractor {
 
     private fun mapGlyph(code: Int, toUnicode: Map<Int, String>): String {
         toUnicode[code]?.let { return it }
-        return try { String(byteArrayOf(code.toByte()), cp1252()) } catch (_: Throwable) { "\uFFFD" }
+        // v1.3.56: CID 编码 fallback 修复
+        // 中文 PDF 常用 Identity-H 编码，此时内容流中的 hex 值直接就是 Unicode 码点
+        // （如 <4E2D> = U+4E2D = "中"）。旧代码用 code.toByte() 截断到 8 位
+        // 导致 0x4E2D → 0x2D("-")，所有中文全部丢失。
+        // 新逻辑：多字节码点(>=0x100) 尝试直接当 Unicode；单字节才走 cp1252 fallback
+        return if (code >= 0x100) {
+            try { String(intArrayOf(code), 0, 1) } catch (_: Throwable) { "\uFFFD" }
+        } else {
+            try { String(byteArrayOf(code.toByte()), cp1252()) } catch (_: Throwable) { "\uFFFD" }
+        }
     }
 
     private var _cp1252: Charset? = null
