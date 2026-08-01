@@ -39,19 +39,19 @@ object OoxmlUtil {
         if (rPr == null) return null
         val rFonts = rPr.findFirst("rFonts")
         // 四种字样分别保留，不能直接压成一个 name（中文 eastAsia 与西文 ascii 往往不同）
-        val ascii = rFonts?.getAttrValue("ascii")
-        val hAnsi = rFonts?.getAttrValue("hAnsi")
-        val eastAsia = rFonts?.getAttrValue("eastAsia")
-        val cs = rFonts?.getAttrValue("cs")
+        val ascii = rFonts?.ownAttr("ascii")
+        val hAnsi = rFonts?.ownAttr("hAnsi")
+        val eastAsia = rFonts?.ownAttr("eastAsia")
+        val cs = rFonts?.ownAttr("cs")
         val name = ascii ?: hAnsi ?: eastAsia ?: cs
-        val sz = rPr.findFirst("sz")?.getAttrValue("val")?.toDoubleOrNull()?.let { it / 2 }
-        val bold = rPr.findFirst("b")?.let { it.getAttrValue("val") != "0" } ?: false
-        val italic = rPr.findFirst("i")?.let { it.getAttrValue("val") != "0" } ?: false
+        val sz = rPr.findFirst("sz")?.ownAttr("val")?.toDoubleOrNull()?.let { it / 2 }
+        val bold = rPr.findFirst("b")?.let { it.ownAttr("val") != "0" } ?: false
+        val italic = rPr.findFirst("i")?.let { it.ownAttr("val") != "0" } ?: false
         val underline = rPr.findFirst("u")?.let {
-            val v = it.getAttrValue("val")
+            val v = it.ownAttr("val")
             v != null && v != "none" && v != "0"
         } ?: false
-        val color = rPr.findFirst("color")?.getAttrValue("val")
+        val color = rPr.findFirst("color")?.ownAttr("val")
         if (name == null && sz == null && !bold && !italic && !underline && color == null
             && ascii == null && hAnsi == null && eastAsia == null && cs == null) return null
         return Font(
@@ -71,19 +71,19 @@ object OoxmlUtil {
     /** 从 pptx 的 <a:rPr> 解析字体（等价 align_core._pptx_para_font :1121）。 */
     fun pptxFontFromRpr(rPr: XElement?): Font? {
         if (rPr == null) return null
-        val sz = rPr.getAttrValue("sz")?.toDoubleOrNull()?.let { it / 100 } // sz 单位为百分之一磅
+        val sz = rPr.ownAttr("sz")?.toDoubleOrNull()?.let { it / 100 } // sz 单位为百分之一磅
         val bold = boolAttrOrChild(rPr, "b")
         val italic = boolAttrOrChild(rPr, "i")
         val underline = rPr.findFirst("u")?.let {
-            val v = it.getAttrValue("val")
+            val v = it.ownAttr("val")
             v != null && v != "none" && v != "0"
-        } ?: (rPr.getAttrValue("u")?.let { it != "none" && it != "0" } ?: false)
+        } ?: (rPr.ownAttr("u")?.let { it != "none" && it != "0" } ?: false)
         // 西文(latin)与中文(ea)分开保留
-        val latin = rPr.findFirst("latin")?.getAttrValue("typeface")
-        val ea = rPr.findFirst("ea")?.getAttrValue("typeface")
-        val cs = rPr.findFirst("cs")?.getAttrValue("typeface")
+        val latin = rPr.findFirst("latin")?.ownAttr("typeface")
+        val ea = rPr.findFirst("ea")?.ownAttr("typeface")
+        val cs = rPr.findFirst("cs")?.ownAttr("typeface")
         val name = latin ?: ea ?: cs
-        val color = rPr.findFirst("solidFill")?.findFirst("srgbClr")?.getAttrValue("val")
+        val color = rPr.findFirst("solidFill")?.findFirst("srgbClr")?.ownAttr("val")
         if (name == null && sz == null && !bold && !italic && !underline && color == null
             && latin == null && ea == null && cs == null) return null
         return Font(
@@ -100,7 +100,7 @@ object OoxmlUtil {
     }
 
     private fun boolAttrOrChild(rPr: XElement, attr: String): Boolean {
-        val av = rPr.getAttrValue(attr)
+        val av = rPr.ownAttr(attr)
         if (av != null) return av == "1" || av == "true" || av == "on"
         return rPr.findFirst(attr) != null
     }

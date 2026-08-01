@@ -34,17 +34,17 @@ object XlsxExtractor {
         val fontList = fontEls.map { parseFontEl(it) }
         val xfs = dom.findFirst("cellXfs")?.find("xf") ?: return fontList
         return xfs.map { xf ->
-            val fid = xf.getAttrValue("fontId")?.toIntOrNull() ?: 0
+            val fid = xf.ownAttr("fontId")?.toIntOrNull() ?: 0
             fontList.getOrNull(fid)
         }
     }
 
     private fun parseFontEl(fontEl: XElement): Font {
-        val name = fontEl.findFirst("name")?.getAttrValue("val")
-        val sz = fontEl.findFirst("sz")?.getAttrValue("val")?.toDoubleOrNull()
+        val name = fontEl.findFirst("name")?.ownAttr("val")
+        val sz = fontEl.findFirst("sz")?.ownAttr("val")?.toDoubleOrNull()
         val bold = fontEl.findFirst("b") != null
         val italic = fontEl.findFirst("i") != null
-        val color = fontEl.findFirst("color")?.let { it.getAttrValue("rgb") ?: it.getAttrValue("indexed") }
+        val color = fontEl.findFirst("color")?.let { it.ownAttr("rgb") ?: it.ownAttr("indexed") }
         val colorHex = color?.let { if (it.length >= 6) it.takeLast(6) else it }
         return Font(
             name = name,
@@ -74,12 +74,12 @@ object XlsxExtractor {
         ))
         val out = mutableListOf<Slot>()
         for (c in sorted) {
-            val rAttr = c.getAttrValue("r") ?: continue
+            val rAttr = c.ownAttr("r") ?: continue
             val (colLetters, rowStr) = splitRef(rAttr)
             val row = rowStr.toIntOrNull() ?: 0
             val col = colNameToIndex(colLetters)
             val text = cellText(c, shared)
-            val sIdx = c.getAttrValue("s")?.toIntOrNull() ?: 0
+            val sIdx = c.ownAttr("s")?.toIntOrNull() ?: 0
             val font = fonts.getOrNull(sIdx)
             out.add(
                 Slot(
@@ -92,12 +92,12 @@ object XlsxExtractor {
     }
 
     private fun rowOf(all: List<XElement>, c: XElement): Int {
-        val r = c.getAttrValue("r") ?: return 0
+        val r = c.ownAttr("r") ?: return 0
         return splitRef(r).second.toIntOrNull() ?: 0
     }
 
     private fun colOf(c: XElement): Int {
-        val r = c.getAttrValue("r") ?: return 0
+        val r = c.ownAttr("r") ?: return 0
         return colNameToIndex(splitRef(r).first)
     }
 
@@ -108,7 +108,7 @@ object XlsxExtractor {
     }
 
     private fun cellText(c: XElement, shared: List<String>): String {
-        val t = c.getAttrValue("t")
+        val t = c.ownAttr("t")
         return when (t) {
             "s" -> {
                 val idx = c.findFirst("v")?.let { OoxmlUtil.collectText(it, "v") }?.trim()?.toIntOrNull()

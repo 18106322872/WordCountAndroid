@@ -50,6 +50,9 @@ class XElement(
     fun getAttrValue(localName: String, nsUri: String = ""): String? =
         getAttr(localName, nsUri)?.value
 
+    /** 取与元素自身同命名空间的属性（OOXML 中无前缀属性继承元素命名空间）。 */
+    fun ownAttr(localName: String): String? = getAttrValue(localName, nsUri)
+
     /** 查找所有 localName 匹配的子元素（递归，深度优先）。 */
     fun find(localName: String): List<XElement> {
         val out = mutableListOf<XElement>()
