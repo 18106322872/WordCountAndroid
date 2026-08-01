@@ -8004,26 +8004,16 @@ def count_pages(ext, path):
 
 
         if ext == ".pdf":
-
-
-
-            import fitz
-
-
-
-            d = fitz.open(path)
-
-
-
-            n = len(d)
-
-
-
-            d.close()
-
-
-
-            return n, None
+            try:
+                import fitz
+                d = fitz.open(path)
+                n = len(d)
+                d.close()
+                return n, None
+            except ImportError:
+                # PyMuPDF(fitz) 在 Chaquopy 无 Android wheel，不可用
+                # 页数将由 Kotlin 端 PdfRenderer 补充（ktRes.pages）
+                return 0, "PyMuPDF不可用(由Kotlin补充)"
 
 
 
