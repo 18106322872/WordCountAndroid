@@ -5,6 +5,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.getValue
+import androidx.compose.material3.MaterialTheme
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -22,17 +23,19 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            val vm: AlignViewModel = viewModel()
-            val state by vm.state.collectAsStateWithLifecycle()
+            MaterialTheme {
+                val vm: AlignViewModel = viewModel()
+                val state by vm.state.collectAsStateWithLifecycle()
 
-            if (state.phase == AlignViewModel.Phase.DONE && state.result != null) {
-                PreviewScreen(
-                    result = state.result!!,
-                    onBack = { vm.reset() },
-                    onShare = { state.result?.outputFile?.let { shareFile(it) } }
-                )
-            } else {
-                MainScreen(viewModel = vm)
+                if (state.phase == AlignViewModel.Phase.DONE && state.result != null) {
+                    PreviewScreen(
+                        result = state.result!!,
+                        onBack = { vm.reset() },
+                        onShare = { state.result?.outputFile?.let { shareFile(it) } }
+                    )
+                } else {
+                    MainScreen(viewModel = vm)
+                }
             }
         }
     }
