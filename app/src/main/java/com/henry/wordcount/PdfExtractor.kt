@@ -501,10 +501,49 @@ object PdfExtractor {
 
     private fun decodeContentStream(data: ByteArray, toUnicode: Map<Int, String>): String {
         val s = String(data, StandardCharsets.ISO_8859_1)
+        
+        // v1.3.65: 双模式解码——先尝试标准 1 字节模式；如果结果不含中文（fe=0）
+        // 且字符数足够多，说明很可能是 Identity-H CID 编码的中文 PDF，
+        // 自动切换到 2 字节大端 CID 模式重解。
+        val text1Byte = decodeContentStreamInternal(s, toUnicode, false)
+        
+        // 判断是否需要 CID 重解：fe=0 且字符数>50（排除空内容/纯英文短文本）
+        val stats1 = quickStats(text1Byte)
+        val needsRetry = stats1.second == 0 && stats1.first > 50 && s.contains(Regex("<[0-9A-Fa-f]{4,}>"))
+        
+        return if (needsRetry) {
+            val text2Byte = decodeContentStreamInternal(s, toUnicode, true)
+            val stats2 = quickStats(text2Byte)
+            // 选中文更多的结果（fe 更高 = 中文更多）
+            if (stats2.second > stats1.second) text2Byte else text1Byte
+        } else {
+            text1Byte
+        }
+    }
+    
+    /** 快速统计 (chars, fe) 用于判断是否需要 CID 重解 */
+    private fun quickStats(text: String): Pair<Int, Int> {
+        var chars = 0; var fe = 0
+        for (c in text) {
+            if (!c.isWhitespace()) chars++
+            if (isFarEast(c.code)) fe++
+        }
+        return Pair(chars, fe)
+    }
+    
+    /** FarEast 区间判断（与 MainActivity.countTextKotlin 一致） */
+    private fun isFarEast(code: Int): Boolean =
+        code in 0x1100..0x11FF || code in 0x2000..0x206F ||
+        code in 0x3000..0x303F || code in 0x3130..0x318F ||
+        code in 0x3400..0x4DBF || code in 0x4E00..0x9FFF ||
+        code in 0xA960..0xA97C || code in 0xAC00..0xD7A3
+    
+    private fun decodeContentStreamInternal(s: String, toUnicode: Map<Int, String>, cidMode: Boolean): String {
         val out = StringBuilder()
         val tjRe = """\(((?:[^()\\]|\\.)*)\)\s*Tj|<([0-9A-Fa-f\s]*)>\s*Tj""".toRegex()
         tjRe.findAll(s).forEach { m ->
             val txt = if (m.groupValues[1].isNotEmpty()) decodeLiteral(m.groupValues[1], toUnicode)
+            else if (cidMode) decodeHexCID(m.groupValues[2], toUnicode)
             else decodeHex(m.groupValues[2], toUnicode)
             if (!looksGarbled(txt)) out.append(txt)
         }
@@ -514,6 +553,7 @@ object PdfExtractor {
             val partRe = """\(((?:[^()\\]|\\.)*)\)|<([0-9A-Fa-f\s]*)>""".toRegex()
             partRe.findAll(inner).forEach { p ->
                 val txt = if (p.groupValues[1].isNotEmpty()) decodeLiteral(p.groupValues[1], toUnicode)
+                else if (cidMode) decodeHexCID(p.groupValues[2], toUnicode)
                 else decodeHex(p.groupValues[2], toUnicode)
                 if (!looksGarbled(txt)) out.append(txt)
             }
@@ -577,6 +617,29 @@ object PdfExtractor {
             val code = clean.substring(i, i + 2).toIntOrNull(16) ?: 0
             sb.append(mapGlyph(code, toUnicode))
             i += 2
+        }
+        return sb.toString()
+    }
+
+    /**
+     * v1.3.65: CID 模式 hex 解码——用于 Identity-H 等 CID 编码的 PDF 字体。
+     *
+     * 与 decodeHex（每次读 2 hex = 1 字节）不同，这里每次读 4 hex = 2 字节大端 CID。
+     * 中文 Word→PDF 转换文件通常用 Identity-H 编码，内容流中每个汉字是 2 字节的 CID，
+     * 例如 <4E2D> = CID 0x4E2D → 通过 ToUnicode 或直接映射到 U+4E2D "中"。
+     */
+    private fun decodeHexCID(hex: String, toUnicode: Map<Int, String>): String {
+        val clean = hex.replace("\\s".toRegex(), "")
+        if (clean.length % 4 != 0) return ""  // CID 模式要求 4 的倍数长度
+        val sb = StringBuilder()
+        var i = 0
+        while (i + 3 < clean.length) {
+            // 大端读取 2 字节 = 1 个 CID
+            val high = clean.substring(i, i + 2).toIntOrNull(16) ?: 0
+            val low = clean.substring(i + 2, i + 4).toIntOrNull(16) ?: 0
+            val cid = (high shl 8) or low
+            sb.append(mapGlyph(cid, toUnicode))
+            i += 4
         }
         return sb.toString()
     }
