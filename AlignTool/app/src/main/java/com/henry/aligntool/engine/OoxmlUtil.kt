@@ -47,7 +47,10 @@ object OoxmlUtil {
         val sz = rPr.findFirst("sz")?.getAttrValue("val")?.toDoubleOrNull()?.let { it / 2 }
         val bold = rPr.findFirst("b")?.let { it.getAttrValue("val") != "0" } ?: false
         val italic = rPr.findFirst("i")?.let { it.getAttrValue("val") != "0" } ?: false
-        val underline = rPr.findFirst("u") != null
+        val underline = rPr.findFirst("u")?.let {
+            val v = it.getAttrValue("val")
+            v != null && v != "none" && v != "0"
+        } ?: false
         val color = rPr.findFirst("color")?.getAttrValue("val")
         if (name == null && sz == null && !bold && !italic && !underline && color == null
             && ascii == null && hAnsi == null && eastAsia == null && cs == null) return null
@@ -71,7 +74,10 @@ object OoxmlUtil {
         val sz = rPr.getAttrValue("sz")?.toDoubleOrNull()?.let { it / 100 } // sz 单位为百分之一磅
         val bold = boolAttrOrChild(rPr, "b")
         val italic = boolAttrOrChild(rPr, "i")
-        val underline = rPr.getAttrValue("u") != null || rPr.findFirst("u") != null
+        val underline = rPr.findFirst("u")?.let {
+            val v = it.getAttrValue("val")
+            v != null && v != "none" && v != "0"
+        } ?: (rPr.getAttrValue("u")?.let { it != "none" && it != "0" } ?: false)
         // 西文(latin)与中文(ea)分开保留
         val latin = rPr.findFirst("latin")?.getAttrValue("typeface")
         val ea = rPr.findFirst("ea")?.getAttrValue("typeface")
