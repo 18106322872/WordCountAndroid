@@ -118,11 +118,11 @@ object PythonEngine {
         return withRetry(context) {
             val py = Python.getInstance()
             val mod = py.getModule("wordcount")
-            // v1.3.58: json.dumps 替代 toString()（Python repr → 标准 JSON）
-            // v1.3.60: default=str 防止 meta 含 PyMuPDF/Chaquopy 对象时 TypeError
-            val jsonMod = py.getModule("json")
-            val pyResult = mod.callAttr("count_files", paths)
-            val s = jsonMod.callAttr("dumps", pyResult, mapOf(Pair("default", py.getModule("builtins").get("str")))).toString()
+            // v1.3.61: 改用 count_files_json（Python 端 json.dumps+default=str）
+            //   v1.3.60 在 Kotlin 端传 default=str 失败：
+            //   callAttr 把 Kotlin Map 当位置参数 → TypeError（default 是 keyword-only）
+            //   异常被吞掉 → pyOk 永远 false → PDF 永远用 Kotlin 的 695 字符
+            val s = mod.callAttr("count_files_json", paths).toString()
             Log.d("WordCount", "PY json len=${s.length} head=${s.take(300)}")
             val native = toNative(JSONArray(s))
             native ?: emptyList<Any?>()

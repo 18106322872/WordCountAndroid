@@ -9921,6 +9921,19 @@ def count_files(paths, sheet_filter="all", with_notes=False):
     return out
 
 
+def count_files_json(paths, sheet_filter="all", with_notes=False):
+    """v1.3.61: 与 count_files 相同但在 Python 端完成 json 序列化。
+
+    解决 Chaquopy 互操作问题：
+      Kotlin 端无法可靠地向 json.dumps() 传递 keyword-only 参数（如 default=str），
+      因为 callAttr 把 Kotlin Map 当作位置参数导致 TypeError。
+      改为在 Python 端序列化，Kotlin 端只接收纯字符串。
+    """
+    import json
+    result = count_files(paths, sheet_filter, with_notes)
+    return json.dumps(result, default=str, ensure_ascii=False)
+
+
 
 
 
