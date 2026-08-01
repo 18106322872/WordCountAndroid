@@ -172,23 +172,19 @@ object PdfExtractor {
      */
     private fun extractTextRobust(bytes: ByteArray, deadline: Long, diagSb: StringBuilder): TextSource {
         val sb = StringBuilder()
-        var usedRawScan = false
-        val d = StringBuilder()  // 局部诊断
 
         // 路径 A：标准流解析（带严格限制）
         try {
             if (System.currentTimeMillis() <= deadline) {
                 // 一次性解析全文件 ToUnicode 映射（文件上限 2MB，安全）
                 val toUnicode = if (System.currentTimeMillis() <= deadline) parseToUnicodeSafe(bytes, deadline) else emptyMap()
-                d.append("ToUnicode=${toUnicode.size}条; ")
+                diagSb.append("ToUnicode=${toUnicode.size}条; ")
 
                 
                 var textCount = 0
                 var streamIdx = 0
                 var totalStreams = 0
                 var tjCount = 0
-                var hexTjCount = 0
-                var litTjCount = 0
                 var sampleHex = ""
                 var cidTriggered = false
                 var feBeforeCID = 0
@@ -215,7 +211,7 @@ object PdfExtractor {
                             // 统计 hex vs literal 比例
                             val hexMatches = """<[0-9A-Fa-f]{2,}>""".toRegex().findAll(probe).count()
                             val litMatches = """\([^)]{2,}\)""".toRegex().findAll(probe).count()
-                            d.append("样本hex=$hexMatches个, 样本lit=$litMatches个; ")
+                            diagSb.append("样本hex=$hexMatches个, 样本lit=$litMatches个; ")
                         }
 
                         // 先用标准模式解码
@@ -244,22 +240,21 @@ object PdfExtractor {
                     true
                 }
 
-                d.append("扫描${totalStreams}流(限${MAX_STREAMS}), 有文本${textCount}流, Tj=${tjCount}; ")
-                d.append("CID模式${if(cidTriggered)"生效"else "未胜出"}(fe1B=$feBeforeCID feCID=$feAfterCID); ")
-                if (sampleHex.isNotEmpty()) d.append("流样本: ${sampleHex.take(200)}")
+                diagSb.append("扫描${totalStreams}流(限${MAX_STREAMS}), 有文本${textCount}流, Tj=${tjCount}; ")
+                diagSb.append("CID模式${if(cidTriggered)"生效"else "未胜出"}(fe1B=$feBeforeCID feCID=$feAfterCID); ")
+                if (sampleHex.isNotEmpty()) diagSb.append("流样本: ${sampleHex.take(200)}")
 
                 if (textCount > 0 && System.currentTimeMillis() <= deadline) {
                     val cleaned = cleanExtractedText(sb.toString())
-                    if (cleaned.isNotBlank()) return TextSource(cleaned, false, d.toString())
+                    if (cleaned.isNotBlank()) return TextSource(cleaned, false, diagSb.toString())
                 }
             }
-        } catch (_: Throwable) { d.append("路径A异常:${_} ") }
+        } catch (e: Throwable) { diagSb.append("路径A异常:${e.message} ") }
 
         // 路径 B：备用——直接从原始字节扫描可读字符串
-        if (System.currentTimeMillis() > deadline) return TextSource(sb.toString(), false, d.toString())
-        usedRawScan = true
-        d.append("→路径B")
-        return TextSource(extractRawReadableStrings(bytes, deadline), true, d.toString())
+        if (System.currentTimeMillis() > deadline) return TextSource(sb.toString(), false, diagSb.toString())
+        diagSb.append("→路径B")
+        return TextSource(extractRawReadableStrings(bytes, deadline), true, diagSb.toString())
     }
 
     /**
