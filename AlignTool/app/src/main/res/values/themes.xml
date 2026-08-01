@@ -4,4 +4,7 @@
         <item name="android:colorBackground">@android:color/white</item>
         <item name="colorSurface">@android:color/white</item>
     </style>
+
+    <!-- 纯 View 崩溃入口主题：用框架自带 Material 浅色主题，不依赖 androidx Material3，避免任何主题解析风险 -->
+    <style name="Theme.CrashGate" parent="android:Theme.Material.Light.NoActionBar" />
 </resources>
