@@ -153,6 +153,8 @@ data class FileResult(
     val internalTitle: String = "",
     val inner: List<InnerResult>,
     val hasUnreliable: Boolean,
+    // v1.3.64: PDF 诊断信息（Python 是否工作、错误、决策过程），显示到界面便于排查
+    val diag: String? = null,
 )
 
 data class FileEntry(
@@ -526,6 +528,15 @@ fun FileCard(
                             )
                         }
                         if (r.hasUnreliable) Text("含未统计图片（可导出）", style = MaterialTheme.typography.bodySmall, color = Color(0xFFB26A00))
+                        // v1.3.64: PDF 诊断信息（Python 是否工作、错误、决策），便于无 adb 排查
+                        if (!r.diag.isNullOrBlank()) {
+                            Text(
+                                r.diag!!,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (r.diag!!.contains("失败") || r.diag!!.contains("错误")) Color(0xFFB00020) else Color.Gray,
+                                modifier = Modifier.padding(top = 2.dp)
+                            )
+                        }
                     } else if (entry.error != null) {
                         val shortErr = entry.error!!.substringBefore('\n').take(200)
                         Text("处理出错：$shortErr", style = MaterialTheme.typography.bodySmall, color = Color(0xFFB00020))
@@ -1623,11 +1634,14 @@ private fun addFiles(
                         var pyOk = false
                         var pyError: String? = null
                         // v1.3.63: 先测试 Python 引擎是否正常工作
+                        // v1.3.64: 将诊断结果存到变量，最终拼进界面显示
+                        var pyDiag: String? = null
                         try {
-                            val pyDiag = PythonEngine.testPython(context)
+                            pyDiag = PythonEngine.testPython(context)
                             Log.d("WordCount", "PDF Python诊断 $dName: $pyDiag")
                         } catch (e: Throwable) {
-                            Log.w("WordCount", "PDF Python诊断失败 $dName: ${e.javaClass.simpleName}: ${e.message}")
+                            pyDiag = "Python诊断异常: ${e.javaClass.simpleName}: ${e.message}"
+                            Log.w("WordCount", "PDF Python诊断失败 $dName: $pyDiag")
                         }
                         try {
                             val pyResults = PythonEngine.countFiles(context, listOf(f.absolutePath))
@@ -1678,6 +1692,16 @@ private fun addFiles(
                         val usePython = pyOk && (pyChars > ktStats.fourth || ktLooksLikeCidGarbage)
                         Log.d("WordCount", "PDF决策 $dName: pyOk=$pyOk pyChars=$pyChars ktChars=${ktStats.fourth} usePython=$usePython cidGarbage=$ktLooksLikeCidGarbage pyError=$pyError")
 
+                        // v1.3.64: 拼出可直接显示到界面的诊断信息
+                        val pdfDiag = buildString {
+                            appendLine("【PDF诊断】")
+                            appendLine("Python测试: ${pyDiag ?: "(未执行)"}")
+                            appendLine("Kotlin提取: ${ktStats.fourth}字(fe=${ktStats.second},可靠=${ktRes.reliable})")
+                            appendLine("Python提取: ${if (pyOk) "${pyChars}字(fe=$pyFe)" else "失败"}")
+                            if (!pyOk && pyError != null) appendLine("Python错误: $pyError")
+                            appendLine("决策: ${if (usePython) "用Python" else "用Kotlin"}(pyOk=$pyOk)")
+                        }.trimEnd()
+
                         val bestWords = if (usePython) pyWords else ktStats.first
                         val bestFe = if (usePython) pyFe else ktStats.second
                         val bestNc = if (usePython) pyNc else ktStats.third
@@ -1697,7 +1721,8 @@ private fun addFiles(
                                 "name" to dName, "ext" to ".pdf",
                                 "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars),
                                 "meta" to emptyMap<String, Any?>(),
-                                "pages" to bestPages
+                                "pages" to bestPages,
+                                "diag" to pdfDiag
                             )
                             val fr = toFileResult(resMap, f.absolutePath)
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_ok", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
@@ -1712,7 +1737,8 @@ private fun addFiles(
                                     "name" to dName, "ext" to ".pdf",
                                     "stats" to mapOf("words" to ocrStats.first, "fe" to ocrStats.second, "nc" to ocrStats.third, "chars" to ocrStats.fourth),
                                     "meta" to emptyMap<String, Any?>(),
-                                    "pages" to ocrRes.pages
+                                    "pages" to ocrRes.pages,
+                                    "diag" to "$pdfDiag\n(OCR补充)"
                                 )
                                 val fr = toFileResult(resMap, f.absolutePath)
                                 entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_ocr", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
@@ -1725,7 +1751,8 @@ private fun addFiles(
                                         "name" to dName, "ext" to ".pdf",
                                         "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars),
                                         "meta" to emptyMap<String, Any?>(),
-                                        "pages" to bestPages
+                                        "pages" to bestPages,
+                                        "diag" to "$pdfDiag\n(降级:文本少+OCR失败)"
                                     )
                                     val fr = toFileResult(resMap, f.absolutePath)
                                     entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_fallback", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
@@ -2010,7 +2037,9 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
         inner = inner,
         // v1.3.39: 仅 Office 文档（pptx/ppt/docx/xlsx/xls）含嵌入图片时才显示"导出未统计图片"按钮
         // 图片型 PDF 不再触发导出按钮（PDF 无法像 OOXML 那样解压提取内嵌图片）
-        hasUnreliable = imageCount > 0
+        hasUnreliable = imageCount > 0,
+        // v1.3.64: PDF 诊断信息（来自 resMap["diag"]）
+        diag = m?.get("diag") as? String
     )
 }
 
