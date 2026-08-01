@@ -46,7 +46,17 @@ object DocxExtractor {
     }
 
     private fun firstRunFont(scope: XElement): Font? {
-        val r = scope.findFirst("r") ?: return null
-        return OoxmlUtil.docxFontFromRpr(r.findFirst("rPr"))
+        // 1) 段落内第一个「带 <w:rFonts>」的 run（避免首个 run 仅是数字/标点而无字体，导致整段译文丢字体）
+        for (r in scope.find("r")) {
+            val f = OoxmlUtil.docxFontFromRpr(r.findFirst("rPr"))
+            if (f != null) return f
+        }
+        // 2) 回退到段落标记属性 <w:pPr><w:rPr>（整段统一字体时常落在段落级而非每个 run）
+        val pPr = scope.findFirst("pPr")
+        if (pPr != null) {
+            val f = OoxmlUtil.docxFontFromRpr(pPr.findFirst("rPr"))
+            if (f != null) return f
+        }
+        return null
     }
 }
