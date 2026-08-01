@@ -118,15 +118,13 @@ object PythonEngine {
         return withRetry(context) {
             val py = Python.getInstance()
             val mod = py.getModule("wordcount")
-            // v1.3.58: 用 json.dumps 在 Python 端序列化为标准 JSON
+            // v1.3.58: json.dumps 替代 toString()（Python repr → 标准 JSON）
+            // v1.3.60: default=str 防止 meta 含 PyMuPDF/Chaquopy 对象时 TypeError
             val jsonMod = py.getModule("json")
             val pyResult = mod.callAttr("count_files", paths)
-            // v1.3.59: 加诊断日志确认 json.dumps 输出
-            val s = jsonMod.callAttr("dumps", pyResult).toString()
-            Log.d("WordCount", "PythonEngine.countFiles: json length=${s.length}, first 500=${s.take(500)}")
+            val s = jsonMod.callAttr("dumps", pyResult, mapOf(Pair("default", py.getModule("builtins").get("str")))).toString()
+            Log.d("WordCount", "PY json len=${s.length} head=${s.take(300)}")
             val native = toNative(JSONArray(s))
-            Log.d("WordCount", "PythonEngine.countFiles: native type=${native?.javaClass?.simpleName}, size=" +
-                (if (native is List<*>) native.size else "N/A"))
             native ?: emptyList<Any?>()
         }
     }
@@ -135,10 +133,9 @@ object PythonEngine {
         return withRetry(context) {
             val py = Python.getInstance()
             val mod = py.getModule("wordcount")
-            // v1.3.58: 同样用 json.dumps 确保标准 JSON 序列化
             val jsonMod = py.getModule("json")
             val pyResult = mod.callAttr("count_text", text, name)
-            val s = jsonMod.callAttr("dumps", pyResult).toString()
+            val s = jsonMod.callAttr("dumps", pyResult, mapOf(Pair("default", py.getModule("builtins").get("str")))).toString()
             @Suppress("UNCHECKED_CAST")
             (toNative(JSONObject(s)) as? Map<*, *>) ?: emptyMap<String, Any?>()
         }
