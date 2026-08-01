@@ -30,13 +30,13 @@ object DocxExtractor {
             when (child.localName) {
                 "p" -> {
                     val text = OoxmlUtil.collectText(child, "t")
-                    out.add(Slot(Anchor.DocxPara(child), Block(text, firstRunFont(child))))
+                    out.add(Slot(Anchor.DocxPara(child), Block(text, firstRunFont(child), align = jcVal(child))))
                 }
                 "tbl" -> {
                     for (tr in child.find("tr")) {
                         for (tc in tr.find("tc")) {
                             val text = OoxmlUtil.collectText(tc, "t")
-                            out.add(Slot(Anchor.DocxCell(tc), Block(text, firstRunFont(tc))))
+                            out.add(Slot(Anchor.DocxCell(tc), Block(text, firstRunFont(tc), align = jcVal(tc))))
                         }
                     }
                 }
@@ -58,5 +58,11 @@ object DocxExtractor {
             if (f != null) return f
         }
         return null
+    }
+
+    /** 取段落对齐 w:jc 的 val（居中=center / 两端对齐=both / 左=left / 右=right）。单元格取首个段落。 */
+    private fun jcVal(scope: XElement): String? {
+        val p = if (scope.localName == "tc") scope.findFirst("p") else scope
+        return p?.findFirst("pPr")?.findFirst("jc")?.ownAttr("val")
     }
 }

@@ -34,6 +34,9 @@ data class Font(
 data class Block(
     val text: String,
     val font: Font? = null,
+    // 段落对齐：docx 存 w:jc 的 val（如 center/both/left/right），pptx 存 a:pPr 的 algn（如 ctr/just/l/r）。
+    // 写入端据此在插入的译文段落里重建 pPr 对齐，避免合并后全退回左对齐。
+    val align: String? = null,
     val tableRows: List<List<String>>? = null,
     val fontMatrix: List<List<Font?>>? = null,
     // Excel 位置

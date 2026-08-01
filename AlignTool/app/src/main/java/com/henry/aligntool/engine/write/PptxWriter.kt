@@ -34,14 +34,16 @@ object PptxWriter {
     }
 
     private fun insertPara(anchorP: XElement, other: Block, options: AlignOptions) {
-        val frag = buildPara(other.font, other.text, options.markSource)
+        val frag = buildPara(other.font, other.text, options.markSource, other.align)
         if (options.otherFirst) anchorP.parent?.insertBefore(anchorP, frag)
         else anchorP.parent?.insertAfter(anchorP, frag)
     }
 
-    private fun buildPara(font: Font?, text: String, mark: MarkMode): XElement {
+    private fun buildPara(font: Font?, text: String, mark: MarkMode, align: String?): XElement {
         val rpr = buildRpr(font, mark)
-        val xml = "<a:p xmlns:a=\"$A\"><a:r>$rpr<a:t xml:space=\"preserve\">${escText(text)}</a:t></a:r></a:p>"
+        // 段落对齐：有则重建 <a:pPr algn=.../>，保持译文居中/两端对齐等排版（v1.0.11）
+        val ppr = if (align != null) "<a:pPr algn=\"${escAttr(align)}\"/>" else ""
+        val xml = "<a:p xmlns:a=\"$A\">$ppr<a:r>$rpr<a:t xml:space=\"preserve\">${escText(text)}</a:t></a:r></a:p>"
         return XmlDom.parseFragment(xml)
     }
 

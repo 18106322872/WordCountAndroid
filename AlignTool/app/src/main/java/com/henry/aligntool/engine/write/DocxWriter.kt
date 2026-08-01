@@ -48,7 +48,7 @@ object DocxWriter {
     }
 
     private fun insertPara(docDom: XElement, anchorP: XElement, other: Block, options: AlignOptions) {
-        val frag = buildPara(other.font, other.text, options.markSource)
+        val frag = buildPara(other.font, other.text, options.markSource, other.align)
         if (options.otherFirst) anchorP.parent?.insertBefore(anchorP, frag)
         else anchorP.parent?.insertAfter(anchorP, frag)
     }
@@ -56,7 +56,7 @@ object DocxWriter {
     private fun insertIntoCell(tc: XElement, other: Block, options: AlignOptions) {
         val paras = tc.find("p")
         val ref = if (options.otherFirst) paras.firstOrNull() else paras.lastOrNull()
-        val frag = buildPara(other.font, other.text, options.markSource)
+        val frag = buildPara(other.font, other.text, options.markSource, other.align)
         if (ref != null) {
             if (options.otherFirst) tc.insertBefore(ref, frag) else tc.insertAfter(ref, frag)
         } else {
@@ -66,16 +66,18 @@ object DocxWriter {
 
     private fun appendExtras(docDom: XElement, extras: List<Pair<String, Block>>) {
         val body = docDom.findFirst("document")?.findFirst("body") ?: return
-        body.appendChild(buildPara(null, "――― 以下为未配对内容 ―――", MarkMode.NONE))
+        body.appendChild(buildPara(null, "――― 以下为未配对内容 ―――", MarkMode.NONE, null))
         for ((side, b) in extras) {
             val label = if (side == "src") "[原文] " else "[译文] "
-            body.appendChild(buildPara(b.font, label + b.text, MarkMode.NONE))
+            body.appendChild(buildPara(b.font, label + b.text, MarkMode.NONE, null))
         }
     }
 
-    private fun buildPara(font: Font?, text: String, mark: MarkMode): XElement {
+    private fun buildPara(font: Font?, text: String, mark: MarkMode, align: String?): XElement {
         val rpr = buildRpr(font, mark)
-        val xml = "<w:p xmlns:w=\"$W\"><w:r>$rpr<w:t xml:space=\"preserve\">${escText(text)}</w:t></w:r></w:p>"
+        // 段落对齐：有则重建 <w:pPr><w:jc/>，保持译文居中/两端对齐等排版（v1.0.11 修复全退回左对齐）
+        val ppr = if (align != null) "<w:pPr><w:jc w:val=\"${escAttr(align)}\"/></w:pPr>" else ""
+        val xml = "<w:p xmlns:w=\"$W\">$ppr<w:r>$rpr<w:t xml:space=\"preserve\">${escText(text)}</w:t></w:r></w:p>"
         return XmlDom.parseFragment(xml)
     }
 

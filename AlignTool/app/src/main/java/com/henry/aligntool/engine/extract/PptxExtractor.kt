@@ -59,7 +59,11 @@ object PptxExtractor {
             out.add(
                 Slot(
                     Anchor.PptxPara(slidePart, p, slideIdx, shapeIdx, innerIdx),
-                    Block(text, font, slideIdx = slideIdx, shapeIdx = shapeIdx, innerIdx = innerIdx)
+                    Block(
+                        text, font,
+                        align = pAlgn(p),
+                        slideIdx = slideIdx, shapeIdx = shapeIdx, innerIdx = innerIdx
+                    )
                 )
             )
             innerIdx++
@@ -70,6 +74,11 @@ object PptxExtractor {
     private fun firstRunFont(scope: XElement): Font? {
         val r = scope.findFirst("r") ?: return null
         return OoxmlUtil.pptxFontFromRpr(r.findFirst("rPr"))
+    }
+
+    /** 取段落对齐 a:pPr 的 algn（居中=ctr / 两端对齐=just / 左=l / 右=r）。 */
+    private fun pAlgn(p: XElement): String? {
+        return p.findFirst("pPr")?.ownAttr("algn")
     }
 
     /** graphicFrame 是否承载 SmartArt（diagram）。 */
