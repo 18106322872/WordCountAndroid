@@ -189,6 +189,9 @@ object PdfExtractor {
                 var cidTriggered = false
                 var feBeforeCID = 0
                 var feAfterCID = 0
+
+                // v1.3.69: 累积所有流的 hex 原始字节——用于后续 CJK 编码 fallback
+                val allHexBytes = ByteArrayOutputStreamSafe(8192)
                 
                 findStreamsSafe(bytes, deadline) { rawBytes, dictSlice ->
                     streamIdx++
@@ -213,6 +216,9 @@ object PdfExtractor {
                             val litMatches = """\([^)]{2,}\)""".toRegex().findAll(probe).count()
                             diagSb.append("样本hex=").append(hexMatches).append("个, 样本lit=").append(litMatches).append("个; ")
                         }
+
+                        // v1.3.69: 累积此流中所有 hex 字符串的原始字节（用于 CJK fallback）
+                        collectHexBytesFromStream(probe, allHexBytes)
 
                         // 先用标准模式解码
                         val text1 = decodeContentStream(data, toUnicode)
@@ -244,6 +250,32 @@ object PdfExtractor {
                 diagSb.append("扫描${totalStreams}流(限${MAX_STREAMS}), 有文本${textCount}流, Tj=${tjCount}; ")
                 diagSb.append("CID模式${cidStatus}(fe1B=$feBeforeCID feCID=$feAfterCID); ")
                 if (sampleHex.isNotEmpty()) diagSb.append("流样本: ${sampleHex.take(200)}")
+
+                // v1.3.69: 全流统一的 CJK 编码 fallback
+                // 当 ToUnicode 为空且当前结果 FarEast 极少时，
+                // 对所有流累积的 hex 原始字节尝试 CJK 编码解码。
+                val rawHexBytes = allHexBytes.toBytes()
+                if (toUnicode.isEmpty() && rawHexBytes.size >= 4) {
+                    val currentFe = maxOf(feBeforeCID, feAfterCID)
+                    if (currentFe < 10) {
+                        val cjkDiag = StringBuilder()
+                        val cjkResult = tryCjkEncodingsOnBytes(rawHexBytes, cjkDiag)
+                        if (cjkResult.isNotEmpty()) {
+                            val cjkStats = quickStats(cjkResult)
+                            diagSb.append("; CJKfallback: ${cjkDiag}")
+                            // CJK 结果需要明显更好才采用（fe 至少 >= 5 且比当前多）
+                            if (cjkStats.second >= max(currentFe + 5, 5)) {
+                                val merged = mergeWithCJKText(sb.toString(), cjkResult)
+                                if (merged.isNotBlank()) {
+                                    val cleaned = cleanExtractedText(merged)
+                                    if (cleaned.isNotBlank()) return TextSource(cleaned, false, diagSb.toString())
+                                }
+                            }
+                        } else {
+                            diagSb.append("; CJKfallback: 无效(raw=${rawHexBytes.size}字节)")
+                        }
+                    }
+                }
 
                 if (textCount > 0 && System.currentTimeMillis() <= deadline) {
                     val cleaned = cleanExtractedText(sb.toString())
@@ -546,7 +578,7 @@ object PdfExtractor {
         val stats1 = quickStats(text1Byte)
         val needsRetry = stats1.second == 0 && stats1.first > 50 && s.contains(Regex("<[0-9A-Fa-f]{4,}>"))
 
-        val textAfterCID = if (needsRetry) {
+        return if (needsRetry) {
             val text2Byte = decodeContentStreamInternal(s, toUnicode, true)
             val stats2 = quickStats(text2Byte)
             // 选中文更多的结果（fe 更高 = 中文更多）
@@ -554,22 +586,6 @@ object PdfExtractor {
         } else {
             text1Byte
         }
-
-        // v1.3.67: CJK 编码 fallback
-        // 当 ToUnicode 为空且前两轮解码的 FarEast 字符极少时，
-        // 说明内容流使用的是字体内置 CJK 编码（如 GBK），而非 Unicode 码点。
-        // 提取 hex 字符串的原始字节，尝试常见 CJK 编码解码。
-        val statsFinal = quickStats(textAfterCID)
-        if (toUnicode.isEmpty() && statsFinal.second < 10 && s.contains(Regex("<[0-9A-Fa-f]{4,}>"))) {
-            val cjkResult = tryCjkEncodings(s)
-            if (cjkResult.isNotEmpty()) {
-                val cjkStats = quickStats(cjkResult)
-                // 只有当 CJK 解码找到明显更多 FarEast 字符时才采用
-                if (cjkStats.second > statsFinal.second + 5) return cjkResult
-            }
-        }
-
-        return textAfterCID
     }
     
     /** 快速统计 (chars, fe) 用于判断是否需要 CID 重解 */
@@ -695,89 +711,6 @@ object PdfExtractor {
         return sb.toString()
     }
 
-    /**
-     * v1.3.67: CJK 编码 fallback——当 ToUnicode 缺失时尝试常见 CJK 字符集编码。
-     *
-     * Word → PDF 转换的中文文件常出现 ToUnicode CMap 缺失的情况，
-     * 此时内容流 hex 字符串中的中文以 GBK（简体中文最常见）/Big5/GB18030 等
-     * 字体内置编码存储，而非 Unicode 码点。本方法提取所有 hex 字符串的原始字节，
-     * 依次尝试多种 CJK 编码，选取产生 FarEast 字符最多的结果。
-     */
-    private fun tryCjkEncodings(contentStream: String): String {
-        // 步骤1：按原始顺序提取所有 hex 字符串的字节
-        val rawBytes = extractHexBytesOrdered(contentStream)
-        if (rawBytes.isEmpty() || rawBytes.size < 4) return ""
-
-        // 步骤2：同时提取 literal 字符串文本（ASCII 部分直接保留）
-        val literalText = extractLiteralText(contentStream)
-
-        // 要尝试的 CJK 编码列表（按中文 PDF 出现概率排序）
-        val cjkEncodings = listOf("GBK", "GB18030", "Big5", "EUC-TW", "Shift_JIS", "EUC-KR")
-
-        var bestResult = ""
-        var bestFe = 0
-        var bestEncoding = ""
-
-        for (encName in cjkEncodings) {
-            try {
-                val charset = Charset.forName(encName)
-                val decoded = String(rawBytes, charset)
-                val stats = quickStats(decoded)
-
-                // 必须有足够的 FarEast 字符才算有效
-                if (stats.second > bestFe) {
-                    bestFe = stats.second
-                    bestResult = decoded
-                    bestEncoding = encName
-                }
-            } catch (_: Throwable) { /* 编码不支持，跳过 */ }
-        }
-
-        // 也尝试 UTF-8（某些 PDF 可能用 UTF-8 编码 hex 字符串）
-        try {
-            val utf8Result = String(rawBytes, StandardCharsets.UTF_8)
-            val utf8Stats = quickStats(utf8Result)
-            if (utf8Stats.second > bestFe) {
-                bestFe = utf8Stats.second
-                bestResult = utf8Result
-                bestEncoding = "UTF-8"
-            }
-        } catch (_: Throwable) {}
-
-        if (bestResult.isEmpty() || bestFe < 3) return ""
-
-        // 将 literal 文本和 CJK 解码的 hex 文本合并（保持大致顺序）
-        return mergeLiteralAndCjk(literalText, bestResult, contentStream)
-    }
-
-    /**
-     * 按内容流中出现的顺序提取所有 hex 字符串的原始字节。
-     * 处理 Tj 的 hex 参数和 TJ 数组中的 hex 片段。
-     */
-    private fun extractHexBytesOrdered(s: String): ByteArray {
-        val out = ByteArrayOutputStreamSafe(4096)
-        // 匹配 Tj 和 TJ 中的 hex 字符串
-        val hexRe = """<([0-9A-Fa-f\s]+)>""".toRegex()
-        // 只在 Tj/TJ 操作符上下文中收集 hex
-        val tjCtxRe = """(?:<([0-9A-Fa-f\s]+)>\s*Tj|\[\s*.*?<([0-9A-Fa-f\s]+)>.*?\]\s*TJ)""".toRegex(RegexOption.DOT_MATCHES_ALL)
-
-        // 更精确：先找所有 Tj/TJ 操作，再从中提取 hex
-        val tjOps = """(<[0-9A-Fa-f\s]+>\s*Tj)|(\[\s*(.*?)\]\s*TJ)""".toRegex(RegexOption.DOT_MATCHES_ALL)
-        tjOps.findAll(s).forEach { m ->
-            if (m.groupValues[1].isNotEmpty()) {
-                // 单独的 hex Tj
-                writeHexBytes(out, m.groupValues[1])
-            } else {
-                // TJ 数组 —— 提取其中的 hex 片段
-                val inner = m.groupValues[3]
-                """<([0-9A-Fa-f\s]+)>""".toRegex().findAll(inner).forEach { h ->
-                    writeHexBytes(out, h.groupValues[1])
-                }
-            }
-        }
-        return out.toBytes()
-    }
-
     /** 将 hex 字符串写入 ByteArray 输出流 */
     private fun writeHexBytes(out: ByteArrayOutputStreamSafe, hex: String) {
         val clean = hex.replace("\\s".toRegex(), "")
@@ -789,30 +722,65 @@ object PdfExtractor {
         }
     }
 
-    /** 提取内容流中所有 literal 字符串（括号内的文本） */
-    private fun extractLiteralText(s: String): String {
-        val sb = StringBuilder()
-        val litRe = """\(((?:[^()\\]|\\.)*)\)""".toRegex()
-        litRe.findAll(s).forEach { m ->
-            val txt = decodeLiteral(m.groupValues[1], emptyMap())
-            if (txt.any { it.isLetter() }) sb.append(txt).append(' ')
+    /**
+     * v1.3.69: 从单个内容流中收集所有 hex 字符串的原始字节到输出缓冲区。
+     */
+    private fun collectHexBytesFromStream(streamText: String, out: ByteArrayOutputStreamSafe) {
+        // 匹配 Tj 的 hex 参数: <hex> Tj
+        """(<[0-9A-Fa-f\s]+>\s*Tj)""".toRegex().findAll(streamText).forEach { m ->
+            writeHexBytes(out, m.groupValues[1])
         }
-        return sb.toString()
+        // 匹配 TJ 数组中的 hex 片段: [ ... <hex> ... ] TJ
+        """(\[\s*.*?\]\s*TJ)""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(streamText).forEach { m ->
+            """<([0-9A-Fa-f\s]+)>""".toRegex().findAll(m.groupValues[1]).forEach { h ->
+                writeHexBytes(out, h.groupValues[1])
+            }
+        }
     }
 
     /**
-     * 合并 literal 文本和 CJK 解码后的 hex 文本。
-     * 简单策略：literal 在前、CJK 在后（因为实际 PDF 流通常是交错的，
-     * 但完整重建需要操作符级解析；当前简化合并已能大幅改善字数统计）。
+     * v1.3.69: 对累积的 hex 原始字节尝试多种 CJK 编码解码。
+     * @param diag 输出诊断信息（编码名和对应的 fe 数量）
+     * @return 解码后的文本（选取 fe 最高的编码），空串表示全部失败
      */
-    private fun mergeLiteralAndCjk(literal: String, cjk: String, _original: String): String {
-        if (literal.isBlank()) return cjk
-        if (cjk.isBlank()) return literal
-        val sb = StringBuilder(literal.length + cjk.length + 10)
-        sb.append(literal)
-        if (sb.isNotEmpty() && sb.last() != ' ' && sb.last() != '\n') sb.append(' ')
-        sb.append(cjk)
-        return sb.toString()
+    private fun tryCjkEncodingsOnBytes(rawBytes: ByteArray, diag: StringBuilder): String {
+        val encodings = listOf("GBK", "GB18030", "Big5", "EUC-TW", "Shift_JIS", "EUC-KR")
+        var bestResult = ""
+        var bestFe = 0
+        var bestEnc = ""
+
+        for (enc in encodings) {
+            try {
+                val decoded = String(rawBytes, Charset.forName(enc))
+                val stats = quickStats(decoded)
+                if (stats.second > bestFe) {
+                    bestFe = stats.second
+                    bestResult = decoded
+                    bestEnc = enc
+                }
+            } catch (_: Throwable) { }
+        }
+
+        // 也试 UTF-8
+        try {
+            val utf8 = String(rawBytes, StandardCharsets.UTF_8)
+            val uStats = quickStats(utf8)
+            if (uStats.second > bestFe) { bestFe = uStats.second; bestResult = utf8; bestEnc = "UTF-8" }
+        } catch (_: Throwable) {}
+
+        if (bestResult.isNotEmpty()) {
+            diag.append("${bestEnc}(fe=${bestFe},字=${quickStats(bestResult).first})")
+        }
+        return bestResult
+    }
+
+    /**
+     * v1.3.69: 将原有文本与 CJK 解码文本合并。
+     */
+    private fun mergeWithCJKText(original: String, cjkText: String): String {
+        if (cjkText.isBlank()) return original
+        if (original.isBlank()) return cjkText
+        return original + "\n" + cjkText
     }
 
     private fun mapGlyph(code: Int, toUnicode: Map<Int, String>): String {
