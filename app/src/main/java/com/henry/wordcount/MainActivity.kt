@@ -396,7 +396,7 @@ fun WordCountApp(initialUris: List<Uri>) {
                         val helpLines = listOf(
                             "1、导入文件：从千牛/微信→长按文件→用其他应用打开→选「字数统计」，或点下方「选择文件」从本机选取；",
                             "2、Word字数页数核对：手机安装Word后，doc/docx文件2页以上的可点文件名右侧「Word」直接在 Word 里打开，左下角选「页面视图」，上下滚动查看页数和总字数；",
-                            "3、PPT/Excel 页数核对：手机安装Wps后，点击文件右侧「Wps」直接在Wps里打开，PPT直接下拉，Excel左下角选「逐页输出图片」，右下角可看到页数。",
+                            "3、PPT/Excel/PDF 页数核对：手机安装Wps后，点击文件右侧「Wps」直接在Wps里打开，PPT直接下拉，Excel左下角选「逐页输出图片」，PDF下拉查看页数，右下角可看到页数。",
                             "4、\"导出未统计图片\"按钮功能：导出Word/Excel/PPT里的内嵌图片，这部分内容未统计字数。"
                         )
                         Column(
@@ -528,15 +528,6 @@ fun FileCard(
                             )
                         }
                         if (r.hasUnreliable) Text("含未统计图片（可导出）", style = MaterialTheme.typography.bodySmall, color = Color(0xFFB26A00))
-                        // v1.3.64: PDF 诊断信息（Python 是否工作、错误、决策），便于无 adb 排查
-                        if (!r.diag.isNullOrBlank()) {
-                            Text(
-                                r.diag!!,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (r.diag!!.contains("失败") || r.diag!!.contains("错误")) Color(0xFFB00020) else Color.Gray,
-                                modifier = Modifier.padding(top = 2.dp)
-                            )
-                        }
                     } else if (entry.error != null) {
                         val shortErr = entry.error!!.substringBefore('\n').take(200)
                         Text("处理出错：$shortErr", style = MaterialTheme.typography.bodySmall, color = Color(0xFFB00020))
@@ -564,8 +555,8 @@ fun FileCard(
                     Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.small) {
                         Text(" ${entry.result?.ext?.uppercase() ?: "?"} ", Modifier.padding(6.dp, 2.dp), style = MaterialTheme.typography.labelSmall)
                     }
-                    // v1.3.0: 用 Word 打开（仅对 Word 可打开的格式显示）
-                    val wordExts = setOf(".doc", ".docx", ".pdf", ".txt", ".rtf")
+                    // v1.3.0: 用 Word 打开（仅 Word 文档/txt/rtf 显示）
+                    val wordExts = setOf(".doc", ".docx", ".txt", ".rtf")
                     if (wordExts.contains((entry.result?.ext ?: "").lowercase())) {
                         Text("Word",
                             style = MaterialTheme.typography.labelSmall,
@@ -574,8 +565,8 @@ fun FileCard(
                                 .padding(top = 4.dp)
                                 .clickable { onOpenWord(entry) })
                     }
-                    // v1.3.4/v1.3.32: 用 Wps 打开（xls/xlsx + ppt/pptx，仅支持 WPS）
-                    val wpsExts = setOf(".xls", ".xlsx", ".ppt", ".pptx")
+                    // v1.3.4/v1.3.32: 用 Wps 打开（xls/xlsx + ppt/pptx + pdf，仅支持 WPS）
+                    val wpsExts = setOf(".xls", ".xlsx", ".ppt", ".pptx", ".pdf")
                     if (wpsExts.contains((entry.result?.ext ?: "").lowercase())) {
                         Text("Wps",
                             style = MaterialTheme.typography.labelSmall,
