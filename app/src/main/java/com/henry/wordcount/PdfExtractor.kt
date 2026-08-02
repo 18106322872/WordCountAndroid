@@ -251,28 +251,29 @@ object PdfExtractor {
                 diagSb.append("CID模式${cidStatus}(fe1B=$feBeforeCID feCID=$feAfterCID); ")
                 if (sampleHex.isNotEmpty()) diagSb.append("流样本: ${sampleHex.take(200)}")
 
-                // v1.3.69: 全流统一的 CJK 编码 fallback
-                // 当 ToUnicode 为空且当前结果 FarEast 极少时，
-                // 对所有流累积的 hex 原始字节尝试 CJK 编码解码。
+                // v1.3.70: 全流统一的 CJK 编码 fallback（诊断增强版）
+                // 当 ToUnicode 为空时，对所有流累积的 hex 原始字节尝试 CJK 编码解码。
                 val rawHexBytes = allHexBytes.toBytes()
                 if (toUnicode.isEmpty() && rawHexBytes.size >= 4) {
                     val currentFe = maxOf(feBeforeCID, feAfterCID)
-                    if (currentFe < 10) {
-                        val cjkDiag = StringBuilder()
-                        val cjkResult = tryCjkEncodingsOnBytes(rawHexBytes, cjkDiag)
-                        if (cjkResult.isNotEmpty()) {
-                            val cjkStats = quickStats(cjkResult)
-                            diagSb.append("; CJKfallback: ${cjkDiag}")
-                            // CJK 结果需要明显更好才采用（fe 至少 >= 5 且比当前多）
-                            if (cjkStats.second >= max(currentFe + 5, 5)) {
-                                val merged = mergeWithCJKText(sb.toString(), cjkResult)
-                                if (merged.isNotBlank()) {
-                                    val cleaned = cleanExtractedText(merged)
-                                    if (cleaned.isNotBlank()) return TextSource(cleaned, false, diagSb.toString())
-                                }
+                    val cjkDiag = StringBuilder()
+                    val cjkResult = tryCjkEncodingsOnBytes(rawHexBytes, cjkDiag)
+                    diagSb.append("; CJKfallback: ${cjkDiag}")
+
+                    if (cjkResult.isNotEmpty()) {
+                        val cjkStats = quickStats(cjkResult)
+                        // v1.3.70: 采用条件放宽——只要 CJK 解码非空就采用，
+                        // 先看实际效果再决定是否加回阈值
+                        if (cjkStats.second >= 0) {   // 始终采用（诊断目的）
+                            val adoptReason = if (cjkStats.second > currentFe) "采用(fe${currentFe}→${cjkStats.second})" else "采用(fe=${cjkStats.second})"
+                            diagSb.append(" [${adoptReason}]")
+                            val merged = mergeWithCJKText(sb.toString(), cjkResult)
+                            if (merged.isNotBlank()) {
+                                val cleaned = cleanExtractedText(merged)
+                                if (cleaned.isNotBlank()) return TextSource(cleaned, false, diagSb.toString())
                             }
                         } else {
-                            diagSb.append("; CJKfallback: 无效(raw=${rawHexBytes.size}字节)")
+                            diagSb.append(" [未采用:fe不足]")
                         }
                     }
                 }
@@ -739,38 +740,43 @@ object PdfExtractor {
     }
 
     /**
-     * v1.3.69: 对累积的 hex 原始字节尝试多种 CJK 编码解码。
-     * @param diag 输出诊断信息（编码名和对应的 fe 数量）
-     * @return 解码后的文本（选取 fe 最高的编码），空串表示全部失败
+     * v1.3.70: 对累积的 hex 原始字节尝试多种 CJK 编码解码。
+     * 修复 v1.3.69 bug: bestFe 初始为 0，当所有编码的 fe 都为 0 时
+     * bestResult 永远保持空串导致返回"无效"。
+     *
+     * @param diag 输出每种编码的诊断信息（编码名、fe、字数）
+     * @return 解码后的文本（选取 fe 最高的编码），空串仅当 rawBytes 为空
      */
     private fun tryCjkEncodingsOnBytes(rawBytes: ByteArray, diag: StringBuilder): String {
-        val encodings = listOf("GBK", "GB18030", "Big5", "EUC-TW", "Shift_JIS", "EUC-KR")
+        if (rawBytes.isEmpty()) return ""
+
+        val encodings = listOf("GBK", "GB18030", "Big5", "EUC-TW", "Shift_JIS", "EUC-KR", "UTF-8")
         var bestResult = ""
-        var bestFe = 0
+        var bestFe = -1   // v1.3.70: 改为 -1，确保第一个结果总能被记录
         var bestEnc = ""
+        val details = StringBuilder()  // 记录每种编码的详细结果
 
         for (enc in encodings) {
             try {
-                val decoded = String(rawBytes, Charset.forName(enc))
+                val charset = if (enc == "UTF-8") StandardCharsets.UTF_8 else Charset.forName(enc)
+                val decoded = String(rawBytes, charset)
                 val stats = quickStats(decoded)
-                if (stats.second > bestFe) {
+                // v1.3.70: >= 而非 >，确保第一个结果（即使 fe=0）也被记录
+                if (stats.second >= bestFe) {
                     bestFe = stats.second
                     bestResult = decoded
                     bestEnc = enc
                 }
-            } catch (_: Throwable) { }
+                // 记录每种编码的诊断
+                if (details.isNotEmpty()) details.append(" ")
+                details.append("${enc}(fe=${stats.second},字=${stats.first})")
+            } catch (_: Throwable) {
+                if (details.isNotEmpty()) details.append(" ")
+                details.append("${enc}(异常)")
+            }
         }
 
-        // 也试 UTF-8
-        try {
-            val utf8 = String(rawBytes, StandardCharsets.UTF_8)
-            val uStats = quickStats(utf8)
-            if (uStats.second > bestFe) { bestFe = uStats.second; bestResult = utf8; bestEnc = "UTF-8" }
-        } catch (_: Throwable) {}
-
-        if (bestResult.isNotEmpty()) {
-            diag.append("${bestEnc}(fe=${bestFe},字=${quickStats(bestResult).first})")
-        }
+        diag.append(details.toString())
         return bestResult
     }
 
