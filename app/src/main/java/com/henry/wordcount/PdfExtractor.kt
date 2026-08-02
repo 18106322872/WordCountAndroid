@@ -251,8 +251,10 @@ object PdfExtractor {
                 diagSb.append("CID模式${cidStatus}(fe1B=$feBeforeCID feCID=$feAfterCID); ")
                 if (sampleHex.isNotEmpty()) diagSb.append("流样本: ${sampleHex.take(200)}")
 
-                // v1.3.70: 全流统一的 CJK 编码 fallback（诊断增强版）
+                // v1.3.72: 全流统一的 CJK 编码 fallback（带阈值保护）
                 // 当 ToUnicode 为空时，对所有流累积的 hex 原始字节尝试 CJK 编码解码。
+                // 注意：仅当某编码产生明显更多 FarEast 字符时才采用，
+                // 否则 hex 字节可能是字体度量/坐标等非文本数据（v1.3.70 证实）。
                 val rawHexBytes = allHexBytes.toBytes()
                 if (toUnicode.isEmpty() && rawHexBytes.size >= 4) {
                     val currentFe = maxOf(feBeforeCID, feAfterCID)
@@ -262,18 +264,18 @@ object PdfExtractor {
 
                     if (cjkResult.isNotEmpty()) {
                         val cjkStats = quickStats(cjkResult)
-                        // v1.3.70: 采用条件放宽——只要 CJK 解码非空就采用，
-                        // 先看实际效果再决定是否加回阈值
-                        if (cjkStats.second >= 0) {   // 始终采用（诊断目的）
-                            val adoptReason = if (cjkStats.second > currentFe) "采用(fe${currentFe}→${cjkStats.second})" else "采用(fe=${cjkStats.second})"
-                            diagSb.append(" [${adoptReason}]")
+                        // v1.3.72: 恢复阈值——CJK 结果必须比当前多至少 5 个 fe 才采用
+                        // v1.3.70 诊断证实：7266 字节用任何编码都 fe=0（非文本数据），
+                        // 无阈值会导致垃圾数据(9957字/fe=1)污染结果
+                        if (cjkStats.second >= max(currentFe + 5, 5)) {
+                            diagSb.append(" [采用(fe${currentFe}→${cjkStats.second})]")
                             val merged = mergeWithCJKText(sb.toString(), cjkResult)
                             if (merged.isNotBlank()) {
                                 val cleaned = cleanExtractedText(merged)
                                 if (cleaned.isNotBlank()) return TextSource(cleaned, false, diagSb.toString())
                             }
                         } else {
-                            diagSb.append(" [未采用:fe不足]")
+                            diagSb.append(" [未采用:fe不足(${cjkStats.second}<${max(currentFe + 5, 5)})]")
                         }
                     }
                 }
@@ -740,7 +742,7 @@ object PdfExtractor {
     }
 
     /**
-     * v1.3.70: 对累积的 hex 原始字节尝试多种 CJK 编码解码。
+     * v1.3.72: 对累积的 hex 原始字节尝试多种 CJK 编码解码。
      * 修复 v1.3.69 bug: bestFe 初始为 0，当所有编码的 fe 都为 0 时
      * bestResult 永远保持空串导致返回"无效"。
      *
