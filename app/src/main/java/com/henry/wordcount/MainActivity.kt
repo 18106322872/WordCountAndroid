@@ -1749,13 +1749,14 @@ private fun addFiles(
                                 // 全部失败 → 显示最佳可用结果或错误
                                 if (bestChars > 0) {
                                     // 有一些文本（虽然少）→ 降级使用
-                                    Log.w("WordCount", "PDF 降级(文本少+OCR失败): $dName best=${bestChars}ch")
+                                    val ocrDiag = PdfOcrEngine.lastDiag
+                                    Log.w("WordCount", "PDF 降级(文本少+OCR失败): $dName best=${bestChars}ch ocrDiag=$ocrDiag")
                                     val resMap = mapOf(
                                         "name" to dName, "ext" to ".pdf",
                                         "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars),
                                         "meta" to emptyMap<String, Any?>(),
                                         "pages" to bestPages,
-                                        "diag" to "$pdfDiag\n(降级:文本少+OCR失败)"
+                                        "diag" to "$pdfDiag\n(降级:文本少+OCR失败)\nOCR详情: ${if (ocrDiag.isNotEmpty()) ocrDiag else "无"}"
                                     )
                                     val fr = toFileResult(resMap, f.absolutePath)
                                     entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_fallback", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))

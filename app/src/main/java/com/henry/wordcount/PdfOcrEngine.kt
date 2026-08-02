@@ -52,6 +52,10 @@ object PdfOcrEngine {
     @Volatile var lastFailDetail: String = ""
         private set
 
+    /** 上一次 OCR 尝试的详细过程诊断（v1.3.82：供 MainActivity 展示给用户） */
+    @Volatile var lastDiag: String = ""
+        private set
+
     /**
      * 提取 PDF 文本（渲染+OCR）。
      * @param forPrintMode v1.3.81: 为"文字型但Kotlin无法解码"的PDF使用更高渲染质量（PRINT模式+2x分辨率），
@@ -60,9 +64,11 @@ object PdfOcrEngine {
     fun extractText(context: Context, file: File, forPrintMode: Boolean = false): PdfOcrResult? {
         lastFailReason = FailReason.OK
         lastFailDetail = ""
+        lastDiag = ""
         if (!OcrEngine.ocrEnabled) {
             Log.w("WordCount", "PdfOcr 跳过: ocrEnabled=false")
             lastFailReason = FailReason.OCR_DISABLED
+            lastDiag = "OCR已禁用(ocrEnabled=false)"
             return null
         }
         Log.d("WordCount", "PdfOcr 开始: ${file.name} (${file.length()} bytes) printMode=$forPrintMode")
@@ -98,21 +104,33 @@ object PdfOcrEngine {
             lastFailReason = FailReason.NO_EMBEDDED_IMAGES
         }
 
-        Log.w("WordCount", "PdfOcr 全部路径失败: ${file.name}, reason=$lastFailReason detail=$lastFailDetail")
+        // 汇总最终诊断
+        if (lastDiag.isEmpty()) {
+            lastDiag = "全部路径失败: reason=${lastFailReason.name}"
+            if (lastFailDetail.isNotEmpty()) lastDiag += " detail=$lastFailDetail"
+        }
+        Log.w("WordCount", "PdfOcr 全部路径失败: ${file.name}, $lastDiag")
         return null
     }
 
     // ══════════════════ 1) 系统 PdfRenderer ══════════════════
 
     private fun renderWithSystem(file: File, forPrintMode: Boolean = false): PdfOcrResult? {
+        val diag = StringBuilder()
         val pfd = try {
             ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
         } catch (e: Throwable) {
-            lastFailReason = FailReason.RENDER_FAILED; return null
+            lastFailReason = FailReason.RENDER_FAILED
+            lastFailDetail = "PFD打开失败: ${e.javaClass.simpleName}"
+            lastDiag = "SysRenderer: $lastFailDetail"
+            return null
         }
         val renderer = try { PdfRenderer(pfd) } catch (e: Throwable) {
             runCatching { pfd.close() }
-            lastFailReason = FailReason.RENDER_FAILED; return null
+            lastFailReason = FailReason.RENDER_FAILED
+            lastFailDetail = "PdfRenderer创建失败: ${e.javaClass.simpleName}"
+            lastDiag = "SysRenderer: $lastFailDetail"
+            return null
         }
         var result: PdfOcrResult? = null
         try {
@@ -120,6 +138,9 @@ object PdfOcrEngine {
             val limit = min(pageCount, MAX_PAGES)
             val sb = StringBuilder()
             var anyRenderedContent = false; var anyOcrText = false; var pageErrors = 0
+            var blankCount = 0; var ocrEmptyCount = 0
+
+            diag.append("SysRenderer: ${pageCount}页(forPrint=$forPrintMode)")
 
             for (i in 0 until limit) {
                 try {
@@ -135,14 +156,17 @@ object PdfOcrEngine {
                         try {
                             val renderMode = if (forPrintMode) PdfRenderer.Page.RENDER_MODE_FOR_PRINT else PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY
                             page.render(bmp, null, null, renderMode)
-                            if (isBlankBitmap(bmp)) continue
+                            if (isBlankBitmap(bmp)) { blankCount++; continue }
                             anyRenderedContent = true
                             val t = OcrEngine.recognizeBitmap(bmp, skipPostFilter = true)
-                            if (t.isNotBlank()) { sb.append(t).append('\n'); anyOcrText = true }
+                            if (t.isNotBlank()) { sb.append(t).append('\n'); anyOcrText = true; diag.append(" p${i+1}:${t.length}字") }
+                            else { ocrEmptyCount++ }
                         } catch (_: Throwable) { pageErrors++ } finally { bmp.recycle() }
                     } finally { page.close() }
                 } catch (_: Throwable) { pageErrors++ }
             }
+
+            diag.append(" | 渲染:${if (anyRenderedContent) "有内容" else "全空白"} 空白:$blankCount OCR空:$ocrEmptyCount 错误:$pageErrors")
 
             val text = sb.toString().trim()
             if (text.isNotBlank()) result = PdfOcrResult(text, pageCount)
@@ -151,9 +175,11 @@ object PdfOcrEngine {
             else lastFailReason = FailReason.RENDER_BLANK
         } catch (e: Throwable) {
             lastFailReason = FailReason.RENDER_FAILED
+            lastFailDetail = e.javaClass.simpleName + ": " + e.message
         } finally {
             runCatching { renderer.close() }; runCatching { pfd.close() }
         }
+        lastDiag = diag.toString()
         return result
     }
 
@@ -164,6 +190,7 @@ object PdfOcrEngine {
             Log.w("WordCount", "PdfOcr(pdfium) 初始化失败: ${e.javaClass.simpleName}: ${e.message}")
             lastFailReason = FailReason.PDFIUM_UNAVAILABLE
             lastFailDetail = "${e.javaClass.simpleName}: ${e.message}"
+            lastDiag = "PdfiumCore: 不可用($lastFailDetail)"
             return null
         }
 
@@ -177,6 +204,8 @@ object PdfOcrEngine {
             val bytesResult = tryRenderWithBytes(core, file, forPrintMode)
             if (bytesResult != null) return bytesResult
         }
+        // Pdfium 失败时补充诊断
+        if (lastDiag.isEmpty()) lastDiag = "Pdfium: ${lastFailReason.name} $lastFailDetail"
         return null
     }
 
