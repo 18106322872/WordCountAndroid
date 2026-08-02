@@ -71,7 +71,7 @@ object PdfOcrEngine {
             lastDiag = "OCR已禁用(ocrEnabled=false)"
             return null
         }
-        Log.d("WordCount", "PdfOcr 开始: ${file.name} (${file.length()} bytes) printMode=$forPrintMode")
+        Log.d("WordCount", "PdfOcr 开始: ${file.name} (${file.length()} bytes) printMode=$forPrintMode ocrEnabled=${OcrEngine.ocrEnabled} ocrFailed=${OcrEngine.ocrFailed}")
 
         // 1) 系统 PdfRenderer
         val sys = renderWithSystem(file, forPrintMode)
@@ -148,19 +148,35 @@ object PdfOcrEngine {
                     try {
                         val w = page.width; val h = page.height
                         if (w <= 0 || h <= 0) continue
-                        // v1.3.81: PRINT模式用2x分辨率+PRINT渲染，提升中文OCR识别率
+                        // v1.3.81: PRINT模式用高分辨率+PRINT渲染，提升中文OCR识别率
+                        // v1.3.83: 提升到3x（2x仍可能分辨率不足导致ML Kit空结果）
                         val baseScale = computeScale(w, h)
-                        val scale = if (forPrintMode) baseScale * 2f else baseScale
+                        val scale = if (forPrintMode) baseScale * 3f else baseScale
                         val bw = max(1, (w * scale).toInt()); val bh = max(1, (h * scale).toInt())
-                        val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { pageErrors++; continue }
+                        val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { pageErrors++; diag.append(" [p${i+1}:创建位图失败]"); continue }
                         try {
                             val renderMode = if (forPrintMode) PdfRenderer.Page.RENDER_MODE_FOR_PRINT else PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY
                             page.render(bmp, null, null, renderMode)
                             if (isBlankBitmap(bmp)) { blankCount++; continue }
                             anyRenderedContent = true
-                            val t = OcrEngine.recognizeBitmap(bmp, skipPostFilter = true)
-                            if (t.isNotBlank()) { sb.append(t).append('\n'); anyOcrText = true; diag.append(" p${i+1}:${t.length}字") }
-                            else { ocrEmptyCount++ }
+                            // v1.3.83: 区分OCR空结果 vs 异常，便于定位ML Kit问题
+                            var ocrResult = ""
+                            var ocrError: String? = null
+                            try {
+                                ocrResult = OcrEngine.recognizeBitmap(bmp, skipPostFilter = true)
+                            } catch (e: Exception) {
+                                ocrError = "${e.javaClass.simpleName}: ${e.message}"
+                            }
+                            if (ocrResult.isNotBlank()) {
+                                sb.append(ocrResult).append('\n'); anyOcrText = true
+                                diag.append(" p${i+1}:${ocrResult.length}字")
+                            } else if (ocrError != null) {
+                                ocrEmptyCount++
+                                diag.append(" [p${i+1}:OCR异常:${ocrError.take(60)}]")
+                            } else {
+                                ocrEmptyCount++
+                                diag.append(" [p${i+1}:OCR空结果 ${bw}x${bh}]")
+                            }
                         } catch (_: Throwable) { pageErrors++ } finally { bmp.recycle() }
                     } finally { page.close() }
                 } catch (_: Throwable) { pageErrors++ }
