@@ -167,6 +167,18 @@ object PdfOcrEngine {
                             val darkRatio = darkPixelRatio(bmp)
                             if (i == 0) diag.append(" 暗像素:${String.format("%.2f", darkRatio)}%")
 
+                            // v1.3.86: 暗像素>95%→渲染图近乎全黑，自动反色后再OCR
+                            val needsInvert = darkRatio > 95.0
+                            var ocrBmp: Bitmap = bmp
+                            var inverted: Bitmap? = null
+                            if (needsInvert) {
+                                inverted = invertBitmap(bmp)
+                                if (inverted != null) {
+                                    ocrBmp = inverted
+                                    if (i == 0) diag.append("[已反色]")
+                                }
+                            }
+
                             // v1.3.84: 保存第一页渲染Bitmap到缓存，用于调试"ML Kit返回空"问题
                             if (i == 0) {
                                 try {
@@ -185,7 +197,7 @@ object PdfOcrEngine {
                             var ocrResult = ""
                             var ocrError: String? = null
                             try {
-                                ocrResult = OcrEngine.recognizeBitmap(bmp, skipPostFilter = true)
+                                ocrResult = OcrEngine.recognizeBitmap(ocrBmp, skipPostFilter = true)
                             } catch (e: Exception) {
                                 ocrError = "${e.javaClass.simpleName}: ${e.message}"
                             }
@@ -197,8 +209,10 @@ object PdfOcrEngine {
                                 diag.append(" [p${i+1}:OCR异常:${ocrError.take(60)}]")
                             } else {
                                 ocrEmptyCount++
-                                diag.append(" [p${i+1}:OCR空结果 ${bw}x${bh}]")
+                                val tag = if (needsInvert && inverted != null) "反色后空" else "OCR空结果"
+                                diag.append(" [p${i+1}:$tag ${bw}x${bh}]")
                             }
+                            inverted?.recycle()
                         } catch (_: Throwable) { pageErrors++ } finally { bmp.recycle() }
                     } finally { page.close() }
                 } catch (_: Throwable) { pageErrors++ }
@@ -493,6 +507,24 @@ object PdfOcrEngine {
             }
             if (s == 0) 0.0 else (dark.toDouble() / s) * 100.0
         } catch (_: Throwable) { 0.0 }
+    }
+
+    // v1.3.86: 反色Bitmap（暗像素>95%时自动反色后再OCR）
+    private fun invertBitmap(src: Bitmap): Bitmap? {
+        return try {
+            val w = src.width; val h = src.height
+            val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val pixels = IntArray(w * h)
+            src.getPixels(pixels, 0, w, 0, 0, w, h)
+            for (i in pixels.indices) {
+                val p = pixels[i]
+                // 保持Alpha通道，反转RGB
+                pixels[i] = (p and -0x1000000.toInt()) or
+                    (0x00FFFFFF - (p and 0x00FFFFFF))
+            }
+            out.setPixels(pixels, 0, w, 0, 0, w, h)
+            out
+        } catch (_: Throwable) { null }
     }
 
     private fun computeScale(w: Int, h: Int): Float {
