@@ -1729,7 +1729,9 @@ private fun addFiles(
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_ok", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                         } else {
                             // ★ 文本太少 → 尝试 OCR
-                            val ocrRes = PdfOcrEngine.extractText(context, f)
+                            // v1.3.81: 对"glyph-ID编码垃圾"(ktLooksLikeCidGarbage)使用PRINT模式+2x分辨率渲染
+                            // 提升中文 PDF 的 OCR 识别率（普通 DISPLAY 模式对文字偏小的 PDF 渲染质量不足）
+                            val ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = looksLikeGarbage)
 
                             if (ocrRes != null) {
                                 // OCR 成功

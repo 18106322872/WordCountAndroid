@@ -52,7 +52,12 @@ object PdfOcrEngine {
     @Volatile var lastFailDetail: String = ""
         private set
 
-    fun extractText(context: Context, file: File): PdfOcrResult? {
+    /**
+     * 提取 PDF 文本（渲染+OCR）。
+     * @param forPrintMode v1.3.81: 为"文字型但Kotlin无法解码"的PDF使用更高渲染质量（PRINT模式+2x分辨率），
+     *        提升中文 OCR 识别率。默认 false（扫描件/图片型用普通 DISPLAY 模式即可）。
+     */
+    fun extractText(context: Context, file: File, forPrintMode: Boolean = false): PdfOcrResult? {
         lastFailReason = FailReason.OK
         lastFailDetail = ""
         if (!OcrEngine.ocrEnabled) {
@@ -60,14 +65,14 @@ object PdfOcrEngine {
             lastFailReason = FailReason.OCR_DISABLED
             return null
         }
-        Log.d("WordCount", "PdfOcr 开始: ${file.name} (${file.length()} bytes)")
+        Log.d("WordCount", "PdfOcr 开始: ${file.name} (${file.length()} bytes) printMode=$forPrintMode")
 
         // 1) 系统 PdfRenderer
-        val sys = renderWithSystem(file)
+        val sys = renderWithSystem(file, forPrintMode)
         if (sys != null) return sys
 
         // 2) PdfiumAndroid（PFD + ByteArray 双模式）
-        val pdfium = renderWithPdfium(context, file)
+        val pdfium = renderWithPdfium(context, file, forPrintMode)
         if (pdfium != null) return pdfium
 
         // 3) 内嵌图片提取（多策略）
@@ -99,7 +104,7 @@ object PdfOcrEngine {
 
     // ══════════════════ 1) 系统 PdfRenderer ══════════════════
 
-    private fun renderWithSystem(file: File): PdfOcrResult? {
+    private fun renderWithSystem(file: File, forPrintMode: Boolean = false): PdfOcrResult? {
         val pfd = try {
             ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
         } catch (e: Throwable) {
@@ -122,11 +127,14 @@ object PdfOcrEngine {
                     try {
                         val w = page.width; val h = page.height
                         if (w <= 0 || h <= 0) continue
-                        val scale = computeScale(w, h)
+                        // v1.3.81: PRINT模式用2x分辨率+PRINT渲染，提升中文OCR识别率
+                        val baseScale = computeScale(w, h)
+                        val scale = if (forPrintMode) baseScale * 2f else baseScale
                         val bw = max(1, (w * scale).toInt()); val bh = max(1, (h * scale).toInt())
                         val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { pageErrors++; continue }
                         try {
-                            page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                            val renderMode = if (forPrintMode) PdfRenderer.Page.RENDER_MODE_FOR_PRINT else PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY
+                            page.render(bmp, null, null, renderMode)
                             if (isBlankBitmap(bmp)) continue
                             anyRenderedContent = true
                             val t = OcrEngine.recognizeBitmap(bmp, skipPostFilter = true)
@@ -151,7 +159,7 @@ object PdfOcrEngine {
 
     // ══════════════════ 2) PdfiumAndroid ══════════════════
 
-    private fun renderWithPdfium(context: Context, file: File): PdfOcrResult? {
+    private fun renderWithPdfium(context: Context, file: File, forPrintMode: Boolean = false): PdfOcrResult? {
         val core = try { PdfiumCore(context) } catch (e: Throwable) {
             Log.w("WordCount", "PdfOcr(pdfium) 初始化失败: ${e.javaClass.simpleName}: ${e.message}")
             lastFailReason = FailReason.PDFIUM_UNAVAILABLE
@@ -160,19 +168,19 @@ object PdfOcrEngine {
         }
 
         // 模式A：PFD
-        val pfdResult = tryRenderWithPfd(core, file)
+        val pfdResult = tryRenderWithPfd(core, file, forPrintMode)
         if (pfdResult != null) return pfdResult
 
         // 模式B：ByteArray
         if (lastFailReason == FailReason.PDFIUM_FAILED || lastFailReason == FailReason.PDFIUM_BLANK) {
             Log.d("WordCount", "PdfOcr(pdfium) PFD失败(${lastFailReason})，尝试ByteArray模式...")
-            val bytesResult = tryRenderWithBytes(core, file)
+            val bytesResult = tryRenderWithBytes(core, file, forPrintMode)
             if (bytesResult != null) return bytesResult
         }
         return null
     }
 
-    private fun tryRenderWithPfd(core: PdfiumCore, file: File): PdfOcrResult? {
+    private fun tryRenderWithPfd(core: PdfiumCore, file: File, forPrintMode: Boolean = false): PdfOcrResult? {
         val pfd = try { ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY) } catch (_: Throwable) {
             lastFailReason = FailReason.PDFIUM_FAILED; lastFailDetail = "PFD open failed"; return null
         }
@@ -188,7 +196,8 @@ object PdfOcrEngine {
                     val sz: Size = core.getPageSize(doc, i)
                     val sw = sz.width; val sh = sz.height
                     if (sw <= 0 || sh <= 0) { errors++; continue }
-                    val sc = computeScale(sw.toInt(), sh.toInt())
+                    val baseSc = computeScale(sw.toInt(), sh.toInt())
+                    val sc = if (forPrintMode) baseSc * 2f else baseSc
                     val bw = max(1, (sw * sc).toInt()); val bh = max(1, (sh * sc).toInt())
                     val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { errors++; continue }
                     try {
@@ -212,7 +221,7 @@ object PdfOcrEngine {
         }
     }
 
-    private fun tryRenderWithBytes(core: PdfiumCore, file: File): PdfOcrResult? {
+    private fun tryRenderWithBytes(core: PdfiumCore, file: File, forPrintMode: Boolean = false): PdfOcrResult? {
         return try {
             val bytes = file.readBytes()
             val doc = core.newDocument(bytes)
@@ -226,7 +235,8 @@ object PdfOcrEngine {
                     val sz: Size = core.getPageSize(doc, i)
                     val sw = sz.width; val sh = sz.height
                     if (sw <= 0 || sh <= 0) { errors++; continue }
-                    val sc = computeScale(sw.toInt(), sh.toInt())
+                    val baseSc = computeScale(sw.toInt(), sh.toInt())
+                    val sc = if (forPrintMode) baseSc * 2f else baseSc
                     val bw = max(1, (sw * sc).toInt()); val bh = max(1, (sh * sc).toInt())
                     val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { errors++; continue }
                     try {
