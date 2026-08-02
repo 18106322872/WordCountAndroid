@@ -74,12 +74,14 @@ object PdfOcrEngine {
         Log.d("WordCount", "PdfOcr 开始: ${file.name} (${file.length()} bytes) printMode=$forPrintMode ocrEnabled=${OcrEngine.ocrEnabled} ocrFailed=${OcrEngine.ocrFailed}")
 
         // 1) 系统 PdfRenderer
-        val sys = renderWithSystem(file, forPrintMode)
+        val sys = renderWithSystem(context, file, forPrintMode)
         if (sys != null) return sys
+        val allDiag = StringBuilder(lastDiag)  // v1.3.84: 累积多路径诊断
 
         // 2) PdfiumAndroid（PFD + ByteArray 双模式）
         val pdfium = renderWithPdfium(context, file, forPrintMode)
         if (pdfium != null) return pdfium
+        allDiag.append(" | ").append(lastDiag)
 
         // 3) 内嵌图片提取（多策略）
         Log.d("WordCount", "PdfOcr 尝试路径3(内嵌图片提取): ${file.name}")
@@ -104,7 +106,8 @@ object PdfOcrEngine {
             lastFailReason = FailReason.NO_EMBEDDED_IMAGES
         }
 
-        // 汇总最终诊断
+        // 汇总最终诊断（v1.3.84: 累积所有路径）
+        lastDiag = allDiag.toString().trim()
         if (lastDiag.isEmpty()) {
             lastDiag = "全部路径失败: reason=${lastFailReason.name}"
             if (lastFailDetail.isNotEmpty()) lastDiag += " detail=$lastFailDetail"
@@ -115,7 +118,7 @@ object PdfOcrEngine {
 
     // ══════════════════ 1) 系统 PdfRenderer ══════════════════
 
-    private fun renderWithSystem(file: File, forPrintMode: Boolean = false): PdfOcrResult? {
+    private fun renderWithSystem(context: Context, file: File, forPrintMode: Boolean = false): PdfOcrResult? {
         val diag = StringBuilder()
         val pfd = try {
             ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
@@ -159,6 +162,21 @@ object PdfOcrEngine {
                             page.render(bmp, null, null, renderMode)
                             if (isBlankBitmap(bmp)) { blankCount++; continue }
                             anyRenderedContent = true
+
+                            // v1.3.84: 保存第一页渲染Bitmap到缓存，用于调试"ML Kit返回空"问题
+                            if (i == 0) {
+                                try {
+                                    val debugDir = File(context.cacheDir, "pdf_debug")
+                                    debugDir.mkdirs()
+                                    val debugFile = File(debugDir, "${file.nameWithoutExtension}_p0_render.png")
+                                    val fos = java.io.FileOutputStream(debugFile)
+                                    bmp.compress(Bitmap.CompressFormat.PNG, 90, fos)
+                                    fos.close()
+                                    Log.d("WordCount", "PdfOcr 调试: 已保存渲染位图 ${debugFile.absolutePath} (${debugFile.length()} bytes)")
+                                    diag.append(" [调试图已保存]")
+                                } catch (_: Throwable) {}
+                            }
+
                             // v1.3.83: 区分OCR空结果 vs 异常，便于定位ML Kit问题
                             var ocrResult = ""
                             var ocrError: String? = null
