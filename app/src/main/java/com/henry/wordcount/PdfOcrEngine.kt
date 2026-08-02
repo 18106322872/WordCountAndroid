@@ -163,6 +163,10 @@ object PdfOcrEngine {
                             if (isBlankBitmap(bmp)) { blankCount++; continue }
                             anyRenderedContent = true
 
+                            // v1.3.85: 计算暗像素(文字)占比，判断渲染图是否有可见内容
+                            val darkRatio = darkPixelRatio(bmp)
+                            if (i == 0) diag.append(" 暗像素:${String.format("%.2f", darkRatio)}%")
+
                             // v1.3.84: 保存第一页渲染Bitmap到缓存，用于调试"ML Kit返回空"问题
                             if (i == 0) {
                                 try {
@@ -466,6 +470,29 @@ object PdfOcrEngine {
             }
             if (s == 0) true else (nw.toDouble() / s) < 0.005
         } catch (_: Throwable) { false }
+    }
+
+    // v1.3.85: 计算暗像素(文字)占比，判断渲染图是否"有可见文字"但ML Kit认不出
+    // 返回 0~100 的百分比。阈值<128为暗像素(深色文字)。
+    private fun darkPixelRatio(bmp: Bitmap): Double {
+        return try {
+            val w = bmp.width; val h = bmp.height
+            if (w <= 0 || h <= 0) return@darkPixelRatio 0.0
+            val sx = max(1, w / 48); val sy = max(1, h / 48)  // 采样48x48网格
+            var dark = 0; var s = 0; var y = 0
+            while (y < h) { var x = 0
+            while (x < w) { val px = bmp.getPixel(x, y)
+                val r = px shr 16 and 0xFF; val g = px shr 8 and 0xFF; val b = px and 0xFF
+                // 亮度(感知加权)
+                val lum = (0.299 * r + 0.587 * g + 0.114 * b)
+                if (lum < 128) dark++
+                s++
+                x += sx
+            }
+            y += sy
+            }
+            if (s == 0) 0.0 else (dark.toDouble() / s) * 100.0
+        } catch (_: Throwable) { 0.0 }
     }
 
     private fun computeScale(w: Int, h: Int): Float {
