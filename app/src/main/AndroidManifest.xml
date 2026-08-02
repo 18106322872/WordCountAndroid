@@ -6,6 +6,7 @@
     <!-- 注：SAF OpenMultipleDocuments 在所有 Android 版本上均无需任何存储/媒体权限 -->
 
     <application
+        android:name=".WordCountApplication"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="${appName}"

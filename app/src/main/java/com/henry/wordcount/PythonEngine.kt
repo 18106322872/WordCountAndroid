@@ -28,17 +28,27 @@ object PythonEngine {
     @Volatile private var warmedUp = false
 
     /**
-     * 无条件重新初始化 Python 引擎。
-     * 不再依赖 isStarted() 缓存——该缓存可能在设备上不准确。
-     * Chaquopy 内部会处理重复 start() 的幂等性。
+     * 启动 Python 引擎（幂等守卫）。
+     *
+     * v1.3.80: 真正的首次启动已在 WordCountApplication.onCreate()（主线程）完成。
+     * 此处仅作兜底——若尚未启动则启动，绝不重复初始化，避免后台线程重复 start()
+     * 触发 Chaquopy AssetFinder/scripts 提取竞态（部分设备 FileNotFoundError）。
      */
     fun start(context: Context) {
         try {
-            Python.start(AndroidPlatform(context))
-            Log.d("PythonEngine", "Python.start() 完成")
+            if (!Python.isStarted()) {
+                Python.start(AndroidPlatform(context))
+                Log.d("PythonEngine", "Python.start() 完成（兜底启动）")
+            }
         } catch (e: Exception) {
             Log.e("PythonEngine", "Python.start() 异常: ${e.javaClass.simpleName}: ${e.message}")
         }
+    }
+
+    /** 读取 Application 层记录的 Python 启动错误（若有） */
+    private fun appStartError(context: Context): String? {
+        val app = context.applicationContext
+        return if (app is WordCountApplication) app.pythonStartError else null
     }
 
     /**
@@ -74,12 +84,14 @@ object PythonEngine {
 
     /** 多重重试：最多 MAX_RETRIES 次，每次都完整重新初始化+预热 */
     private inline fun <T> withRetry(context: Context, action: () -> T): T {
+        // v1.3.80: 启动只做一次（Application.onCreate 已主线程启动；此处 isStarted 守卫兜底）。
+        // 绝不在重试循环里重新调用 Python.start()，否则后台线程重复初始化会触发
+        // Chaquopy AssetFinder/scripts 提取竞态。
+        start(context)
+        if (!warmedUp) warmup(context)
         var lastException: Exception? = null
         for (attempt in 1..MAX_RETRIES) {
             try {
-                // 每次尝试前都重新初始化
-                start(context)
-                if (attempt == 1) warmup(context)
                 return action()
             } catch (e: Exception) {
                 val msg = e.message ?: ""
@@ -131,10 +143,16 @@ object PythonEngine {
 
     /** v1.3.63: 诊断函数——验证 Python 引擎正常工作并返回环境信息 */
     fun testPython(context: Context): String {
-        return withRetry(context) {
-            val py = Python.getInstance()
-            val mod = py.getModule("wordcount")
-            mod.callAttr("python_test").toString()
+        val appErr = appStartError(context)
+        return try {
+            withRetry(context) {
+                val py = Python.getInstance()
+                val mod = py.getModule("wordcount")
+                mod.callAttr("python_test").toString()
+            }
+        } catch (e: Exception) {
+            // 若 Application 层启动已失败，直接给出根因；否则给出当前异常
+            "Python引擎启动失败: ${appErr ?: (e.javaClass.simpleName + ": " + e.message)}"
         }
     }
 

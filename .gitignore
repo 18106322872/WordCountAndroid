@@ -4,3 +4,11 @@ runs.json
 ci_log*.txt
 check_ci.py
 poll_build.py
+
+# Python bytecode (不应进 APK/仓库)
+__pycache__/
+*.pyc
+
+# Python bytecode (不应进 APK/仓库)
+__pycache__/
+*.pyc
