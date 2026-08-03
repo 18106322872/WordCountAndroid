@@ -1561,8 +1561,10 @@ private fun addFiles(
                             val rawFe = stats.second
                             val rawNc = stats.third
                             val rawChars = stats.fourth
-                            // 当 metaWords 有效且现算值显著偏大(>1.5倍)时，用 metaWords 兜底
-                            val useMeta = res.metaWords > 0 && rawWords > res.metaWords * 1.5
+                            // 当 metaWords 有效且现算值极端偏大(>3倍)时，用 metaWords 兜底
+                            // v1.3.91: 阈值从 1.5 提高到 3。原案例(VML双写690 vs 真值175=3.9倍metaWords)仍能命中；
+                            // 但营业执照类文件(metaWords不含文本框=65, 含文本框真值175=2.7倍)不再误触发。
+                            val useMeta = res.metaWords > 0 && rawWords > res.metaWords * 3
                             val outWords: Int
                             val outFe: Int
                             val outNc: Int
