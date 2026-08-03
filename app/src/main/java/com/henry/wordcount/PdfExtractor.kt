@@ -358,51 +358,88 @@ object PdfExtractor {
         return -1
     }
 
-    /** 安全版 parseToUnicode——扫描全文件（文件上限 2MB，安全） */
+    /**
+     * v1.3.90: 安全版 parseToUnicode——按对象号精准定位 ToUnicode 流并支持 Flate 解压。
+     *
+     * 旧实现用 `/ToUnicode.*?stream` 贪婪匹配"最近的 stream"，会误把相邻的字体嵌入流
+     * (FontFile2 等) 当成 ToUnicode 流解析；且 ToUnicode CMap 流常被 FlateDecode 压缩，
+     * 原始字节里没有 beginbfchar 明文，导致解析出 0 条映射。后者正是营业执照类
+     * Word→PDF 中文全部丢失（只剩少量英文）的根因。
+     *
+     * 新实现：
+     *   1) 找出所有 /ToUnicode N 0 R 引用的对象号（去重）；
+     *   2) 精准定位对象 N 的 stream（避免误匹配相邻流）；
+     *   3) 若流是 FlateDecode 压缩，先解压再解析 CMap。
+     */
     private fun parseToUnicodeSafe(bytes: ByteArray, _deadline: Long): Map<Int, String> {
         val map = mutableMapOf<Int, String>()
         try {
             val s = String(bytes, StandardCharsets.ISO_8859_1)
-            val re = """(?s)/ToUnicode\s*(\d+\s+\d+\s+obj)?.*?stream\r?\n(.*?)endstream""".toRegex()
-            re.findAll(s).forEach { m ->
-                val cm = m.groupValues[2]
-                """(?s)beginbfchar\s*(.*?)\s*endbfchar""".toRegex().findAll(cm).forEach { blk ->
-                    """<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>""".toRegex().findAll(blk.groupValues[1]).forEach { e ->
-                        val src = e.groupValues[1].toIntOrNull(16) ?: return@forEach
-                        val dst = codePointsToStr(e.groupValues[2])
-                        map[src] = dst
+            // 找所有 /ToUnicode N 0 R 引用的对象号（精准、去重）
+            val refRe = """/ToUnicode\s+(\d+)\s+0\s+R""".toRegex()
+            val seen = mutableSetOf<Int>()
+            refRe.findAll(s).forEach { rm ->
+                val num = rm.groupValues[1].toIntOrNull() ?: return@forEach
+                if (!seen.add(num)) return@forEach
+                // 精准定位对象 N（避免 /ToUnicode 后最近的 stream 误匹配）
+                val objRe = """${num}\s+0\s+obj(.*?)endobj""".toRegex(RegexOption.DOT_MATCHES_ALL)
+                val objM = objRe.find(s) ?: return@forEach
+                val stM = """stream\r?\n(.*?)endstream""".toRegex(RegexOption.DOT_MATCHES_ALL).find(objM.groupValues[1]) ?: return@forEach
+                var cm = stM.groupValues[1]
+                // 尝试 Flate 解压（Word→PDF 的 ToUnicode CMap 多为压缩流）
+                val decomp = tryDecompressSafe(cm.toByteArray(StandardCharsets.ISO_8859_1))
+                if (decomp != null) {
+                    val dStr = String(decomp, StandardCharsets.ISO_8859_1)
+                    // 仅当解压后确实是 CMap 文本时才采用（避免把其它压缩流误用）
+                    if (dStr.contains("bfchar") || dStr.contains("bfrange") ||
+                        dStr.contains("cidchar") || dStr.contains("cidrange")) {
+                        cm = dStr
                     }
                 }
-                """(?s)beginbfrange\s*(.*?)\s*endbfrange""".toRegex().findAll(cm).forEach { blk ->
-                    """<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>""".toRegex().findAll(blk.groupValues[1]).forEach { e ->
-                        val start = e.groupValues[1].toIntOrNull(16) ?: return@forEach
-                        val end = e.groupValues[2].toIntOrNull(16) ?: return@forEach
-                        val dstStart = e.groupValues[3].toIntOrNull(16) ?: return@forEach
-                        var d = dstStart
-                        for (src in start..end) { map[src] = codePointsToStr(d.toString(16)); d++ }
-                    }
-                }
-                // v1.3.56: 增加 begincidchar / begincidrange 解析
-                // 很多中文 PDF（尤其是 Word → PDF 转换的）使用 CID 映射而非 bfchar
-                """(?s)begincidchar\s*(.*?)\s*endcidchar""".toRegex().findAll(cm).forEach { blk ->
-                    """<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>""".toRegex().findAll(blk.groupValues[1]).forEach { e ->
-                        val src = e.groupValues[1].toIntOrNull(16) ?: return@forEach
-                        val dst = codePointsToStr(e.groupValues[2])
-                        if (dst.isNotEmpty()) map[src] = dst
-                    }
-                }
-                """(?s)begincidrange\s*(.*?)\s*endcidrange""".toRegex().findAll(cm).forEach { blk ->
-                    """<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>""".toRegex().findAll(blk.groupValues[1]).forEach { e ->
-                        val start = e.groupValues[1].toIntOrNull(16) ?: return@forEach
-                        val end = e.groupValues[2].toIntOrNull(16) ?: return@forEach
-                        val dstStart = e.groupValues[3].toIntOrNull(16) ?: return@forEach
-                        var d = dstStart
-                        for (src in start..end) { map[src] = codePointsToStr(d.toString(16)); d++ }
-                    }
-                }
+                parseCmap(cm, map)
             }
         } catch (_: Throwable) { }
         return map
+    }
+
+    /** 解析单个 CMap 文本块（beginbfchar/beginbfrange/begincidchar/begincidrange） */
+    private fun parseCmap(cm: String, map: MutableMap<Int, String>) {
+        try {
+            """(?s)beginbfchar\s*(.*?)\s*endbfchar""".toRegex().findAll(cm).forEach { blk ->
+                """<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>""".toRegex().findAll(blk.groupValues[1]).forEach { e ->
+                    val src = e.groupValues[1].toIntOrNull(16) ?: return@forEach
+                    val dst = codePointsToStr(e.groupValues[2])
+                    map[src] = dst
+                }
+            }
+            """(?s)beginbfrange\s*(.*?)\s*endbfrange""".toRegex().findAll(cm).forEach { blk ->
+                """<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>""".toRegex().findAll(blk.groupValues[1]).forEach { e ->
+                    val start = e.groupValues[1].toIntOrNull(16) ?: return@forEach
+                    val end = e.groupValues[2].toIntOrNull(16) ?: return@forEach
+                    val dstStart = e.groupValues[3].toIntOrNull(16) ?: return@forEach
+                    if (end - start > 10000) return@forEach  // 安全网：防止极端大范围卡死
+                    var d = dstStart
+                    for (src in start..end) { map[src] = codePointsToStr(d.toString(16)); d++ }
+                }
+            }
+            """(?s)begincidchar\s*(.*?)\s*endcidchar""".toRegex().findAll(cm).forEach { blk ->
+                """<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>""".toRegex().findAll(blk.groupValues[1]).forEach { e ->
+                    val src = e.groupValues[1].toIntOrNull(16) ?: return@forEach
+                    val dst = codePointsToStr(e.groupValues[2])
+                    if (dst.isNotEmpty()) map[src] = dst
+                }
+            }
+            """(?s)begincidrange\s*(.*?)\s*endcidrange""".toRegex().findAll(cm).forEach { blk ->
+                """<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>""".toRegex().findAll(blk.groupValues[1]).forEach { e ->
+                    val start = e.groupValues[1].toIntOrNull(16) ?: return@forEach
+                    val end = e.groupValues[2].toIntOrNull(16) ?: return@forEach
+                    val dstStart = e.groupValues[3].toIntOrNull(16) ?: return@forEach
+                    if (end - start > 10000) return@forEach
+                    var d = dstStart
+                    for (src in start..end) { map[src] = codePointsToStr(d.toString(16)); d++ }
+                }
+            }
+        } catch (_: Throwable) { }
     }
 
     /** 从 PDF 原始字节中提取可读文本片段——带大小和时间限制 */
