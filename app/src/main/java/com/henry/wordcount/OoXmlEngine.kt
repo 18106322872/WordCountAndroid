@@ -75,7 +75,15 @@ object OoXmlEngine {
         val pageCounter = intArrayOf(0)
 
         // 1) 主文档 body（word/document.xml）—— 唯一数据源
-        val bodyXml = readEntry(zip, "word/document.xml") ?: ""
+        val rawXml = readEntry(zip, "word/document.xml") ?: ""
+
+        // v1.3.89 剥离 VML 兼容层文本框（<v:textbox>...</v:textbox>）。
+        // Word/WPS 保存 docx 时会对每个文本框同时写 DrawingML (w:txbxContent) 和 VML (v:textbox)
+        // 两份格式以确保兼容性。appendDocxXmlText 用 <w:p>/<w:r>/<w:t> 正则无差别提取全部
+        // 段落，导致同一文本框文字被算两次（实测营业执照 690 词 vs Word 真值 175）。
+        // 剥离 VML 层后只保留 DrawingML 主本，与 Word"包括文本框"口径一致。
+        val bodyXml = """<v:textbox[^>]*>.*?</v:textbox>""".toRegex(RegexOption.DOT_MATCHES_ALL).replace(rawXml, "")
+
         appendDocxXmlText(bodyXml, sb) { pageCounter[0]++ }
 
         val text = sb.toString()

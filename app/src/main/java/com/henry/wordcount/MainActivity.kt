@@ -84,6 +84,7 @@ import java.io.FileOutputStream
 import android.graphics.BitmapFactory
 import android.graphics.pdf.PdfDocument
 import java.util.zip.ZipFile
+import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
     /** 外部可通过此引用向已有列表追加新文件（onNewIntent 时使用） */
@@ -1549,17 +1550,38 @@ private fun addFiles(
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = dName, cachePath = f.absolutePath, error = "无法解析此 OOXML 文件（可能损坏或非标准格式）"))
                         } else {
                             val stats = countTextKotlin(res.text)
-                            // v1.3.4: docx 不再信任 docProps/app.xml 元数据——某些文件（如本例调查问卷）元数据过期/错误，
-                            // 其中 Words=1089，但正文实际应为 2008。故始终从 word/document.xml 现算，
-                            // 与桌面版 wordcount.py 口径一致（中文 fe 已验证与 Word 完全一致）。
-                            // 仅页数：元数据可靠(metaPages>0)时优先用，否则用正文 lastRenderedPageBreak 估算。
-                            val outWords = stats.first
-                            val outFe = stats.second
-                            val outNc = stats.third
-                            val outChars = stats.fourth
+                            // v1.3.89 metaWords 安全网（修复 VML 文本框双写导致翻倍的反案例）：
+                            //   v1.3.4 因调查问卷元数据(Words=1089)过期决定一律现算、不用 metaWords。
+                            //   但营业执照类 WPS 文件每个文本框同时存 DrawingML + VML 两份，
+                            //   现算把 v:textbox 内嵌的 p/r/t 也提取了 → 690 词 vs Word 真值 175。
+                            //   策略：metaWords > 0 且 现算 > 1.5×metaWords 时，判定为重复/膨胀，
+                            //         优先用 metaWords（Word/WPS 自带统计最权威），fe/nc 按比例分配。
+                            //   否则保持现算（覆盖 v1.3.4 的元数据过期场景）。
+                            val rawWords = stats.first
+                            val rawFe = stats.second
+                            val rawNc = stats.third
+                            val rawChars = stats.fourth
+                            // 当 metaWords 有效且现算值显著偏大(>1.5倍)时，用 metaWords 兜底
+                            val useMeta = res.metaWords > 0 && rawWords > res.metaWords * 1.5
+                            val outWords: Int
+                            val outFe: Int
+                            val outNc: Int
+                            val outChars: Int
+                            if (useMeta && rawWords > 0) {
+                                val ratio = res.metaWords.toDouble() / rawWords
+                                outWords = res.metaWords
+                                outFe = (rawFe * ratio).roundToInt().coerceAtLeast(0)
+                                outNc = (rawNc * ratio).roundToInt().coerceAtLeast(0)
+                                outChars = if (res.metaChars > 0) res.metaChars else (rawChars * ratio).roundToInt().coerceAtLeast(0)
+                            } else if (useMeta) {
+                                outWords = res.metaWords
+                                outFe = 0; outNc = 0; outChars = res.metaChars
+                            } else {
+                                outWords = rawWords; outFe = rawFe; outNc = rawNc; outChars = rawChars
+                            }
                             val outPages = if (res.metaPages > 0) res.metaPages else res.pages
                             val outReason = if (res.pagesReason.isNotBlank()) res.pagesReason else null
-                            Log.d("WordCount", "docx 现算: words=$outWords fe=$outFe nc=$outNc chars=$outChars pages=$outPages")
+                            Log.d("WordCount", "docx: 现算=($rawWords,$rawFe,$rawNc,$rawChars) metaWords=${res.metaWords} 输出=($outWords,$outFe,$outNc,$outChars) pages=$outPages")
                             // v1.3.3: 隐藏工作表单独统计（默认不计入合计，UI 勾选后才并入）
                             val hiddenStats = res.hiddenSheets.map { (n, t) ->
                                 val s = countTextKotlin(t)
