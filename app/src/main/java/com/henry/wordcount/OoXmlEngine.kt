@@ -36,7 +36,10 @@ object OoXmlEngine {
         // 0 表示无此元数据（如 POI 生成的文件），由调用方退回现算
         val metaPages: Int = 0,
         val metaWords: Int = 0,
-        val metaChars: Int = 0
+        val metaChars: Int = 0,
+        // v1.3.92: 标记 docx 是否检测到并剥离了 VML 兼容层文本框。
+        // 仅当 hasVml=true 时，MainActivity 才启用 metaWords 安全网（防止无 VML 文件误触发）。
+        val hasVml: Boolean = false
     )
 
     fun extract(file: File): OoxmlResult? {
@@ -82,7 +85,9 @@ object OoXmlEngine {
         // 两份格式以确保兼容性。appendDocxXmlText 用 <w:p>/<w:r>/<w:t> 正则无差别提取全部
         // 段落，导致同一文本框文字被算两次（实测营业执照 690 词 vs Word 真值 175）。
         // 剥离 VML 层后只保留 DrawingML 主本，与 Word"包括文本框"口径一致。
-        val bodyXml = """<v:textbox[^>]*>.*?</v:textbox>""".toRegex(RegexOption.DOT_MATCHES_ALL).replace(rawXml, "")
+        val vmlRe = """<v:textbox[^>]*>.*?</v:textbox>""".toRegex(RegexOption.DOT_MATCHES_ALL)
+        val hadVml = vmlRe.containsMatchIn(rawXml)
+        val bodyXml = vmlRe.replace(rawXml, "")
 
         appendDocxXmlText(bodyXml, sb) { pageCounter[0]++ }
 
@@ -167,7 +172,8 @@ object OoXmlEngine {
             imageCount = countMediaImages(zip),
             metaPages = metaPages,
             metaWords = metaWords,
-            metaChars = metaChars
+            metaChars = metaChars,
+            hasVml = hadVml
         )
     }
 

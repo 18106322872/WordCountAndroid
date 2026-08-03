@@ -1562,9 +1562,11 @@ private fun addFiles(
                             val rawNc = stats.third
                             val rawChars = stats.fourth
                             // 当 metaWords 有效且现算值极端偏大(>3倍)时，用 metaWords 兜底
-                            // v1.3.91: 阈值从 1.5 提高到 3。原案例(VML双写690 vs 真值175=3.9倍metaWords)仍能命中；
-                            // 但营业执照类文件(metaWords不含文本框=65, 含文本框真值175=2.7倍)不再误触发。
-                            val useMeta = res.metaWords > 0 && rawWords > res.metaWords * 3
+                            // v1.3.92: 仅当 docx 检测到 VML 兼容层（hasVml）时才启用安全网。
+                            // 原因：无 VML 的文件（如纯 DrawingML 文本框）metaWords 不含文本框而现算含，
+                            // 差异来自"口径不同"而非"重复计数"，不应触发兜底。
+                            // 有 VML 的文件差异来自"VML+DrawingML 双写"→ 重复计数 → 应触发兜底。
+                            val useMeta = res.metaWords > 0 && res.hasVml && rawWords > res.metaWords * 3
                             val outWords: Int
                             val outFe: Int
                             val outNc: Int
@@ -1729,7 +1731,10 @@ private fun addFiles(
                         val bestCjkRatio = if (bestChars > 0) bestFe.toDouble() / bestChars else 0.0
                         val hasControlChars = false // 已由 Python/Kotlin 内部处理
                         val looksLikeGarbage = bestChars > 200 && bestFe < 30 && bestCjkRatio < 0.15
-                        val needOcr = bestChars < 10 || (!bestTextReliable && bestChars < 50) || looksLikeGarbage
+                        // v1.3.92: 有字符但零中文 → CID/ToUnicode 解码失败的中文 PDF（如 Word 导出 PDF）
+                        // 此类 PDF 的中文以 CID 编码存储，Kotlin 无法解码成 PUA/乱码被过滤后只剩英文碎片
+                        val isFailedChinesePdf = bestChars > 20 && bestFe == 0 && bestChars < 500
+                        val needOcr = bestChars < 10 || (!bestTextReliable && bestChars < 50) || looksLikeGarbage || isFailedChinesePdf
 
                         if (!needOcr) {
                             // ★ 文本提取足够好 → 直接使用
