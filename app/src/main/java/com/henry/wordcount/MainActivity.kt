@@ -1510,7 +1510,7 @@ private fun addFiles(
                     val f = cf.file
                     val dName = cf.displayName
                     try {
-                        val res = ArchiveEngine.extract(f, context.cacheDir)
+                        val res = ArchiveEngine.extract(f, context.cacheDir, context)
                         if (res == null) {
                             val ext = f.extension.lowercase()
                             val isSupported = ext in setOf("zip", "rar", "7z", "tar", "gz", "tgz")

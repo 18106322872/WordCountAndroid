@@ -90,7 +90,12 @@ object PdfExtractor {
 
             val source = extractTextRobust(bytes, deadline, diagSb)
             val reliable = !source.fromRawScan && isTextReliable(source.text, bytes)
-            val finalText = source.text.ifBlank { "" }
+            // v1.3.95：补充 AcroForm 表单字段值（表单标签/选项/填写内容需翻译，用户清单要求计入）。
+            // 仅当 PDF 确实含 /AcroForm 时才扫描，避免对无表单 PDF 引入字典噪声。
+            val formText = if (bytes.indexOf("/AcroForm".toByteArray(Charsets.ISO_8859_1)) >= 0) {
+                extractAcroFormText(bytes)
+            } else ""
+            val finalText = (source.text.ifBlank { "" } + if (formText.isNotBlank()) "\n$formText" else "").trimEnd()
 
             val stats = quickStats(finalText)
             diagSb.insert(0, "流处理: ${source.diag}\n")
@@ -291,6 +296,122 @@ object PdfExtractor {
         if (System.currentTimeMillis() > deadline) return TextSource(sb.toString(), false, diagSb.toString())
         diagSb.append("→路径B")
         return TextSource(extractRawReadableStrings(bytes, deadline), true, diagSb.toString())
+    }
+
+    /**
+     * v1.3.95：从 PDF 的 AcroForm 字段中提取填写值/默认文本，追加到统计文本。
+     * 表单字段（如文本框、下拉选项、复选框标签）中的文字常需要翻译，此前被完全忽略。
+     *
+     * 解析策略（保守正则，避免误抓字典噪声）：
+     *   1) 先定位 /AcroForm 字典，取其 /Fields [ ... ] 间接引用数组。
+     *   2) 在字节中搜索每个字段对象的 /V (value) 与 /DV (default value)。
+     *   3) 只接受字面字符串值 /V (...) 或 /V <...>（十六进制串），跳过 /V /Name 名称引用，
+     *      因为名称引用通常是内部标识而非可翻译文本。
+     *   4) 括号字面串做转义解码（\( \) \\），尖括号十六进制串按字节解码为 ISO-8859-1。
+     *   5) 过滤纯数字/路径/URL 等明显非翻译内容（含空格或 CJK/字母为主的才保留）。
+     *
+     * @return 所有字段值拼接的纯文本（空格分隔）；无表单或全为空返回空串。
+     */
+    private fun extractAcroFormText(bytes: ByteArray): String {
+        return try {
+            val text = String(bytes, Charsets.ISO_8859_1)
+            // 定位 /AcroForm 字典里的 /Fields [ objnums ]
+            val acro = text.indexOf("/AcroForm")
+            if (acro < 0) return ""
+            // 收集所有对象号（字段间接引用）：在 AcroForm 之后、下一个顶级字典结束前
+            val fieldsRegion = text.substring(acro, min(acro + 4000, text.length))
+            val objNums = """/Fields\s*\[\s*((?:\d+\s+\d+\s+R\s*)+)"""".toRegex().find(fieldsRegion)
+                ?.groupValues?.get(1)
+                ?.split(Regex("""\s+R\s*"""))
+                ?.mapNotNull { it.trim().split(Regex("\\s+")).firstOrNull()?.toIntOrNull() }
+                ?.distinct()
+                ?: return ""
+            if (objNums.isEmpty()) return ""
+
+            val sb = StringBuilder()
+            val seen = mutableSetOf<String>()
+            for (num in objNums) {
+                // 找到 obj num 0 obj ... endobj 块
+                val objStart = text.indexOf("""$num 0 obj""")
+                if (objStart < 0) continue
+                val endIdx = text.indexOf("endobj", objStart)
+                if (endIdx < 0) continue
+                val objStr = text.substring(objStart, endIdx)
+                // 抓 /V (...) 或 /V <...>
+                val vRe = """/V\s*\((.*?)\)""".toRegex()
+                val vHexRe = """/V\s*<([0-9A-Fa-f\s]+)>""".toRegex()
+                vRe.findAll(objStr).forEach { m ->
+                    val v = decodePdfLiteral(m.groupValues[1])
+                    appendFormValueIfText(v, sb, seen)
+                }
+                vHexRe.findAll(objStr).forEach { m ->
+                    val v = decodePdfHex(m.groupValues[1])
+                    appendFormValueIfText(v, sb, seen)
+                }
+                // 也抓 /DV (默认)
+                vRe.findAll(objStr.replace("/V", "/DV")).forEach { m ->
+                    val v = decodePdfLiteral(m.groupValues[1])
+                    appendFormValueIfText(v, sb, seen)
+                }
+            }
+            sb.toString().trim()
+        } catch (_: Throwable) {
+            ""
+        }
+    }
+
+    /** 将表单值追加到 sb（去重 + 过滤非翻译内容）。 */
+    private fun appendFormValueIfText(v: String, sb: StringBuilder, seen: MutableSet<String>) {
+        val t = v.trim()
+        if (t.isEmpty()) return
+        // 过滤：必须含字母或 CJK 或至少含空格（排除纯数字/坐标/对象引用）
+        val hasLetterOrCjk = t.any { it.isLetter() || it.code in 0x4E00..0x9FFF || it.code in 0x3000..0x303F }
+        val hasSpace = t.contains(' ')
+        if (!hasLetterOrCjk && !hasSpace) return
+        if (t.length > 200) return  // 异常长值（可能是二进制泄漏）跳过
+        val norm = t.lowercase()
+        if (norm in seen) return
+        seen.add(norm)
+        sb.append(t).append(' ')
+    }
+
+    /** 解码 PDF 字面字符串：处理 \( \) \\ 转义。 */
+    private fun decodePdfLiteral(s: String): String {
+        val sb = StringBuilder()
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            if (c == '\\' && i + 1 < s.length) {
+                val n = s[i + 1]
+                when (n) {
+                    '(', ')' -> sb.append(n)
+                    '\\' -> sb.append('\\')
+                    'n' -> sb.append('\n')
+                    'r' -> sb.append('\r')
+                    't' -> sb.append('\t')
+                    else -> sb.append(n)  // 其他转义原样保留
+                }
+                i += 2
+            } else {
+                sb.append(c)
+                i++
+            }
+        }
+        return sb.toString()
+    }
+
+    /** 解码 PDF 十六进制字符串（<...>）。 */
+    private fun decodePdfHex(s: String): String {
+        return try {
+            val clean = s.replace("\\s+".toRegex(), "")
+            val out = ByteArray(clean.length / 2)
+            for (k in out.indices) {
+                out[k] = clean.substring(k * 2, k * 2 + 2).toInt(16).toByte()
+            }
+            String(out, Charsets.ISO_8859_1)
+        } catch (_: Throwable) {
+            ""
+        }
     }
 
     /**

@@ -86,7 +86,23 @@ object OldOfficeEngine {
         val doc = HWPFDocument(fis)
         try {
             val extractor = WordExtractor(doc)
-            val text = extractor.text ?: ""
+            val text = StringBuilder(extractor.text ?: "")
+
+            // v1.3.95：补齐 .doc 此前漏统计的批注（comments）文本。
+            // 页眉/页脚/脚注已被 WordExtractor.text() 默认包含；文本框文字同样被抽到。
+            // 批注需单独遍历 getCommentsRange()，全部 try-catch 包裹，任何异常都不影响主文本。
+            try {
+                val comments = doc.comments
+                if (comments != null) {
+                    for (i in 0 until comments.getNumberOfComments()) {
+                        val c = comments.getComment(i)
+                        val ct = c?.text?.trim()
+                        if (!ct.isNullOrBlank()) text.append('\n').append(ct)
+                    }
+                }
+            } catch (_: Throwable) { }
+
+            val finalText = text.toString()
 
             // 尝试从文档属性获取统计信息（Word/WPS 保存时写入，与「字数统计」完全一致）
             var pages = 0
@@ -106,7 +122,7 @@ object OldOfficeEngine {
             } catch (_: Throwable) {}
 
             runCatching { extractor.close() }
-            return DocResult(text = text, pages = pages, words = words, chars = chars)
+            return DocResult(text = finalText, pages = pages, words = words, chars = chars)
         } finally {
             runCatching { doc.close() }
         }

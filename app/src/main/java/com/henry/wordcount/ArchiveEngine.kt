@@ -1,5 +1,6 @@
 package com.henry.wordcount
 
+import android.content.Context
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
 import org.apache.commons.compress.archivers.sevenz.SevenZFile
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
@@ -9,6 +10,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 压缩包统计层（ZIP/7Z/TAR/GZ 基于 Apache Commons Compress；RAR4 基于 junrar）。
@@ -17,6 +19,9 @@ import java.nio.charset.StandardCharsets
  * 对每个内层受支持文件，复用既有引擎抽取文本并统计字数。
  */
 object ArchiveEngine {
+
+    /** v1.3.95：压缩包内层图片 OCR 全局配额（每次 extract 重置），防止大压缩包触发大量 OCR 卡死。 */
+    private val ocrBudget = AtomicInteger(0)
 
     data class ArchiveResult(
         val inner: List<InnerResult>,
@@ -46,21 +51,24 @@ object ArchiveEngine {
         } catch (_: Throwable) { false }
     }
 
-    /** cacheDir 用于解包内层文件到临时文件。返回 null 表示不支持或解析失败。 */
-    fun extract(file: File, cacheDir: File): ArchiveResult? {
+    /** cacheDir 用于解包内层文件到临时文件。返回 null 表示不支持或解析失败。
+     *  v1.3.95: 新增 context 参数——用于内层图片的 OCR 统计（用户清单要求计入压缩包内扫描图文字）。 */
+    fun extract(file: File, cacheDir: File, context: Context? = null): ArchiveResult? {
+        // 内层图片 OCR 全局配额（防止大压缩包触发大量 OCR 导致卡死/OOM）
+        ocrBudget.set(5)
         return try {
             val ext = file.extension.lowercase()
             when {
-                ext == "zip" || (ext.isBlank() && isZipMagic(file)) -> fromZipCommonsCompress(file, cacheDir)
-                ext == "rar" || (ext.isBlank() && isRarMagic(file)) -> fromRar(file, cacheDir)
-                ext in setOf("gz", "tgz") -> fromGzip(file, cacheDir)
-                ext == "tar" || (ext.isBlank() && isTarMagic(file)) -> fromTarDirect(file, cacheDir)
-                ext == "7z" -> fromSevenZip(file, cacheDir)
+                ext == "zip" || (ext.isBlank() && isZipMagic(file)) -> fromZipCommonsCompress(file, cacheDir, context)
+                ext == "rar" || (ext.isBlank() && isRarMagic(file)) -> fromRar(file, cacheDir, context)
+                ext in setOf("gz", "tgz") -> fromGzip(file, cacheDir, context)
+                ext == "tar" || (ext.isBlank() && isTarMagic(file)) -> fromTarDirect(file, cacheDir, context)
+                ext == "7z" -> fromSevenZip(file, cacheDir, context)
                 else -> {
                     // 兜底：按 magic bytes 再试一次
-                    if (isZipMagic(file)) fromZipCommonsCompress(file, cacheDir)
-                    else if (isRarMagic(file)) fromRar(file, cacheDir)
-                    else if (isGzipMagic(file)) fromGzip(file, cacheDir)
+                    if (isZipMagic(file)) fromZipCommonsCompress(file, cacheDir, context)
+                    else if (isRarMagic(file)) fromRar(file, cacheDir, context)
+                    else if (isGzipMagic(file)) fromGzip(file, cacheDir, context)
                     else null
                 }
             }
@@ -99,7 +107,7 @@ object ArchiveEngine {
     } catch (_: Throwable) { false }
 
     // ──────────────────── ZIP (commons-compress) ────────────────────
-    private fun fromZipCommonsCompress(file: File, cacheDir: File): ArchiveResult {
+    private fun fromZipCommonsCompress(file: File, cacheDir: File, context: Context?): ArchiveResult {
         val inner = mutableListOf<InnerResult>()
         file.inputStream().use { fis ->
             val zis = org.apache.commons.compress.archivers.zip.ZipFile(file)
@@ -109,12 +117,12 @@ object ArchiveEngine {
                     val entry = entries.nextElement() as ZipArchiveEntry
                     if (entry.isDirectory) continue
                     val bytes = zis.getInputStream(entry)?.readBytes() ?: continue
-                    processEntry(entry.name, bytes, cacheDir, inner)
+                    processEntry(entry.name, bytes, cacheDir, inner, context)
                     // 嵌套 zip
                     if (entry.name.lowercase().endsWith(".zip")) {
                         val nestedTmp = writeTemp(bytes, entry.name, cacheDir)
                         if (nestedTmp != null) {
-                            val nestedRes = extract(nestedTmp, cacheDir)
+                            val nestedRes = extract(nestedTmp, cacheDir, context)
                             if (nestedRes != null) inner.addAll(nestedRes.inner)
                             nestedTmp.delete()
                         }
@@ -126,7 +134,7 @@ object ArchiveEngine {
     }
 
     // ──────────────────── RAR4 (junrar，纯 Java RAR 解压库) ────────────────────
-    private fun fromRar(file: File, cacheDir: File): ArchiveResult? {
+    private fun fromRar(file: File, cacheDir: File, context: Context?): ArchiveResult? {
         val inner = mutableListOf<InnerResult>()
         val dest = File(cacheDir, "rar_${System.currentTimeMillis()}")
         dest.mkdirs()
@@ -143,7 +151,7 @@ object ArchiveEngine {
 
             Junrar.extract(file.absolutePath, dest.absolutePath)
             dest.walkTopDown().filter { it.isFile }.forEach { f ->
-                try { processEntry(f.name, f.readBytes(), cacheDir, inner) } catch (_: Throwable) {}
+                try { processEntry(f.name, f.readBytes(), cacheDir, inner, context) } catch (_: Throwable) {}
             }
         } catch (_: Throwable) {
             // RAR5 / 加密 / 损坏等情况会抛异常
@@ -154,38 +162,38 @@ object ArchiveEngine {
     }
 
     // ──────────────────── GZ / TGZ ────────────────────
-    private fun fromGzip(file: File, cacheDir: File): ArchiveResult {
+    private fun fromGzip(file: File, cacheDir: File, context: Context?): ArchiveResult {
         val bytes = file.readBytes()
         val decompressed = gunzipCompat(bytes)
         val inner = mutableListOf<InnerResult>()
         val isTar = decompressed.size > 262 &&
                 String(decompressed.copyOfRange(257, 262), StandardCharsets.ISO_8859_1) == "ustar"
         if (isTar || file.extension.lowercase() == "tgz") {
-            processTar(decompressed, cacheDir, inner)
+            processTar(decompressed, cacheDir, inner, context)
         } else {
             val baseName = file.name.removeSuffix(".gz").removeSuffix(".GZ")
-            processEntry(baseName, decompressed, cacheDir, inner)
+            processEntry(baseName, decompressed, cacheDir, inner, context)
         }
         return aggregate(inner)
     }
 
     // ──────────────────── TAR ────────────────────
-    private fun fromTarDirect(file: File, cacheDir: File): ArchiveResult {
+    private fun fromTarDirect(file: File, cacheDir: File, context: Context?): ArchiveResult {
         val bytes = file.readBytes()
         val inner = mutableListOf<InnerResult>()
-        processTar(bytes, cacheDir, inner)
+        processTar(bytes, cacheDir, inner, context)
         return aggregate(inner)
     }
 
     /** 7Z（commons-compress SevenZFile） */
-    private fun fromSevenZip(file: File, cacheDir: File): ArchiveResult {
+    private fun fromSevenZip(file: File, cacheDir: File, context: Context?): ArchiveResult {
         val inner = mutableListOf<InnerResult>()
         SevenZFile(file).use { sevenz ->
             while (true) {
                 val entry = sevenz.nextEntry ?: break
                 if (!entry.isDirectory) {
                     val bytes = sevenz.getInputStream(entry).readBytes()
-                    if (bytes.isNotEmpty()) processEntry(entry.name, bytes, cacheDir, inner)
+                    if (bytes.isNotEmpty()) processEntry(entry.name, bytes, cacheDir, inner, context)
                 }
             }
         }
@@ -193,7 +201,7 @@ object ArchiveEngine {
     }
 
     // ──────────────────── TAR 解析器（复用原有逻辑） ────────────────────
-    private fun processTar(bytes: ByteArray, cacheDir: File, inner: MutableList<InnerResult>) {
+    private fun processTar(bytes: ByteArray, cacheDir: File, inner: MutableList<InnerResult>, context: Context? = null) {
         var pos = 0
         var pendingLongName: String? = null
         while (pos + 512 <= bytes.size) {
@@ -213,7 +221,7 @@ object ArchiveEngine {
                 '0', '\u0000' -> {
                     val finalName = pendingLongName?.let { if (name.isNotEmpty()) "$it/$name" else it } ?: name
                     pendingLongName = null
-                    if (finalName.isNotBlank()) processEntry(finalName, data, cacheDir, inner)
+                    if (finalName.isNotBlank()) processEntry(finalName, data, cacheDir, inner, context)
                 }
                 else -> { pendingLongName = null }
             }
@@ -254,9 +262,34 @@ object ArchiveEngine {
         "bin", "dat", "sys", "drv"
     )
 
-    private fun processEntry(name: String, bytes: ByteArray, cacheDir: File, inner: MutableList<InnerResult>) {
+    private fun processEntry(name: String, bytes: ByteArray, cacheDir: File, inner: MutableList<InnerResult>, context: Context? = null) {
         val ext = name.substringAfterLast('.', "").lowercase()
-        // 跳过已知不可处理的类型
+        // 图片：v1.3.95 改为尝试 OCR 统计（用户清单要求计入压缩包内扫描图文字）。
+        // 仅在仍有 OCR 配额且图片字节较小（<2MB）时才 OCR，避免大压缩包卡死/OOM。
+        val imageExts = setOf("png", "jpg", "jpeg", "bmp", "gif", "webp", "tif", "tiff")
+        if (ext in imageExts) {
+            if (context != null && ocrBudget.get() > 0 && bytes.size <= 2 * 1024 * 1024) {
+                ocrBudget.decrementAndGet()
+                val tmp = writeTemp(bytes, name, cacheDir) ?: return
+                try {
+                    val ocrText = runCatching { OcrEngine.recognize(context, tmp) }.getOrNull()
+                    if (!ocrText.isNullOrBlank()) {
+                        val stats = countTextKotlin(ocrText)
+                        val pages = 1
+                        inner.add(InnerResult(
+                            name = name.substringAfterLast('/'),
+                            words = stats.first, fe = stats.second, nc = stats.third,
+                            chars = stats.fourth, pages = pages
+                        ))
+                        Log.d("WordCount", "压缩包内层图片 OCR: $name → ${stats.first} 词")
+                    }
+                } finally {
+                    runCatching { tmp.delete() }
+                }
+            }
+            return
+        }
+        // 跳过其他已知不可处理的二进制类型
         if (ext in SKIP_EXTS) return
         val tmp = writeTemp(bytes, name, cacheDir) ?: return
         try {
