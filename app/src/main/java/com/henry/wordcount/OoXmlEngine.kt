@@ -97,9 +97,13 @@ object OoXmlEngine {
         // mc:AlternateContent > mc:Fallback 容器中的 DrawingML 文本框文本。
         // 兜底：扫描 bodyXml 全部 <w:t>，用 HashSet 精确去重（仅追加全新文本片段），
         // 防止 v1.3.93 不去重导致的膨胀（771 词）。
-        val existingTokens = HashSet<String>()
-        // 从已提取的 sb 中按空白拆分收集 token（近似还原 method1 提取的片段）
-        sb.toString().split(Regex("\\s+")).filter { it.isNotBlank() }.forEach { existingTokens.add(it) }
+        // v1.3.95b：统一去重基准 = 已提取文本做「空白归一化」后的拼接串。
+        // 旧实现用空白拆分 token 集合，但正文提取把同一段落的多个 <w:t> 直接拼接（无空格），
+        // 导致候选片段（单 <w:t> 内容）与集合中的整段 token 粒度不一致 → 漏去重、重复计数。
+        // 改用子串匹配（归一化后）：任何已出现过的文本片段都不再计入，
+        // 同时覆盖「正文子串 / 页眉页脚复用 / 图表与正文重复」三类重复。
+        val normAcc = StringBuilder(sb.toString().replace(Regex("\\s+"), ""))
+
         val fallbackTRe = """<w:t[^>]*>(.*?)</w:t>""".toRegex(RegexOption.DOT_MATCHES_ALL)
         var addedCount = 0
         fallbackTRe.findAll(bodyXml).forEach { tMatch ->
@@ -107,11 +111,11 @@ object OoXmlEngine {
             val clean = raw.replace("""<[^>]+>""", "")
                 .replace("""&[a-z]+;""".toRegex(), "")
                 .trim()
-            if (clean.isNotEmpty() && clean.any { it.code >= 32 } &&
-                clean !in existingTokens) {
+            val norm = clean.replace(Regex("\\s+"), "")
+            if (norm.isNotEmpty() && normAcc.indexOf(norm) < 0) {
                 sb.append(clean)
                 sb.append(' ')
-                existingTokens.add(clean)
+                normAcc.append(norm)
                 addedCount++
             }
         }
@@ -124,8 +128,8 @@ object OoXmlEngine {
         //   - 脚注 / 尾注（footnotes.xml / endnotes.xml）
         //   - 内嵌图表文字（word/charts/chartN.xml 的 <a:t>：图表标题/轴标题/系列名）
         //   - SmartArt / 图示文字（word/diagrams/dataN.xml 的 <a:t>）
-        // 全部经现有 token 集合去重追加，避免与正文重复（如页眉页脚在 body 中被复用的情况）。
-        appendDocxExtraXml(zip, sb, existingTokens)
+        // 全部经空白归一化后的子串去重追加，避免与正文/彼此重复计数。
+        appendDocxExtraXml(zip, sb, normAcc)
 
         val text = sb.toString()
         // ── 页数统计（v1.1.14 重写：智能排版感知）──
@@ -224,7 +228,7 @@ object OoXmlEngine {
      *
      * @param existingTokens 已提取文本 token 集合（会被追加新 token，供后续继续去重）
      */
-    private fun appendDocxExtraXml(zip: ZipFile, sb: StringBuilder, existingTokens: MutableSet<String>) {
+    private fun appendDocxExtraXml(zip: ZipFile, sb: StringBuilder, normAcc: StringBuilder) {
         // 1) 页眉 / 页脚 / 脚注 / 尾注：均为 OOXML wordprocessingML，用与正文相同的片段提取
         val wpmlNames = mutableListOf<String>()
         try {
@@ -241,7 +245,7 @@ object OoXmlEngine {
         var extra = 0
         for (name in wpmlNames) {
             val xml = readEntry(zip, name) ?: continue
-            extra += appendWpmlFragments(xml, sb, existingTokens)
+            extra += appendWpmlFragments(xml, sb, normAcc)
         }
         if (extra > 0) Log.d("WordCount", "docx 页眉/页脚/脚注/尾注 补充了 $extra 条文本")
 
@@ -258,9 +262,10 @@ object OoXmlEngine {
                 // <a:t> 内容不含子标签（纯文本叶子），用 [^<]* 即可
                 """<a:t[^>]*>([^<]*)</a:t>""".toRegex().findAll(xml).forEach {
                     val t = decodeXml(it.groupValues[1]).trim()
-                    if (t.isNotEmpty() && t !in existingTokens) {
+                    val tNorm = t.replace(Regex("\\s+"), "")
+                    if (tNorm.isNotEmpty() && normAcc.indexOf(tNorm) < 0) {
                         sb.append(t).append(' ')
-                        existingTokens.add(t)
+                        normAcc.append(tNorm)
                         aExtra++
                     }
                 }
@@ -273,7 +278,7 @@ object OoXmlEngine {
      * v1.3.95：从 wordprocessingML（页眉/页脚/脚注/尾注）XML 中提取尚未出现的文本片段，
      * 去重追加到 sb，返回新增条数。解析逻辑与 appendDocxXmlText 一致（<w:p>/<w:r>/<w:t>）。
      */
-    private fun appendWpmlFragments(xml: String, sb: StringBuilder, existingTokens: MutableSet<String>): Int {
+    private fun appendWpmlFragments(xml: String, sb: StringBuilder, normAcc: StringBuilder): Int {
         var added = 0
         val paraRe = """(?s)<w:p[ >].*?</w:p>""".toRegex()
         val runRe = """(?s)<w:r[ >].*?</w:r>""".toRegex()
@@ -287,9 +292,10 @@ object OoXmlEngine {
                     val clean = raw.replace("""<[^>]+>""", "")
                         .replace("""&[a-z]+;""".toRegex(), "")
                         .trim()
-                    if (clean.isNotEmpty() && clean.any { it.code >= 32 } && clean !in existingTokens) {
+                    if (clean.isNotEmpty() && clean.any { it.code >= 32 } && normAcc.indexOf(clean.replace(Regex("\\s+"), "")) < 0) {
+                        val norm = clean.replace(Regex("\\s+"), "")
                         sb.append(clean).append(' ')
-                        existingTokens.add(clean)
+                        normAcc.append(norm)
                         added++
                     }
                 }
