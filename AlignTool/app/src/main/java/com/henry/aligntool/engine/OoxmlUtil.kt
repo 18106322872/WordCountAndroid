@@ -27,6 +27,12 @@ object OoxmlUtil {
                 leaf -> for (c in n.children) if (c is XText) sb.append(decodeXml(c.text))
                 "tab" -> sb.append('\t')
                 "br", "cr" -> sb.append('\n')
+                "AlternateContent" -> {
+                    // 现代文本框/图形放在 <mc:Choice>，旧版 VML 备份在 <mc:Fallback>，
+                    // 二者各含一份相同文字；只取 <mc:Choice> 分支，避免封面等文字被抽成两遍（v1.0.12 修复）。
+                    val choice = n.findFirst("Choice")
+                    if (choice != null) walk(choice) else for (c in n.children) walk(c)
+                }
                 else -> for (c in n.children) walk(c)
             }
         }
