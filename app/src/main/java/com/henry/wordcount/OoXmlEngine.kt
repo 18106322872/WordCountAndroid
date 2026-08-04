@@ -92,24 +92,31 @@ object OoXmlEngine {
 
         appendDocxXmlText(bodyXml, sb) { pageCounter[0]++ }
 
-        // v1.3.93 补充扫描：appendDocxXmlText 的 <w:p>/<w:r>/<w:t> 三层正则
-        // 会遗漏 w:txbxContent（DrawingML 文本框）内某些嵌套在 mc:AlternateContent 或
-        // 复杂容器中的文本（实测营业执照漏 18 段英文翻译，120→165 词）。
-        // 兜底：直接扫描 bodyXml 中所有 <w:t>，补集追加到 sb（空白/控制字符过滤）。
-        val extractedLength = sb.length
+        // v1.3.94 补充扫描（精确去重模式）：
+        // appendDocxXmlText 的 <w:p>/<w:r>/<w:t> 三层正则会遗漏嵌套在
+        // mc:AlternateContent > mc:Fallback 容器中的 DrawingML 文本框文本。
+        // 兜底：扫描 bodyXml 全部 <w:t>，用 HashSet 精确去重（仅追加全新文本片段），
+        // 防止 v1.3.93 不去重导致的膨胀（771 词）。
+        val existingTokens = HashSet<String>()
+        // 从已提取的 sb 中按空白拆分收集 token（近似还原 method1 提取的片段）
+        sb.toString().split(Regex("\\s+")).filter { it.isNotBlank() }.forEach { existingTokens.add(it) }
         val fallbackTRe = """<w:t[^>]*>(.*?)</w:t>""".toRegex(RegexOption.DOT_MATCHES_ALL)
+        var addedCount = 0
         fallbackTRe.findAll(bodyXml).forEach { tMatch ->
             val raw = decodeXml(tMatch.groupValues[1])
             val clean = raw.replace("""<[^>]+>""", "")
                 .replace("""&[a-z]+;""".toRegex(), "")
-            if (clean.isNotBlank() && clean.any { it.code >= 32 }) {
+                .trim()
+            if (clean.isNotEmpty() && clean.any { it.code >= 32 } &&
+                clean !in existingTokens) {
                 sb.append(clean)
                 sb.append(' ')
+                existingTokens.add(clean)
+                addedCount++
             }
         }
-        // 如果补充扫描找到了新内容，记录日志
-        if (sb.length > extractedLength) {
-            Log.d("WordCount", "docx fallback t:scan 补充了 ${sb.length - extractedLength} 字符")
+        if (addedCount > 0) {
+            Log.d("WordCount", "docx fallback 精确去重后补充了 $addedCount 条新文本")
         }
 
         val text = sb.toString()
