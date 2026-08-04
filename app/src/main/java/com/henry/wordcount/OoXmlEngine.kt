@@ -1,5 +1,6 @@
 package com.henry.wordcount
 
+import android.util.Log
 import java.io.File
 import java.nio.charset.StandardCharsets
 import java.util.Collections
