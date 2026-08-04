@@ -1561,17 +1561,42 @@ private fun addFiles(
                             val rawFe = stats.second
                             val rawNc = stats.third
                             val rawChars = stats.fourth
-                            // v1.3.93: 废弃 metaWords 安全网。
-                            // 原因：metaWords (docProps/app.xml 的 Words 字段) 不含文本框内容，
-                            // 而本 app 的现算值包含文本框 → 两者口径不同，metaWords 永远偏低
-                            // （营业执照 metaWords=65 vs Word真值≈175）。
-                            // 用 metaWords "兜底"只会让结果更差（从 120 降到 65）。
-                            // VML 双写问题已由 OoXmlEngine 的 VML 剥离 + 补充扫描解决，
-                            // 不再需要安全网。
-                            val outWords = rawWords
-                            val outFe = rawFe
-                            val outNc = rawNc
-                            val outChars = rawChars
+                            // v1.3.98: 恢复 metaWords 安全网（智能模式）。
+                            // 背景：v1.3.93 因"含 VML 文本框的中文营业执照 metaWords 偏低"而一刀切废弃。
+                            // 但对无 VML 的普通 docx（如纯英文翻译件），metaWords 与 Word 对话框完全一致，
+                            // 弃用后现算值因 fallback 补充扫描/子串去重不完美导致偏多（175→439）。
+                            // 策略：
+                            //   ① 无 VML 且 metaWords > 0 → 直接用 metaWords（= Word 真值）
+                            //   ② 有 VML 但现算值 > 1.5×metaWords → 用 metaWords（判定为膨胀）
+                            //   ③ 其他情况 → 保持现算（覆盖元数据过期/文本框额外内容场景）
+                            val outWords: Int
+                            val outFe: Int
+                            val outNc: Int
+                            val outChars: Int
+                            if (res.metaWords > 0 && !res.hasVml) {
+                                // 无 VML 文本框：metaWords = Word 对话框字数，最权威
+                                outWords = res.metaWords
+                                val ratio = if (rawWords > 0) rawWords.toDouble() / res.metaWords else 1.0
+                                outFe = (rawFe / ratio).toInt().coerceAtLeast(0)
+                                outNc = (rawNc / ratio).toInt().coerceAtLeast(0)
+                                outChars = (rawChars / ratio).toInt().coerceAtLeast(0)
+                                Log.d("WordCount", "docx: 使用 metaWords=${res.metaWords}(无VML权威值) 现算=$rawWords")
+                            } else if (res.metaWords > 0 && rawWords > (res.metaWords * 1.5).toInt()) {
+                                // 有 VML 但现算明显膨胀：回退到 metaWords
+                                outWords = res.metaWords
+                                val ratio = rawWords.toDouble() / res.metaWords
+                                outFe = (rawFe / ratio).toInt().coerceAtLeast(0)
+                                outNc = (rawNc / ratio).toInt().coerceAtLeast(0)
+                                outChars = (rawChars / ratio).toInt().coerceAtLeast(0)
+                                Log.d("WordCount", "docx: 回退 metaWords=${res.metaWords}(现算${rawWords}膨胀>1.5x)")
+                            } else {
+                                // 默认：用现算值
+                                outWords = rawWords
+                                outFe = rawFe
+                                outNc = rawNc
+                                outChars = rawChars
+                                Log.d("WordCount", "docx: 现算=($rawWords,$rawFe,$rawNc,$rawChars) metaWords=${res.metaWords}")
+                            }
                             val outPages = if (res.metaPages > 0) res.metaPages else res.pages
                             val outReason = if (res.pagesReason.isNotBlank()) res.pagesReason else null
                             Log.d("WordCount", "docx: 现算=($rawWords,$rawFe,$rawNc,$rawChars) metaWords=${res.metaWords}(不使用) 输出=($outWords,$outFe,$outNc,$outChars) pages=$outPages")
