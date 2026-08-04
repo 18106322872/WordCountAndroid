@@ -91,6 +91,26 @@ object OoXmlEngine {
 
         appendDocxXmlText(bodyXml, sb) { pageCounter[0]++ }
 
+        // v1.3.93 补充扫描：appendDocxXmlText 的 <w:p>/<w:r>/<w:t> 三层正则
+        // 会遗漏 w:txbxContent（DrawingML 文本框）内某些嵌套在 mc:AlternateContent 或
+        // 复杂容器中的文本（实测营业执照漏 18 段英文翻译，120→165 词）。
+        // 兜底：直接扫描 bodyXml 中所有 <w:t>，补集追加到 sb（空白/控制字符过滤）。
+        val extractedLength = sb.length
+        val fallbackTRe = """<w:t[^>]*>(.*?)</w:t>""".toRegex(RegexOption.DOT_MATCHES_ALL)
+        fallbackTRe.findAll(bodyXml).forEach { tMatch ->
+            val raw = decodeXml(tMatch.groupValues[1])
+            val clean = raw.replace("""<[^>]+>""", "")
+                .replace("""&[a-z]+;""".toRegex(), "")
+            if (clean.isNotBlank() && clean.any { it.code >= 32 }) {
+                sb.append(clean)
+                sb.append(' ')
+            }
+        }
+        // 如果补充扫描找到了新内容，记录日志
+        if (sb.length > extractedLength) {
+            Log.d("WordCount", "docx fallback t:scan 补充了 ${sb.length - extractedLength} 字符")
+        }
+
         val text = sb.toString()
         // ── 页数统计（v1.1.14 重写：智能排版感知）──
         //

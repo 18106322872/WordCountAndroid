@@ -1561,31 +1561,20 @@ private fun addFiles(
                             val rawFe = stats.second
                             val rawNc = stats.third
                             val rawChars = stats.fourth
-                            // 当 metaWords 有效且现算值极端偏大(>3倍)时，用 metaWords 兜底
-                            // v1.3.92: 仅当 docx 检测到 VML 兼容层（hasVml）时才启用安全网。
-                            // 原因：无 VML 的文件（如纯 DrawingML 文本框）metaWords 不含文本框而现算含，
-                            // 差异来自"口径不同"而非"重复计数"，不应触发兜底。
-                            // 有 VML 的文件差异来自"VML+DrawingML 双写"→ 重复计数 → 应触发兜底。
-                            val useMeta = res.metaWords > 0 && res.hasVml && rawWords > res.metaWords * 3
-                            val outWords: Int
-                            val outFe: Int
-                            val outNc: Int
-                            val outChars: Int
-                            if (useMeta && rawWords > 0) {
-                                val ratio = res.metaWords.toDouble() / rawWords
-                                outWords = res.metaWords
-                                outFe = (rawFe * ratio).roundToInt().coerceAtLeast(0)
-                                outNc = (rawNc * ratio).roundToInt().coerceAtLeast(0)
-                                outChars = if (res.metaChars > 0) res.metaChars else (rawChars * ratio).roundToInt().coerceAtLeast(0)
-                            } else if (useMeta) {
-                                outWords = res.metaWords
-                                outFe = 0; outNc = 0; outChars = res.metaChars
-                            } else {
-                                outWords = rawWords; outFe = rawFe; outNc = rawNc; outChars = rawChars
-                            }
+                            // v1.3.93: 废弃 metaWords 安全网。
+                            // 原因：metaWords (docProps/app.xml 的 Words 字段) 不含文本框内容，
+                            // 而本 app 的现算值包含文本框 → 两者口径不同，metaWords 永远偏低
+                            // （营业执照 metaWords=65 vs Word真值≈175）。
+                            // 用 metaWords "兜底"只会让结果更差（从 120 降到 65）。
+                            // VML 双写问题已由 OoXmlEngine 的 VML 剥离 + 补充扫描解决，
+                            // 不再需要安全网。
+                            val outWords = rawWords
+                            val outFe = rawFe
+                            val outNc = rawNc
+                            val outChars = rawChars
                             val outPages = if (res.metaPages > 0) res.metaPages else res.pages
                             val outReason = if (res.pagesReason.isNotBlank()) res.pagesReason else null
-                            Log.d("WordCount", "docx: 现算=($rawWords,$rawFe,$rawNc,$rawChars) metaWords=${res.metaWords} 输出=($outWords,$outFe,$outNc,$outChars) pages=$outPages")
+                            Log.d("WordCount", "docx: 现算=($rawWords,$rawFe,$rawNc,$rawChars) metaWords=${res.metaWords}(不使用) 输出=($outWords,$outFe,$outNc,$outChars) pages=$outPages")
                             // v1.3.3: 隐藏工作表单独统计（默认不计入合计，UI 勾选后才并入）
                             val hiddenStats = res.hiddenSheets.map { (n, t) ->
                                 val s = countTextKotlin(t)
@@ -1751,7 +1740,9 @@ private fun addFiles(
                             // ★ 文本太少 → 尝试 OCR
                             // v1.3.81: 对"glyph-ID编码垃圾"(ktLooksLikeCidGarbage)使用PRINT模式+2x分辨率渲染
                             // 提升中文 PDF 的 OCR 识别率（普通 DISPLAY 模式对文字偏小的 PDF 渲染质量不足）
-                            val ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = looksLikeGarbage)
+                            // v1.3.93: isFailedChinesePdf（Word 导出中文 PDF，CID 解码失败）也用 PRINT 高分辨率
+                            val ocrForPrintMode = looksLikeGarbage || isFailedChinesePdf
+                            val ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = ocrForPrintMode)
 
                             if (ocrRes != null) {
                                 // OCR 成功
