@@ -92,7 +92,7 @@ object PdfExtractor {
             val reliable = !source.fromRawScan && isTextReliable(source.text, bytes)
             // v1.3.95：补充 AcroForm 表单字段值（表单标签/选项/填写内容需翻译，用户清单要求计入）。
             // 仅当 PDF 确实含 /AcroForm 时才扫描，避免对无表单 PDF 引入字典噪声。
-            val formText = if (bytes.indexOf("/AcroForm".toByteArray(Charsets.ISO_8859_1)) >= 0) {
+            val formText = if (String(bytes, Charsets.ISO_8859_1).indexOf("/AcroForm") >= 0) {
                 extractAcroFormText(bytes)
             } else ""
             val finalText = (source.text.ifBlank { "" } + if (formText.isNotBlank()) "\n$formText" else "").trimEnd()

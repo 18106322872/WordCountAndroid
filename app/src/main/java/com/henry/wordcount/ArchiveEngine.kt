@@ -1,6 +1,7 @@
 package com.henry.wordcount
 
 import android.content.Context
+import android.util.Log
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
 import org.apache.commons.compress.archivers.sevenz.SevenZFile
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream

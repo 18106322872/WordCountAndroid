@@ -90,16 +90,12 @@ object OldOfficeEngine {
 
             // v1.3.95：补齐 .doc 此前漏统计的批注（comments）文本。
             // 页眉/页脚/脚注已被 WordExtractor.text() 默认包含；文本框文字同样被抽到。
-            // 批注需单独遍历 getCommentsRange()，全部 try-catch 包裹，任何异常都不影响主文本。
+            // 批注通过 HWPFDocument.getCommentsRange() 取到批注区的 Range，再取文本即可
+            // （POI 5.2.5 无 getComments()/Comments 类，只有 getCommentsRange()->Range）。
+            // 整段 try-catch 包裹，任何异常都不影响主文本统计。
             try {
-                val comments = doc.comments
-                if (comments != null) {
-                    for (i in 0 until comments.getNumberOfComments()) {
-                        val c = comments.getComment(i)
-                        val ct = c?.text?.trim()
-                        if (!ct.isNullOrBlank()) text.append('\n').append(ct)
-                    }
-                }
+                val commentsText = doc.getCommentsRange()?.text()
+                if (!commentsText.isNullOrBlank()) text.append('\n').append(commentsText.trim())
             } catch (_: Throwable) { }
 
             val finalText = text.toString()
