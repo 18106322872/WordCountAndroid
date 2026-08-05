@@ -1923,60 +1923,13 @@ private fun addFiles(
                     }
                 }
 
-                // DWG(CAD)：Kotlin 侧 Runtime.exec() 调 dwg2dxf 转 DXF，再由 Python 精确统计（v1.5.2 修复 Chaquopy subprocess bug）
-                //   若 APK 未打包 dwg2dxf（CI 交叉编译失败）→ 回退提示"无法统计.dwg文件"
+                // DWG(CAD)：v1.5.4 回退——Android SELinux 禁止从应用私有目录执行原生二进制，
+                //   dwg2dxf 无法在手机上运行（v1.5.1~1.5.3 三次尝试均失败）。
+                //   直接提示不支持，不再尝试转换。
                 dwgFiles.forEachIndexed { i, cf ->
                     val f = cf.file
                     val dName = cf.displayName
-                    try {
-                        val converter = DwgConverter.ensureBinary(context)
-                        if (converter == null) {
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件"))
-                            return@forEachIndexed
-                        }
-                        // ★ v1.5.2: 在 Kotlin 侧执行转换（绕开 Chaquopy subprocess 的 AssetFinder/scripts bug）
-                        val dxfPath = DwgConverter.convert(f.absolutePath, converter)
-                        if (dxfPath == null) {
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（dwg2dxf 转换失败）"))
-                            return@forEachIndexed
-                        }
-                        // 把转换好的 DXF 路径传给 Python 做纯文本提取+统计（不再传 converter）
-                        val pyResults = PythonEngine.countFiles(context, listOf(dxfPath))
-                        @Suppress("UNCHECKED_CAST")
-                        val pyList = pyResults as? List<Map<String, Any?>>
-                        if (!pyList.isNullOrEmpty()) {
-                            val py0 = pyList[0]
-                            if (py0["ok"] == true) {
-                                val pyData = py0["result"] as? Map<String, Any?>
-                                if (pyData != null) {
-                                    val pyS = pyData["stats"] as? Map<String, Any?>
-                                    val words = (pyS?.get("words") as? Number)?.toInt() ?: 0
-                                    val fe = (pyS?.get("fe") as? Number)?.toInt() ?: 0
-                                    val nc = (pyS?.get("nc") as? Number)?.toInt() ?: 0
-                                    val chars = (pyS?.get("chars") as? Number)?.toInt() ?: 0
-                                    val pages = (pyData["pages"] as? Number)?.toInt() ?: 1
-                                    val resMap = mapOf(
-                                        "name" to dName, "ext" to ".dwg",
-                                        "stats" to mapOf("words" to words, "fe" to fe, "nc" to nc, "chars" to chars),
-                                        "meta" to emptyMap<String, Any?>(),
-                                        "pages" to pages
-                                    )
-                                    val fr = toFileResult(resMap, f.absolutePath)
-                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-                                } else {
-                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（dwg2dxf 未返回结果）"))
-                                }
-                            } else {
-                                val err = py0["error"]?.toString() ?: "dwg2dxf 转换失败"
-                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（${err}）"))
-                            }
-                        } else {
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件"))
-                        }
-                    } catch (e: Throwable) {
-                        Log.w("WordCount", "DWG 解析失败 ${f.name}: ${e.message}")
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（${e.message}）"))
-                    }
+                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件"))
                 }
 
                 // TXT 类：纯 Kotlin 处理
