@@ -206,9 +206,9 @@ object Pairing {
 
     private val DEC_RE = Regex("""^\s*(\d+(?:\.\d+)*)""")
     private val CHAP_CN_RE = Regex("""第\s*([一二三四五六七八九十百零〇两]+)\s*章""")
-    private val CHAP_EN_RE = Regex("""Chapter\s+([IVXLCDM]+|\d+)""", RegexOption.IGNORECASE)
+    private val CHAP_EN_RE = Regex("""Chapter\s+([IVXLCDM]+|\d+)""", RegexOption.IGNORE_CASE)
     private val SEC_CN_RE = Regex("""^\s*(?:[（(]\s*([一二三四五六七八九十百零〇两]+)\s*[)）]\s*[、.．]?|([一二三四五六七八九十百零〇两]+)\s*[、.．])""")
-    private val SEC_EN_RE = Regex("""^\s*([IVXLCDM]+)\s*\.""", RegexOption.IGNORECASE)
+    private val SEC_EN_RE = Regex("""^\s*([IVXLCDM]+)\s*\.""", RegexOption.IGNORE_CASE)
     private val CIRCLED_RE = Regex("""^\s*([①-⑳])""")
 
     /** 中文数字 → 阿拉伯数字（支持 一~九十九、百，如 二十一→21）。 */
