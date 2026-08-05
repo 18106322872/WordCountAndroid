@@ -1923,28 +1923,52 @@ private fun addFiles(
                     }
                 }
 
-                // DWG(CAD)：二进制扫描提取文字 -> Kotlin 统计（不再经过 Python）
+                // DWG(CAD)：手机端内嵌 dwg2dxf 自动转 DXF 后由 Python 精确统计（v1.5.1 Path B）
+                //   若 APK 未打包 dwg2dxf（CI 交叉编译失败）→ 回退提示"无法统计.dwg文件"
                 dwgFiles.forEachIndexed { i, cf ->
                     val f = cf.file
                     val dName = cf.displayName
                     try {
-                        val text = DwgEngine.extractText(f)
-                        if (text.isBlank()) {
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "DWG 文件未提取到文字（可能为纯图形/复杂编码），建议导出为 DXF 后统计"))
+                        val converter = DwgConverter.ensureBinary(context)
+                        if (converter == null) {
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件"))
+                            return@forEachIndexed
+                        }
+                        val pyResults = PythonEngine.countFiles(context, listOf(f.absolutePath), converter)
+                        @Suppress("UNCHECKED_CAST")
+                        val pyList = pyResults as? List<Map<String, Any?>>
+                        if (!pyList.isNullOrEmpty()) {
+                            val py0 = pyList[0]
+                            if (py0["ok"] == true) {
+                                val pyData = py0["result"] as? Map<String, Any?>
+                                if (pyData != null) {
+                                    val pyS = pyData["stats"] as? Map<String, Any?>
+                                    val words = (pyS?.get("words") as? Number)?.toInt() ?: 0
+                                    val fe = (pyS?.get("fe") as? Number)?.toInt() ?: 0
+                                    val nc = (pyS?.get("nc") as? Number)?.toInt() ?: 0
+                                    val chars = (pyS?.get("chars") as? Number)?.toInt() ?: 0
+                                    val pages = (pyData["pages"] as? Number)?.toInt() ?: 1
+                                    val resMap = mapOf(
+                                        "name" to dName, "ext" to ".dwg",
+                                        "stats" to mapOf("words" to words, "fe" to fe, "nc" to nc, "chars" to chars),
+                                        "meta" to emptyMap<String, Any?>(),
+                                        "pages" to pages
+                                    )
+                                    val fr = toFileResult(resMap, f.absolutePath)
+                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                                } else {
+                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（dwg2dxf 未返回结果）"))
+                                }
+                            } else {
+                                val err = py0["error"]?.toString() ?: "dwg2dxf 转换失败"
+                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（${err}）"))
+                            }
                         } else {
-                            val stats = countTextKotlin(text)
-                            val resMap = mapOf(
-                                "name" to dName, "ext" to ".dwg",
-                                "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
-                                "meta" to emptyMap<String, Any?>(),
-                                "pages" to 1
-                            )
-                            val fr = toFileResult(resMap, f.absolutePath)
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件"))
                         }
                     } catch (e: Throwable) {
                         Log.w("WordCount", "DWG 解析失败 ${f.name}: ${e.message}")
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "DWG 解析失败（${e.message}）"))
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（${e.message}）"))
                     }
                 }
 

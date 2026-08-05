@@ -3511,11 +3511,12 @@ def extract_text_from_dxf(dxf_path, converter=None):
 
 
 
-    import ezdxf
-
-
-
-    from ezdxf import DXFStructureError
+    # v1.5.1: Android 未安装 ezdxf 时直接放弃而非崩溃
+    try:
+        import ezdxf
+        from ezdxf import DXFStructureError
+    except Exception:
+        return ""
 
 
 
@@ -6167,15 +6168,12 @@ def extract_cad(path, out_dir, converter, base):
 
 
 
-    if path.lower().endswith(".dwg"):
-
-
-
-        raise RuntimeError("移动端不支持 .dwg（需 dwg2dxf 转换器，Android 无此二进制；请用 .dxf）")
-
-
-
     dxf_path = path
+    if path.lower().endswith(".dwg"):
+        if not converter:
+            raise RuntimeError("移动端暂不支持 .dwg（缺少 dwg2dxf 转换器；请用 .dxf）")
+        dxf_out = os.path.join(out_dir, os.path.splitext(os.path.basename(path))[0] + ".dxf")
+        dxf_path = dwg_to_dxf(path, dxf_out, converter)
 
 
 
@@ -9759,7 +9757,8 @@ def count_file(path, sheet_filter="all", with_notes=False, converter=None):
 
 
 
-        raise RuntimeError("移动端不支持 .dwg（需 dwg2dxf；请用 .dxf）")
+        if not (converter and os.path.exists(converter)):
+            raise RuntimeError("移动端暂不支持 .dwg（未找到 dwg2dxf 转换器；请将 .dwg 导出为 .dxf 后统计）")
 
 
 
@@ -9871,7 +9870,7 @@ def _to_py_list(obj):
     return obj
 
 
-def count_files(paths, sheet_filter="all", with_notes=False):
+def count_files(paths, sheet_filter="all", with_notes=False, converter=None):
 
 
 
@@ -9894,7 +9893,7 @@ def count_files(paths, sheet_filter="all", with_notes=False):
 
 
 
-            out.append({"ok": True, "result": count_file(p, sheet_filter, with_notes),
+            out.append({"ok": True, "result": count_file(p, sheet_filter, with_notes, converter),
 
 
 
@@ -9911,7 +9910,7 @@ def count_files(paths, sheet_filter="all", with_notes=False):
     return out
 
 
-def count_files_json(paths, sheet_filter="all", with_notes=False):
+def count_files_json(paths, sheet_filter="all", with_notes=False, converter=None):
     """v1.3.61: 与 count_files 相同但在 Python 端完成 json 序列化。
 
     解决 Chaquopy 互操作问题：
@@ -9921,7 +9920,7 @@ def count_files_json(paths, sheet_filter="all", with_notes=False):
     """
     import json
     try:
-        result = count_files(paths, sheet_filter, with_notes)
+        result = count_files(paths, sheet_filter, with_notes, converter)
         return json.dumps(result, default=str, ensure_ascii=False)
     except Exception as e:
         import traceback

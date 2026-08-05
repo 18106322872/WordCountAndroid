@@ -126,15 +126,23 @@ object PythonEngine {
         return obj
     }
 
-    fun countFiles(context: Context, paths: List<String>): Any {
+    fun countFiles(context: Context, paths: List<String>): Any =
+        countFiles(context, paths, null)
+
+    /**
+     * v1.5.1(WordCount): 支持传入 dwg2dxf 转换器路径，使手机端能自动把 .dwg 转 DXF 后精确统计。
+     * converter 为 null 时回退到 Python 默认（不传 converter）。
+     */
+    fun countFiles(context: Context, paths: List<String>, converter: String?): Any {
         return withRetry(context) {
             val py = Python.getInstance()
             val mod = py.getModule("wordcount")
-            // v1.3.61: 改用 count_files_json（Python 端 json.dumps+default=str）
-            //   v1.3.60 在 Kotlin 端传 default=str 失败：
-            //   callAttr 把 Kotlin Map 当位置参数 → TypeError（default 是 keyword-only）
-            //   异常被吞掉 → pyOk 永远 false → PDF 永远用 Kotlin 的 695 字符
-            val s = mod.callAttr("count_files_json", paths).toString()
+            val s = if (converter != null) {
+                // count_files_json(paths, sheet_filter="all", with_notes=False, converter)
+                mod.callAttr("count_files_json", paths, "all", false, converter).toString()
+            } else {
+                mod.callAttr("count_files_json", paths).toString()
+            }
             Log.d("WordCount", "PY json len=${s.length} head=${s.take(300)}")
             val native = toNative(JSONArray(s))
             native ?: emptyList<Any?>()
