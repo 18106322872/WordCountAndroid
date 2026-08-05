@@ -85,10 +85,11 @@ jobs:
           export ac_cv_c_bigendian=no
           # 静态链接 libredwg，使 dwg2dxf 自包含（仅依赖 Android bionic libc）
           # --disable-werror：LibreDWG 默认 -Werror，交叉编译会有无害的 format 警告，须关掉否则编译失败
+          # --disable-json：release tarball 不含 jsmn 子模块，而 dwg2dxf 不需要 JSON，关闭避免缺 jsmn.h
           ./configure --host=aarch64-linux-android --prefix=/tmp/ldinst \
             --disable-bindings --disable-python --disable-perl --disable-docs \
-            --enable-static --disable-shared --disable-werror || \
-          ./configure --host=aarch64-linux-android --prefix=/tmp/ldinst --disable-docs --enable-static --disable-shared --disable-werror
+            --disable-json --enable-static --disable-shared --disable-werror || \
+          ./configure --host=aarch64-linux-android --prefix=/tmp/ldinst --disable-docs --disable-json --enable-static --disable-shared --disable-werror
           # 构建全部目标（LibreDWG 顶层无 dwg2dxf 单目标，须整体 make）
           make -j"$(nproc)"
           make install-exec
