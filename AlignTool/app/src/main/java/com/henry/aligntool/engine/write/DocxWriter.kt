@@ -2,6 +2,8 @@ package com.henry.aligntool.engine.write
 
 import com.henry.aligntool.model.AlignOptions
 import com.henry.aligntool.engine.Anchor
+import kotlin.math.ceil
+import kotlin.math.max
 import com.henry.aligntool.engine.Block
 import com.henry.aligntool.engine.OoxmlUtil
 import com.henry.aligntool.engine.Font
