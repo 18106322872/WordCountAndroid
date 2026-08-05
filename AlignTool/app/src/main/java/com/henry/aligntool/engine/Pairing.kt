@@ -82,10 +82,10 @@ object Pairing {
         val srcDec = Array(src.size) { numKey(src[it].text) }
         val tgtDec = Array(tgt.size) { numKey(tgt[it].text) }
         val decAnchors = mutableListOf<Pair<Int, Int>>()
-        var ti = 0
+        var di = 0
         for (i in src.indices) {
             if (usedSrc[i] || srcDec[i] == null) continue
-            var j = ti
+            var j = di
             while (j < tgt.size) {
                 if (!usedTgt[j] && tgtDec[j] == srcDec[i]) break
                 j++
@@ -94,7 +94,7 @@ object Pairing {
                 decAnchors.add(i to j)
                 usedSrc[i] = true
                 usedTgt[j] = true
-                ti = j + 1
+                di = j + 1
             }
         }
         decAnchors.sortBy { it.first }
