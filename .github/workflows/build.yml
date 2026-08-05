@@ -51,10 +51,12 @@ jobs:
           VER=$(grep versionName app/build.gradle | head -1 | grep -oP "[\d.]+" || echo "1.0.9")
           echo "VER=$VER" >> "$GITHUB_OUTPUT"
           echo "版本号: $VER"
-      # v1.5.1(WordCount): 手机端内嵌 dwg2dxf —— 用 Android NDK 交叉编译 arm64 静态二进制，
-      # 打包进 app/src/main/assets/dwg2dxf。步骤失败（编译不通）也不阻断发版：
-      # 此时 APK 不含该二进制，App 对 .dwg 回退显示「无法统计.dwg文件」。
-      - name: Cross-compile dwg2dxf (arm64, best-effort)
+      # v1.5.5(WordCount): 改用 JNI 加载 libdwg2dxf.so（替代 v1.5.1~1.5.3 的 exec 二进制方案）。
+      # Android SELinux 禁止从 app 私有目录 exec 原生二进制，但允许从 APK lib/ 加载 .so（JNI）。
+      # 步骤：交叉编译 LibreDWG 静态库 → 编译 JNI wrapper(dwg2dxf_jni.c) 链接成 libdwg2dxf.so → 放 jniLibs。
+      # 编译失败时 continue-on-error 不阻断发版，但后续「Verify」步骤会检查 .so 是否真打进 APK，
+      # 若缺失则让构建失败（避免发布无 DWG 功能的残包）。
+      - name: Build libdwg2dxf.so (arm64, best-effort)
         id: dwg2dxf
         continue-on-error: true
         run: |
@@ -85,22 +87,28 @@ jobs:
             --enable-static --disable-shared --disable-werror || \
           ./configure --host=aarch64-linux-android --prefix=/tmp/ldinst --disable-docs --enable-static --disable-shared --disable-werror
           make -j"$(nproc)"
-          make install-exec
-          BIN=/tmp/ldinst/bin/dwg2dxf
-          if [ ! -x "$BIN" ]; then
-            BIN=$(find . -path '*/.libs/dwg2dxf' -type f | head -1)
+          # 定位静态库 libdwg.a（autotools+libtool 通常在 src/.libs 或顶层 .libs）
+          LIBDWG=$(find . -name "libdwg.a" | head -1)
+          echo "LIBDWG=$LIBDWG"
+          if [ -z "$LIBDWG" ]; then
+            echo "libdwg.a 未生成"
+            exit 1
           fi
-          if [ -n "$BIN" ] && [ -x "$BIN" ]; then
-            "$STRIP" "$BIN" || true
-            ASSETS="${GITHUB_WORKSPACE:-.}/app/src/main/assets"
-            mkdir -p "$ASSETS"
-            cp "$BIN" "$ASSETS/dwg2dxf"
-            chmod 755 "$ASSETS/dwg2dxf"
-            ls -lh "$ASSETS/dwg2dxf"
-            file "$ASSETS/dwg2dxf" || true
-            echo "DWG2DXF_OK"
+          # 编译 JNI wrapper → libdwg2dxf.so（链接 LibreDWG 静态库）
+          mkdir -p "${GITHUB_WORKSPACE:-.}/app/src/main/jniLibs/arm64-v8a"
+          "$CC" --shared -fPIC \
+            -I/tmp/libredwg/src -I/tmp/libredwg/include -I/tmp/libredwg \
+            "${GITHUB_WORKSPACE:-.}/app/src/main/cpp/dwg2dxf_jni.c" \
+            "$LIBDWG" \
+            -o "${GITHUB_WORKSPACE:-.}/app/src/main/jniLibs/arm64-v8a/libdwg2dxf.so"
+          SO="${GITHUB_WORKSPACE:-.}/app/src/main/jniLibs/arm64-v8a/libdwg2dxf.so"
+          if [ -f "$SO" ]; then
+            "$STRIP" "$SO" || true
+            ls -lh "$SO"
+            file "$SO" || true
+            echo "DWG2DXF_SO_OK"
           else
-            echo "dwg2dxf 未生成，跳过打包"
+            echo "libdwg2dxf.so 未生成"
             exit 1
           fi
 
@@ -146,6 +154,21 @@ jobs:
               print("comment posted:", r.status)
           except Exception as e:
               print("comment post failed:", e)
+          PY
+
+      # v1.5.5: 验证 libdwg2dxf.so 确实打进 APK（防止像 v1.5.2 那样静默缺二进制）
+      - name: Verify libdwg2dxf.so in APK
+        run: |
+          python3 - <<'PY'
+          import zipfile, sys
+          apk = "app/build/outputs/apk/debug/app-debug.apk"
+          with zipfile.ZipFile(apk) as z:
+              names = z.namelist()
+          if any("libdwg2dxf.so" in n for n in names):
+              print("OK: libdwg2dxf.so 已打包进 APK")
+          else:
+              print("FAIL: libdwg2dxf.so 未打包进 APK，DWG 功能将不可用")
+              sys.exit(1)
           PY
 
       - name: Rename APK（WordCount-版本号格式）
