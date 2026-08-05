@@ -51,6 +51,59 @@ jobs:
           VER=$(grep versionName app/build.gradle | head -1 | grep -oP "[\d.]+" || echo "1.0.9")
           echo "VER=$VER" >> "$GITHUB_OUTPUT"
           echo "版本号: $VER"
+      # v1.5.1(WordCount): 手机端内嵌 dwg2dxf —— 用 Android NDK 交叉编译 arm64 静态二进制，
+      # 打包进 app/src/main/assets/dwg2dxf。步骤失败（编译不通）也不阻断发版：
+      # 此时 APK 不含该二进制，App 对 .dwg 回退显示「无法统计.dwg文件」。
+      - name: Cross-compile dwg2dxf (arm64, best-effort)
+        id: dwg2dxf
+        continue-on-error: true
+        run: |
+          set -x
+          yes | sdkmanager "ndk;25.2.9519653" || true
+          NDK="$ANDROID_HOME/ndk/25.2.9519653"
+          TOOL="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          API=21
+          export CC="$TOOL/bin/aarch64-linux-android$API-clang"
+          export CXX="$TOOL/bin/aarch64-linux-android$API-clang++"
+          export AR="$TOOL/bin/llvm-ar"
+          export RANLIB="$TOOL/bin/llvm-ranlib"
+          export STRIP="$TOOL/bin/llvm-strip"
+          export PATH="$TOOL/bin:$PATH"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq autoconf automake libtool texinfo pkg-config
+          cd /tmp
+          TAG=$(curl -fsSL https://api.github.com/repos/LibreDWG/libredwg/releases/latest | python3 -c "import sys,json;print(json.load(sys.stdin)['tag_name'])")
+          echo "LibreDWG tag=$TAG"
+          git clone --depth 1 --branch "$TAG" --recursive https://github.com/LibreDWG/libredwg.git libredwg
+          cd libredwg
+          autoreconf -fiv || ./autogen.sh || true
+          export ac_cv_func_malloc_0_nonnull=yes
+          export ac_cv_func_realloc_0_nonnull=yes
+          export ac_cv_c_bigendian=no
+          ./configure --host=aarch64-linux-android --prefix=/tmp/ldinst \
+            --disable-bindings --disable-python --disable-perl --disable-docs \
+            --enable-static --disable-shared --disable-werror || \
+          ./configure --host=aarch64-linux-android --prefix=/tmp/ldinst --disable-docs --enable-static --disable-shared --disable-werror
+          make -j"$(nproc)"
+          make install-exec
+          BIN=/tmp/ldinst/bin/dwg2dxf
+          if [ ! -x "$BIN" ]; then
+            BIN=$(find . -path '*/.libs/dwg2dxf' -type f | head -1)
+          fi
+          if [ -n "$BIN" ] && [ -x "$BIN" ]; then
+            "$STRIP" "$BIN" || true
+            ASSETS="${GITHUB_WORKSPACE:-.}/app/src/main/assets"
+            mkdir -p "$ASSETS"
+            cp "$BIN" "$ASSETS/dwg2dxf"
+            chmod 755 "$ASSETS/dwg2dxf"
+            ls -lh "$ASSETS/dwg2dxf"
+            file "$ASSETS/dwg2dxf" || true
+            echo "DWG2DXF_OK"
+          else
+            echo "dwg2dxf 未生成，跳过打包"
+            exit 1
+          fi
+
 
       - name: Clean & Build debug APK（强制 clean + --no-build-cache，确保打包的是最新 Python/Kotlin 源码）
         env:
