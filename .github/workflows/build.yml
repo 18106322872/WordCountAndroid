@@ -75,9 +75,9 @@ jobs:
           cd /tmp
           TAG=$(curl -fsSL https://api.github.com/repos/LibreDWG/libredwg/releases/latest | python3 -c "import sys,json;print(json.load(sys.stdin)['tag_name'])")
           echo "LibreDWG tag=$TAG"
-          curl -fsSL "https://github.com/LibreDWG/libredwg/archive/refs/tags/$TAG.tar.gz" -o ld.tgz
-          tar xzf ld.tgz
-          cd libredwg-*
+          # 用 git clone --recursive 取源码+子模块(jsmn)，release tarball 不含 jsmn 会导致 JSON 链接失败
+          git clone --depth 1 --branch "$TAG" --recursive https://github.com/LibreDWG/libredwg.git libredwg
+          cd libredwg
           autoreconf -fiv || ./autogen.sh || true
           # 绕过交叉编译的运行时探测（configure 无法在构建机上执行 arm 二进制）
           export ac_cv_func_malloc_0_nonnull=yes
@@ -85,11 +85,10 @@ jobs:
           export ac_cv_c_bigendian=no
           # 静态链接 libredwg，使 dwg2dxf 自包含（仅依赖 Android bionic libc）
           # --disable-werror：LibreDWG 默认 -Werror，交叉编译会有无害的 format 警告，须关掉否则编译失败
-          # --disable-json：release tarball 不含 jsmn 子模块，而 dwg2dxf 不需要 JSON，关闭避免缺 jsmn.h
           ./configure --host=aarch64-linux-android --prefix=/tmp/ldinst \
             --disable-bindings --disable-python --disable-perl --disable-docs \
-            --disable-json --enable-static --disable-shared --disable-werror || \
-          ./configure --host=aarch64-linux-android --prefix=/tmp/ldinst --disable-docs --disable-json --enable-static --disable-shared --disable-werror
+            --enable-static --disable-shared --disable-werror || \
+          ./configure --host=aarch64-linux-android --prefix=/tmp/ldinst --disable-docs --enable-static --disable-shared --disable-werror
           # 构建全部目标（LibreDWG 顶层无 dwg2dxf 单目标，须整体 make）
           make -j"$(nproc)"
           make install-exec
