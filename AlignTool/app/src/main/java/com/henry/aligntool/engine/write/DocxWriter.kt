@@ -48,9 +48,32 @@ object DocxWriter {
     }
 
     private fun insertPara(docDom: XElement, anchorP: XElement, other: Block, options: AlignOptions) {
+        // 锚点段落若含浮动文本框（封面等），把译文逐行插入文本框内部（v1.0.13 修复：
+        // 译文进原文文本框、且按行分段，不再作为框外一坨平铺段落）。
+        val box = anchorP.findFirst("txbxContent")
+        if (box != null) {
+            insertIntoTextbox(box, other, options)
+            return
+        }
         val frag = buildPara(other.font, other.text, options.markSource, other.align)
         if (options.otherFirst) anchorP.parent?.insertBefore(anchorP, frag)
         else anchorP.parent?.insertAfter(anchorP, frag)
+    }
+
+    private fun insertIntoTextbox(box: XElement, other: Block, options: AlignOptions) {
+        // 译文按换行拆成多段（collectText 已在段落边界补 \n），过滤空行，逐行插入文本框。
+        val lines = other.text.split('\n').map { it.trimEnd() }.filter { it.isNotBlank() }
+        if (lines.isEmpty()) return
+        // 文本框内容通常居中（封面），无对齐信息时默认居中；有则沿用原文对齐。
+        val align = other.align ?: "center"
+        val frags = lines.map { buildPara(other.font, it, MarkMode.NONE, align) }
+        if (options.otherFirst) {
+            val first = box.children.firstOrNull()
+            if (first != null) for (f in frags.asReversed()) box.insertBefore(first, f)
+            else for (f in frags) box.appendChild(f)
+        } else {
+            for (f in frags) box.appendChild(f)
+        }
     }
 
     private fun insertIntoCell(tc: XElement, other: Block, options: AlignOptions) {
@@ -109,6 +132,7 @@ object DocxWriter {
 
     private fun escText(s: String): String = s
         .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        .replace("\n", "<w:br/>")
 
     private fun escAttr(s: String): String = escText(s).replace("\"", "&quot;")
 }

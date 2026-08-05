@@ -21,12 +21,23 @@ object OoxmlUtil {
      */
     fun collectText(el: XElement, leaf: String): String {
         val sb = StringBuilder()
+        var started = false
         fun walk(n: XNode) {
             if (n !is XElement) return
             when (n.localName) {
-                leaf -> for (c in n.children) if (c is XText) sb.append(decodeXml(c.text))
-                "tab" -> sb.append('\t')
-                "br", "cr" -> sb.append('\n')
+                leaf -> {
+                    for (c in n.children) if (c is XText) sb.append(decodeXml(c.text))
+                    started = true
+                }
+                "tab" -> { sb.append('\t'); started = true }
+                "br", "cr" -> { sb.append('\n'); started = true }
+                // 文本框/表格单元格内多为「多段落」，段落边界补换行，否则译文会被抽成
+                // 一行连在一起（v1.0.13 修复封面/单元格分段）。
+                "p" -> {
+                    if (started) sb.append('\n')
+                    started = true
+                    for (c in n.children) walk(c)
+                }
                 "AlternateContent" -> {
                     // 现代文本框/图形放在 <mc:Choice>，旧版 VML 备份在 <mc:Fallback>，
                     // 二者各含一份相同文字；只取 <mc:Choice> 分支，避免封面等文字被抽成两遍（v1.0.12 修复）。
