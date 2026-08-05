@@ -67,13 +67,84 @@ object DocxWriter {
         if (lines.isEmpty()) return
         // 文本框内容通常居中（封面），无对齐信息时默认居中；有则沿用原文对齐。
         val align = other.align ?: "center"
-        val frags = lines.map { buildPara(other.font, it, MarkMode.NONE, align) }
+        // v1.0.15：文本框尺寸固定、译文常比原文长 → 估算统一字号，保证原文+译文整体不溢出框高
+        // （只缩小、绝不放大；框不增大 → 不互相覆盖、不延伸到下一页）。
+        val (wPt, hPt) = boxExtentPoints(box)
+        val origText = OoxmlUtil.collectText(box, "t")
+        val baseSz = max(existingMaxSz(box), other.font?.sizePt ?: 18.0)
+        val totalChars = origText.length + other.text.length
+        val fitSz = fitFontSize(totalChars, wPt, hPt, baseSz)
+        val font = if (fitSz < baseSz - 0.01) other.font?.copy(sizePt = fitSz) else other.font
+        val frags = lines.map { buildPara(font, it, MarkMode.NONE, align, tight = true) }
         if (options.otherFirst) {
             val first = box.children.firstOrNull()
             if (first != null) for (f in frags.asReversed()) box.insertBefore(first, f)
             else for (f in frags) box.appendChild(f)
         } else {
             for (f in frags) box.appendChild(f)
+        }
+        // 若需要缩小，则把框内全部 run（原文+译文）统一设为适配字号，确保无溢出。
+        if (fitSz < baseSz - 0.01) setRunSizes(box, (fitSz * 2).toInt())
+    }
+
+    /** 从文本框向上找 <wp:extent> 读尺寸（EMU），返回 (宽pt, 高pt)；找不到返回 0。 */
+    private fun boxExtentPoints(box: XElement): Pair<Double, Double> {
+        var e: XElement? = box.parent
+        while (e != null) {
+            val ext = e.findFirst("extent")
+            if (ext != null) {
+                val cx = ext.ownAttr("cx")?.toDoubleOrNull()
+                val cy = ext.ownAttr("cy")?.toDoubleOrNull()
+                if (cx != null && cy != null) return Pair(cx / 12700.0, cy / 12700.0)
+            }
+            e = e.parent
+        }
+        return Pair(0.0, 0.0)
+    }
+
+    /** 文本框内现有 run 的最大字号（半磅值 /2）；无显式 sz 时回退 18。 */
+    private fun existingMaxSz(box: XElement): Double {
+        var m = 0.0
+        for (r in box.find("r")) {
+            val sz = r.findFirst("rPr")?.findFirst("sz")?.ownAttr("val")?.toDoubleOrNull()
+            if (sz != null && sz / 2 > m) m = sz / 2
+        }
+        return if (m > 0) m else 18.0
+    }
+
+    /** 估算在 sz 字号下，totalChars 文字在宽 wPt 文本框内需要的行数（保守：字符宽按 0.6em）。 */
+    private fun estimateLines(totalChars: Int, wPt: Double, sz: Double): Int {
+        val usableW = max(20.0, wPt - 16.0)
+        val cpl = max(1.0, (usableW / (sz * 0.6)).toInt().toDouble())
+        return max(1, -(-totalChars / cpl).toInt())
+    }
+
+    /** 从 baseSz 向下搜索，取能放进框高的最大字号（行高按 1.4 估算留安全余量；下限 6pt）。 */
+    private fun fitFontSize(totalChars: Int, wPt: Double, hPt: Double, baseSz: Double): Double {
+        if (wPt <= 0 || hPt <= 0) return baseSz
+        val usableH = max(8.0, hPt - 12.0)
+        val floor = 6.0
+        var best = floor
+        var sz = baseSz
+        while (sz >= floor - 0.01) {
+            val need = estimateLines(totalChars, wPt, sz) * sz * 1.4
+            if (need <= usableH) { best = sz; break }
+            sz -= 0.5
+        }
+        return best
+    }
+
+    /** 把 scope 内所有 <w:r> 的字号统一设为 halfPt（保留字体名），用于缩字号适配。 */
+    private fun setRunSizes(scope: XElement, halfPt: Int) {
+        for (r in scope.find("r")) {
+            var rpr = r.findFirst("rPr")
+            if (rpr == null) {
+                rpr = XmlDom.parseFragment("<w:rPr xmlns:w=\"$W\"></w:rPr>")
+                r.children.add(0, rpr)
+                rpr.parent = r
+            }
+            rpr.setAttr("sz", W, "w", halfPt.toString())
+            rpr.setAttr("szCs", W, "w", halfPt.toString())
         }
     }
 
@@ -97,10 +168,14 @@ object DocxWriter {
         }
     }
 
-    private fun buildPara(font: Font?, text: String, mark: MarkMode, align: String?): XElement {
+    private fun buildPara(font: Font?, text: String, mark: MarkMode, align: String?, tight: Boolean = false): XElement {
         val rpr = buildRpr(font, mark)
-        // 段落对齐：有则重建 <w:pPr><w:jc/>，保持译文居中/两端对齐等排版（v1.0.11 修复全退回左对齐）
-        val ppr = if (align != null) "<w:pPr><w:jc w:val=\"${escAttr(align)}\"/></w:pPr>" else ""
+        // 段落对齐：有则重建 <w:jc/>（v1.0.11 修复全退回左对齐）；
+        // tight：文本框内译文收紧段间距（before/after=0，单倍行距），避免溢出框。
+        val pprParts = mutableListOf<String>()
+        if (tight) pprParts.add("<w:spacing w:before=\"0\" w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/>")
+        if (align != null) pprParts.add("<w:jc w:val=\"${escAttr(align)}\"/>")
+        val ppr = if (pprParts.isNotEmpty()) "<w:pPr>${pprParts.joinToString("")}</w:pPr>" else ""
         val xml = "<w:p xmlns:w=\"$W\">$ppr<w:r>$rpr<w:t xml:space=\"preserve\">${escText(text)}</w:t></w:r></w:p>"
         return XmlDom.parseFragment(xml)
     }

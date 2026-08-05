@@ -29,10 +29,10 @@ object DocxExtractor {
         for (child in el.children.filterIsInstance<XElement>()) {
             when (child.localName) {
                 "p" -> {
-                    // v1.0.14 修复：封面等 <w:p> 内可含多个 <w:txbxContent>（浮动文本框），
-                    // 每个文本框需独立成 Slot 才能与译文一一对应；否则 collectText 把所有
-                    // 文本框文字收成一坨 → 写入时全塞进同一个 box。
-                    val txbxes = child.find("txbxContent")
+                    // v1.0.14：封面 <w:p> 内可含多个 <w:txbxContent>，每个独立成 Slot。
+                    // v1.0.15：只取 mc:Choice 分支的文本框；跳过 mc:Fallback（VML 旧文本框，
+                    // 无尺寸且会造成重复插入 → 译文被插两遍、乱）。
+                    val txbxes = child.find("txbxContent").filter { !isUnderFallback(it) }
                     if (txbxes.isNotEmpty()) {
                         for (box in txbxes) {
                             val text = OoxmlUtil.collectText(box, "t")
@@ -54,6 +54,16 @@ object DocxExtractor {
                 else -> walk(child, out) // 文本框(txtbxContent)等嵌套段落仍计入；tbl 已单独处理不会误入
             }
         }
+    }
+
+    /** 判断元素是否位于 <mc:Fallback> 分支内（旧版 VML 文本框，应跳过，避免重复插入）。 */
+    private fun isUnderFallback(el: XElement): Boolean {
+        var e: XElement? = el.parent
+        while (e != null) {
+            if (e.localName == "Fallback") return true
+            e = e.parent
+        }
+        return false
     }
 
     private fun firstRunFont(scope: XElement): Font? {
