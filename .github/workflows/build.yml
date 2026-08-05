@@ -83,12 +83,19 @@ jobs:
           export ac_cv_func_malloc_0_nonnull=yes
           export ac_cv_func_realloc_0_nonnull=yes
           export ac_cv_c_bigendian=no
+          # 静态链接 libredwg，使 dwg2dxf 自包含（仅依赖 Android bionic libc）
           ./configure --host=aarch64-linux-android --prefix=/tmp/ldinst \
-            --disable-bindings --disable-python --disable-perl --disable-docs || \
-          ./configure --host=aarch64-linux-android --prefix=/tmp/ldinst --disable-docs
-          make -j"$(nproc)" dwg2dxf 2>&1 | tail -40
-          BIN=$(find . -name dwg2dxf -type f -executable | head -1)
-          if [ -n "$BIN" ]; then
+            --disable-bindings --disable-python --disable-perl --disable-docs \
+            --enable-static --disable-shared || \
+          ./configure --host=aarch64-linux-android --prefix=/tmp/ldinst --disable-docs --enable-static --disable-shared
+          # 构建全部目标（LibreDWG 顶层无 dwg2dxf 单目标，须整体 make）
+          make -j"$(nproc)"
+          make install-exec
+          BIN=/tmp/ldinst/bin/dwg2dxf
+          if [ ! -x "$BIN" ]; then
+            BIN=$(find . -path '*/.libs/dwg2dxf' -type f | head -1)
+          fi
+          if [ -n "$BIN" ] && [ -x "$BIN" ]; then
             "$STRIP" "$BIN" || true
             ASSETS="${GITHUB_WORKSPACE:-.}/app/src/main/assets"
             mkdir -p "$ASSETS"
@@ -96,6 +103,7 @@ jobs:
             chmod 755 "$ASSETS/dwg2dxf"
             ls -lh "$ASSETS/dwg2dxf"
             file "$ASSETS/dwg2dxf" || true
+            echo "DWG2DXF_OK"
           else
             echo "dwg2dxf 未生成，跳过打包"
             exit 1
