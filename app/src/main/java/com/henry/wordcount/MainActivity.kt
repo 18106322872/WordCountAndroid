@@ -1923,7 +1923,7 @@ private fun addFiles(
                     }
                 }
 
-                // DWG(CAD)：手机端内嵌 dwg2dxf 自动转 DXF 后由 Python 精确统计（v1.5.1 Path B）
+                // DWG(CAD)：Kotlin 侧 Runtime.exec() 调 dwg2dxf 转 DXF，再由 Python 精确统计（v1.5.2 修复 Chaquopy subprocess bug）
                 //   若 APK 未打包 dwg2dxf（CI 交叉编译失败）→ 回退提示"无法统计.dwg文件"
                 dwgFiles.forEachIndexed { i, cf ->
                     val f = cf.file
@@ -1934,7 +1934,14 @@ private fun addFiles(
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件"))
                             return@forEachIndexed
                         }
-                        val pyResults = PythonEngine.countFiles(context, listOf(f.absolutePath), converter)
+                        // ★ v1.5.2: 在 Kotlin 侧执行转换（绕开 Chaquopy subprocess 的 AssetFinder/scripts bug）
+                        val dxfPath = DwgConverter.convert(f.absolutePath, converter)
+                        if (dxfPath == null) {
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（dwg2dxf 转换失败）"))
+                            return@forEachIndexed
+                        }
+                        // 把转换好的 DXF 路径传给 Python 做纯文本提取+统计（不再传 converter）
+                        val pyResults = PythonEngine.countFiles(context, listOf(dxfPath))
                         @Suppress("UNCHECKED_CAST")
                         val pyList = pyResults as? List<Map<String, Any?>>
                         if (!pyList.isNullOrEmpty()) {

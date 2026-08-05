@@ -9,13 +9,13 @@ android {
     compileSdk 34
 
     defaultConfig {
-        // v1.5.1(WordCount): 改用独立 applicationId，使新 App 能与旧版「字数统计」(com.henry.wordcount) 共存安装
+        // v1.5.2(WordCount): 修复 DWG 统计 Chaquopy subprocess AssetFinder/scripts bug——改用 Kotlin Runtime.exec() 执行 dwg2dxf
         applicationId 'com.henry.wordcount2'
         // minSdk 26：Apache POI 5.x / log4j 用到 MethodHandle.invoke，D8 要求 Android O(26) 起
         minSdk 26
         targetSdk 34
-        versionCode 151
-        versionName '1.5.1'
+        versionCode 152
+        versionName '1.5.2'
 
         // 只编 arm64-v8a（华为等现代手机），缩小体积、功能零影响
         ndk {
