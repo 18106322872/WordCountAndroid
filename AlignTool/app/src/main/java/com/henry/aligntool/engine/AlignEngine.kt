@@ -65,11 +65,19 @@ object AlignEngine {
         } catch (e: Throwable) {
             return fail("抽取骨架段落失败(文档可能过大或结构异常): ${e.message}")
         }
+        // 抽取译文文档（大文件 DOM 占用大量堆内存；抽完 Slot 后尽快释放）
         val othBytes = ZipUtil.readEntry(other, "word/document.xml")
+        var othDom: XElement? = null  // 显式持有以便事后释放
         val othSlots = if (othBytes != null) try {
-            DocxExtractor.extract(XmlDom.parse(othBytes.inputStream()))
+            othDom = XmlDom.parse(othBytes.inputStream())
+            val slots = DocxExtractor.extract(othDom)
+            // 释放译文 DOM：Slot 已持有所需节点引用，整棵树不再需要
+            othDom = null
+            System.gc()  // 提示回收大块 DOM 内存（写入阶段需要大量堆）
+            slots
         } catch (e: Throwable) {
-            return fail("抽取译文文档失败: ${e.message}")
+            othDom = null
+            return fail("抽取译文文档失败(可能内存不足，建议拆分文档): ${e.message}")
         } else emptyList()
         val (pairs, extras) = try {
             Pairing.blockPairs(skelSlots.map { it.block }, othSlots.map { it.block })
