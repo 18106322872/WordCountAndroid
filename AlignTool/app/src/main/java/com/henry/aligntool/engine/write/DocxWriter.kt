@@ -3,6 +3,7 @@ package com.henry.aligntool.engine.write
 import com.henry.aligntool.model.AlignOptions
 import com.henry.aligntool.engine.Anchor
 import com.henry.aligntool.engine.Block
+import com.henry.aligntool.engine.OoxmlUtil
 import com.henry.aligntool.engine.Font
 import com.henry.aligntool.model.MarkMode
 import com.henry.aligntool.engine.Pairing
@@ -115,8 +116,8 @@ object DocxWriter {
     /** 估算在 sz 字号下，totalChars 文字在宽 wPt 文本框内需要的行数（保守：字符宽按 0.6em）。 */
     private fun estimateLines(totalChars: Int, wPt: Double, sz: Double): Int {
         val usableW = max(20.0, wPt - 16.0)
-        val cpl = max(1.0, (usableW / (sz * 0.6)).toInt().toDouble())
-        return max(1, -(-totalChars / cpl).toInt())
+        val cpl = max(1.0, usableW / (sz * 0.6))
+        return max(1, ceil(totalChars / cpl).toInt())
     }
 
     /** 从 baseSz 向下搜索，取能放进框高的最大字号（行高按 1.4 估算留安全余量；下限 6pt）。 */
