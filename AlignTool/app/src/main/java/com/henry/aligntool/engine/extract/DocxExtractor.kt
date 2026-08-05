@@ -29,8 +29,19 @@ object DocxExtractor {
         for (child in el.children.filterIsInstance<XElement>()) {
             when (child.localName) {
                 "p" -> {
-                    val text = OoxmlUtil.collectText(child, "t")
-                    out.add(Slot(Anchor.DocxPara(child), Block(text, firstRunFont(child), align = jcVal(child))))
+                    // v1.0.14 修复：封面等 <w:p> 内可含多个 <w:txbxContent>（浮动文本框），
+                    // 每个文本框需独立成 Slot 才能与译文一一对应；否则 collectText 把所有
+                    // 文本框文字收成一坨 → 写入时全塞进同一个 box。
+                    val txbxes = child.find("txbxContent")
+                    if (txbxes.isNotEmpty()) {
+                        for (box in txbxes) {
+                            val text = OoxmlUtil.collectText(box, "t")
+                            out.add(Slot(Anchor.DocxTextbox(child, box), Block(text, firstRunFont(box), align = jcVal(child))))
+                        }
+                    } else {
+                        val text = OoxmlUtil.collectText(child, "t")
+                        out.add(Slot(Anchor.DocxPara(child), Block(text, firstRunFont(child), align = jcVal(child))))
+                    }
                 }
                 "tbl" -> {
                     for (tr in child.find("tr")) {

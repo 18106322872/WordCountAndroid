@@ -10,6 +10,9 @@ sealed class Anchor {
     /** docx 段落：持有 <w:p> 元素引用。 */
     data class DocxPara(val p: XElement) : Anchor()
 
+    /** docx 浮动文本框：持有父 <w:p> + 对应 <w:txbxContent>（v1.0.14：一个 <w:p> 可含多个文本框，需逐一对应）。 */
+    data class DocxTextbox(val p: XElement, val box: XElement) : Anchor()
+
     /** docx 表格单元格：持有 <w:tc> 元素引用。 */
     data class DocxCell(val tc: XElement) : Anchor()
 

@@ -40,6 +40,7 @@ object DocxWriter {
             if (other.text.trim() == own.text.trim()) continue // 去重
             when (val a = slot.anchor) {
                 is Anchor.DocxPara -> insertPara(docDom, a.p, other, options)
+                is Anchor.DocxTextbox -> insertIntoTextbox(a.box, other, options)
                 is Anchor.DocxCell -> insertIntoCell(a.tc, other, options)
                 else -> {}
             }
