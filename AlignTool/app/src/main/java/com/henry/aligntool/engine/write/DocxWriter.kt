@@ -35,18 +35,29 @@ object DocxWriter {
         options: AlignOptions,
         extras: List<Pair<String, Block>>
     ) {
+        var errors = 0
         for (i in pairs.indices) {
             val slot = slots.getOrNull(i) ?: break
             val other = pairs[i].second
             val own = pairs[i].first
             if (other.text.isBlank()) continue
             if (other.text.trim() == own.text.trim()) continue // 去重
-            when (val a = slot.anchor) {
-                is Anchor.DocxPara -> insertPara(docDom, a.p, other, options)
-                is Anchor.DocxTextbox -> insertIntoTextbox(a.box, other, options)
-                is Anchor.DocxCell -> insertIntoCell(a.tc, other, options)
-                else -> {}
+            try {
+                when (val a = slot.anchor) {
+                    is Anchor.DocxPara -> insertPara(docDom, a.p, other, options)
+                    is Anchor.DocxTextbox -> insertIntoTextbox(a.box, other, options)
+                    is Anchor.DocxCell -> insertIntoCell(a.tc, other, options)
+                    else -> {}
+                }
+            } catch (e: Throwable) {
+                // v1.0.17：单个 Slot 处理失败不拖垮整个合并（大文档 ~9000 Slot 时，
+                // 某个段落/文本框结构异常不应导致全部丢失）
+                android.util.Log.w("AlignTool", "Slot[$i] 处理跳过: ${e.javaClass.simpleName}: ${e.message}")
+                errors++
             }
+        }
+        if (errors > 0) {
+            android.util.Log.w("AlignTool", "共 $errors 个 Slot 处理失败已跳过，其余正常插入")
         }
         if (extras.isNotEmpty()) appendExtras(docDom, extras)
     }
@@ -72,9 +83,12 @@ object DocxWriter {
         val align = other.align ?: "center"
         // v1.0.15：文本框尺寸固定、译文常比原文长 → 估算统一字号，保证原文+译文整体不溢出框高
         // （只缩小、绝不放大；框不增大 → 不互相覆盖、不延伸到下一页）。
+        // v1.0.17：加防御——极端值保护 + 迭代上限，防止大文档异常文本框拖垮合并。
         val (wPt, hPt) = boxExtentPoints(box)
         val origText = OoxmlUtil.collectText(box, "t")
-        val baseSz = max(existingMaxSz(box), other.font?.sizePt ?: 18.0)
+        var baseSz = max(existingMaxSz(box), other.font?.sizePt ?: 18.0)
+        // 防御：baseSz 上限 72pt（正常文档极少超过此值；异常数据时防止 fitFontSize 循环万次）
+        if (baseSz > 72.0) baseSz = 72.0
         val totalChars = origText.length + other.text.length
         val fitSz = fitFontSize(totalChars, wPt, hPt, baseSz)
         val font = if (fitSz < baseSz - 0.01) other.font?.copy(sizePt = fitSz) else other.font
@@ -122,14 +136,18 @@ object DocxWriter {
         return max(1, ceil(totalChars / cpl).toInt())
     }
 
-    /** 从 baseSz 向下搜索，取能放进框高的最大字号（行高按 1.4 估算留安全余量；下限 6pt）。 */
+    /** 从 baseSz 向下搜索，取能放进框高的最大字号（行高按 1.4 估算留安全余量；下限 6pt）。
+     *  v1.0.17：加迭代上限 maxSteps=140（覆盖 72→6 全范围），防止异常数据导致长时间循环。 */
     private fun fitFontSize(totalChars: Int, wPt: Double, hPt: Double, baseSz: Double): Double {
         if (wPt <= 0 || hPt <= 0) return baseSz
         val usableH = max(8.0, hPt - 12.0)
         val floor = 6.0
         var best = floor
         var sz = baseSz
-        while (sz >= floor - 0.01) {
+        var steps = 0
+        val maxSteps = 140 // (72-6)/0.5 + 余量，足够覆盖正常范围
+        while (sz >= floor - 0.01 && steps < maxSteps) {
+            steps++
             val need = estimateLines(totalChars, wPt, sz) * sz * 1.4
             if (need <= usableH) { best = sz; break }
             sz -= 0.5

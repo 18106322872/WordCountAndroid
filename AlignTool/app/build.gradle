@@ -13,9 +13,9 @@ android {
         // 纯 XML 方案不依赖 POI/StAX，无需更高 SDK，26 已覆盖绝大多数在网 Android 设备。
         minSdk 26
         targetSdk 34
-        versionCode 16
+        versionCode 17
         // 手机版独立版本号（沿用跳过 4 与 7 的约定，与桌面版号不冲突）
-        versionName '1.0.16'
+        versionName '1.0.17'
 
         // 只编 arm64-v8a（现代手机），缩小体积、功能零影响
         ndk {

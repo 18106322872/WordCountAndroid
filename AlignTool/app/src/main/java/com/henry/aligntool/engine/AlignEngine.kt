@@ -55,14 +55,43 @@ object AlignEngine {
 
     // ───────────────────────── docx ─────────────────────────
     private fun runDocx(skeleton: File, other: File, options: AlignOptions, outFile: File): AlignResult {
-        val skelDom = readPart(skeleton, "word/document.xml") ?: return fail("无法读取 word/document.xml")
-        val skelSlots = DocxExtractor.extract(skelDom)
+        val skelDom = try {
+            readPart(skeleton, "word/document.xml") ?: return fail("无法读取 word/document.xml")
+        } catch (e: Throwable) {
+            return fail("解析骨架文档失败: ${e.message}")
+        }
+        val skelSlots = try {
+            DocxExtractor.extract(skelDom)
+        } catch (e: Throwable) {
+            return fail("抽取骨架段落失败(文档可能过大或结构异常): ${e.message}")
+        }
         val othBytes = ZipUtil.readEntry(other, "word/document.xml")
-        val othSlots = if (othBytes != null) DocxExtractor.extract(XmlDom.parse(othBytes.inputStream())) else emptyList()
-        val (pairs, extras) = Pairing.blockPairs(skelSlots.map { it.block }, othSlots.map { it.block })
-        DocxWriter.apply(skelDom, skelSlots, pairs, options, extras)
-        val replacements = mapOf("word/document.xml" to XmlDom.serialize(skelDom).toByteArray(StandardCharsets.UTF_8))
-        ZipUtil.rewriteEntries(skeleton, replacements, outFile)
+        val othSlots = if (othBytes != null) try {
+            DocxExtractor.extract(XmlDom.parse(othBytes.inputStream()))
+        } catch (e: Throwable) {
+            return fail("抽取译文文档失败: ${e.message}")
+        } else emptyList()
+        val (pairs, extras) = try {
+            Pairing.blockPairs(skelSlots.map { it.block }, othSlots.map { it.block })
+        } catch (e: Throwable) {
+            return fail("配对失败: ${e.message}")
+        }
+        try {
+            DocxWriter.apply(skelDom, skelSlots, pairs, options, extras)
+        } catch (e: Throwable) {
+            return fail("写入译文失败: ${e.message}")
+        }
+        val serialized = try {
+            XmlDom.serialize(skelDom).toByteArray(StandardCharsets.UTF_8)
+        } catch (e: Throwable) {
+            return fail("序列化文档失败(可能内存不足): ${e.message}")
+        }
+        val replacements = mapOf("word/document.xml" to serialized)
+        try {
+            ZipUtil.rewriteEntries(skeleton, replacements, outFile)
+        } catch (e: Throwable) {
+            return fail("输出文件写入失败: ${e.message}")
+        }
         return AlignResult(true, "对照完成", pairs.size, extras.size, outFile)
     }
 
