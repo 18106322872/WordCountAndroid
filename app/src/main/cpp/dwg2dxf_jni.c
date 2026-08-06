@@ -28,6 +28,10 @@
 #include "dwg.h"
 #include "bits.h"
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #define LOG_TAG "DwgNative"
 #define DIAG_PATH_MAX 512
 
