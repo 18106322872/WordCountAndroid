@@ -93,6 +93,9 @@ jobs:
               HOST=armv7a-linux-androideabi
               CC="$TOOL/bin/armv7a-linux-androideabi$API-clang"
             fi
+            # 必须导出 CC/CXX 让 autotools 交叉编译到目标 ABI，否则会退化为主机(x86_64) .a
+            export CC
+            export CXX="$CC++"
             echo "=== Building for $ABI (host=$HOST) ==="
             rm -rf build-$ABI && mkdir -p build-$ABI && cd build-$ABI
             ../configure --host=$HOST --prefix=/tmp/ldinst-$ABI \
