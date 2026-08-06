@@ -718,39 +718,165 @@ fun countTextKotlin(text: String): Quadruple<Int, Int, Int, Int> {
 }
 
 /**
- * v1.5.9b: 从 DXF 文件提取所有文字内容（纯 Kotlin，不依赖 Python）。
- * DXF 是 ASCII 文本格式：每对行为「组码行 + 值行」。
- * 关键组码：0=实体类型(TEXT/MTEXT), 1=文本值, 3=附加文本(MTEXT提示),
- *         2=属性标签(ATTRIB).
+ * v1.5.10: 直接扫描 DWG 二进制提取文字（移植自 port_dwg.py improved 模式）。
+ * 不再依赖 DXF 中间格式，避免 DXF TEXT/MTEXT 含尺寸数值/坐标/格式码导致字数虚高。
+ * 算法：扫描原始字节 → ASCII串 + UTF-16LE串 + CJK → stopwords/元音/数字比例过滤 → 去重
  */
+private val DWG_STOPWORDS = setOf(
+    "standard","bylayer","byblock","continuous","defpoints","model","layout",
+    "paper","space","center","dashed","dot","divide","border","phantom",
+    "hidden","dashdot","chain","zigzag",
+    "txt","romans","romanc","italicc","italict","scripts","scriptc",
+    "greeks","greeke","cyrillic","cyriltlc","monotxt","simplex",
+    "complex","isoct","isocteur",
+    "autocad","acad","entity","handle","object","dictionary",
+    "linetype","layer","style","block","viewport","ucs","view",
+    "table","id","type","owner","flags","count","index","name",
+    "data","null","true","false","none","normal","color","width",
+    "height","length","angle","point","line","circle","arc","text",
+    "dimension","leader","hatch","solid","polyline","insert",
+    "attrib","mtext","attdef","acdb","acds","acim","objects",
+    "classes","handles","summaryinfo","preview","appinfo",
+    "filedeps","security","revhistory","header","auxheader",
+    "signature","template"
+)
+
+private fun isCjkChar(cp: Int): Boolean {
+    return (cp in 0x4E00..0x9FFF) || (cp in 0x3400..0x4DBF) ||
+           (cp in 0x3000..0x303F) || (cp in 0xFF00..0xFFEF) ||
+           (cp in 0x2E80..0x2EFF) || (cp in 0xF900..0xFAFF)
+}
+
+/** 判断字符串是否像真实文字（非 CAD 元数据/坐标/二进制垃圾）*/
+private fun looksLikeRealText(s: String, minRun: Int): Boolean {
+    if (s.length < minRun) return false
+    val low = s.lowercase()
+    if (low in DWG_STOPWORDS) return false
+    // 至少 3 个字母
+    val letters = s.count { it.isAlpha() }
+    if (letters < 3) return false
+    // 数字占比不超过 50%（排除坐标）
+    val digits = s.count { it.isDigit() }
+    if (s.isNotEmpty() && digits.toDouble() / s.length > 0.5) return false
+    // 符号占比不超过 35%
+    val alnum = letters + digits
+    if (s.isNotEmpty() && (s.length - alnum).toDouble() / s.length > 0.35) return false
+    // 纯大写短串（<=6字符）通常是缩写/代码
+    if (s.all { it.isUpperCase() || !it.isLetter() } && s.length <= 6) return false
+    // 需要元音或空格（多词短语）
+    val hasVowel = s.any { it.lowercase() in "aeiou" }
+    val hasSpace = ' ' in s
+    return hasVowel || hasSpace
+}
+
 fun extractDxfText(dxfPath: String): String {
+    // v1.5.10: 此函数保留签名兼容但不再用于 DWG 字数统计；
+    // DWG 统计已改用 scanDwgRaw() 直接扫二进制。
+    // 若传入的是 DXF 文件则走原有逻辑兜底。
+    return if (dxfPath.endsWith(".dxf", ignoreCase = true)) {
+        extractDxfTextCompat(dxfPath)
+    } else {
+        scanDwgRaw(dxfPath)
+    }
+}
+
+/** 原有 DXF 解析逻辑（仅作 .dxf 文件兜底）*/
+private fun extractDxfTextCompat(dxfPath: String): String {
     val sb = StringBuilder()
     try {
         val lines = File(dxfPath).readLines()
         var i = 0
-        var currentEntity = ""  // 追踪当前实体类型（code "0" 的值）
+        var currentEntity = ""
         while (i < lines.size - 1) {
             val code = lines[i].trim()
             val value = if (i + 1 < lines.size) lines[i + 1].trim() else ""
             when (code) {
-                "0" -> {
-                    // 记录当前实体类型：只对 TEXT/MTEXT 提取文字
-                    currentEntity = value.uppercase()
-                }
+                "0" -> currentEntity = value.uppercase()
                 "1", "3" -> {
-                    // 仅在 TEXT/MTEXT/ATTDEF 实体内提取文本组码值
                     if (value.isNotEmpty() && (currentEntity == "TEXT" || currentEntity == "MTEXT" || currentEntity == "ATTDEF")) {
                         if (sb.isNotEmpty()) sb.append('\n')
                         sb.append(value)
                     }
                 }
             }
-            i += 2 // 跳过组码+值这一对
+            i += 2
         }
     } catch (e: Exception) {
-        Log.w("WordCount", "DXF 文本提取异常: ${e.message}")
+        Log.w("WordCount", "DXF 兼容提取异常: ${e.message}")
     }
     return sb.toString()
+}
+
+/**
+ * 核心：直接扫描 DWG 二进制字节提取文字。
+ * 移植自 port_dwg.py improved 模式——与电脑端完全一致的过滤逻辑。
+ */
+fun scanDwgRaw(dwgPath: String): String {
+    val out = mutableListOf<String>()
+    val seen = HashSet<String>(500)
+    val asciiBuf = StringBuilder()
+    val cjkBuf = StringBuilder()
+
+    fun flushAscii() {
+        if (asciiBuf.isEmpty()) return
+        val s = asciiBuf.toString()
+        asciiBuf.clear()
+        if (looksLikeRealText(s, 4) && s !in seen) {
+            seen.add(s); out.add(s)
+        }
+    }
+
+    fun flushCjk() {
+        if (cjkBuf.isEmpty()) return
+        val s = cjkBuf.toString()
+        cjkBuf.clear()
+        if (s.length >= 3 && s !in seen) {
+            seen.add(s); out.add(s)
+        }
+    }
+
+    try {
+        val data = File(dwgPath).readBytes()
+        val n = data.size
+        var i = 0
+        while (i < n && out.size < 50000) {  // 上限防 OOM
+            val b = data[i].toInt() and 0xFF
+            when {
+                // ASCII run (not part of UTF-16LE)
+                b in 0x20..0x7E && (i + 1 >= n || data[i + 1] != 0x00.toByte()) -> {
+                    asciiBuf.append(b.toChar()); i++
+                }
+                // UTF-16LE string
+                b in 0x20..0x7E && i + 1 < n && data[i + 1] == 0x00.toByte() -> {
+                    while (i + 1 < n) {
+                        val c = data[i].toInt() and 0xFF
+                        val nx = data[i + 1]
+                        if (c in 0x20..0x7E && nx == 0x00.toByte()) {
+                            asciiBuf.append(c.toChar()); i += 2
+                        } else break
+                    }
+                }
+                // CJK (UTF-8 3-byte sequence)
+                b in 0xE0..0xEF && i + 2 < n -> {
+                    val b2 = data[i + 1].toInt() and 0xFF
+                    val b3 = data[i + 2].toInt() and 0xFF
+                    if (b2 in 0x80..0xBF && b3 in 0x80..0xBF) {
+                        val cp = ((b and 0x0F) shl 12) or ((b2 and 0x3F) shl 6) or (b3 and 0x3F)
+                        if (isCjkChar(cp)) {
+                            cjkBuf.append(cp.toChar())
+                        } else { flushCjk(); flushAscii() }
+                        i += 3
+                    } else { flushCjk(); flushAscii(); i++ }
+                }
+                else -> { flushAscii(); flushCjk(); i++ }
+            }
+        }
+        flushAscii(); flushCjk()
+    } catch (e: Exception) {
+        Log.w("WordCount", "DWG 二进制扫描异常: ${e.message}")
+    }
+
+    return out.joinToString("\n")
 }
 
 /** 简单四元组（避免引入额外依赖）*/
@@ -842,10 +968,11 @@ private fun openWithWps(context: android.content.Context, entry: FileEntry) {
 }
 
 /**
- * v1.5.9: 导出 DWG -> PDF（看图用）。点击文件卡片的「PDF」按钮触发。
- *   1) 调 DwgConverter.convertToPdf()（C 层 LibreDWG 读 DWG 写 PDF）
+ * v1.5.10: 导出 DWG -> PDF（实验性，LibreDWG 矢量导出仅支持基础实体）。
+ *   1) 调 DwgConverter.convertToPdf()（C 层 LibreDWG 读 DWG→临时DXF→矢量PDF）
  *   2) 成功：用 WPS 打开（未装 WPS 则弹系统选择器）
  *   3) 失败：toast 提示错误码
+ * ⚠️ 已知限制：复杂图纸（天正自定义对象、动态块、代理图形）可能丢失或错乱。
  * onStateChange(id) 用于按钮灰色/恢复（导出中传 entry.id，结束传 null）
  */
 private fun exportDwgToPdf(
@@ -855,10 +982,13 @@ private fun exportDwgToPdf(
     snackbar: SnackbarHostState,
     onStateChange: (String?) -> Unit
 ) {
-    // 大小写无关地去掉 .dwg 后缀，拼接 .pdf
-    val baseName = entry.cachePath.replace(Regex("\\.(dwg|DWG)$"), "")
-    val pdfPath = baseName + ".pdf"
-    Log.d("WordCount", "DWG→PDF: input=${entry.cachePath} → output=$pdfPath")
+    // 构造 PDF 输出路径：基于缓存文件的父目录 + 原文件名(去扩展名) + .pdf
+    // 不依赖 cachePath 以 .dwg 结尾（SAF 路径可能大小写不同或无标准后缀）
+    val srcFile = File(entry.cachePath)
+    val parentDir = srcFile.parent ?: srcFile.absolutePath.substringBeforeLast('/')
+    val rawName = srcFile.nameWithoutExtension  // Kotlin 标准库自动处理各种后缀
+    val pdfPath = "$parentDir/${rawName}.pdf"
+    Log.d("WordCount", "DWG→PDF: input=${entry.cachePath} (${srcFile.name}) → output=$pdfPath")
     onStateChange(entry.id)
     scope.launch(Dispatchers.IO) {
         try {
@@ -871,15 +1001,18 @@ private fun exportDwgToPdf(
                     Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                     return@withContext
                 }
-                // 打开 PDF：优先 WPS，未装则系统选择器
-                val file = File(pdfPath)
-                if (!file.exists() || file.length() == 0L) {
+                // 验证 PDF 文件确实生成了且不是空文件
+                val pdfFile = File(pdfPath)
+                if (!pdfFile.exists() || pdfFile.length() == 0L) {
                     Toast.makeText(context, "PDF 文件未生成（转换可能失败）", Toast.LENGTH_LONG).show()
-                    Log.e("WordCount", "PDF 不存在或为空: $pdfPath exists=${file.exists()} size=${file.length()}")
+                    Log.e("WordCount", "PDF 不存在或为空: $pdfPath exists=${pdfFile.exists()} size=${pdfFile.length()}")
                     return@withContext
                 }
-                Log.d("WordCount", "PDF 已生成: $pdfPath (${file.length()} bytes)")
-                val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
+                Log.d("WordCount", "PDF 已生成: $pdfPath (${pdfFile.length()} bytes)")
+                // 质量警告（LibreDWG 矢量导出的已知限制）
+                Toast.makeText(context, "⚠️ PDF 为实验性导出，复杂图纸可能不完整", Toast.LENGTH_SHORT).show()
+                // 打开 PDF：优先 WPS，未装则系统选择器
+                val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", pdfFile)
                 val intent = Intent(Intent.ACTION_VIEW).apply {
                     setDataAndType(uri, "application/pdf")
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -2050,22 +2183,20 @@ private fun addFiles(
                     }
                 }
 
-                // DWG(CAD)：v1.5.9b 改用 JNI libdwg2dxf.so 转 DXF + Kotlin 纯文本解析
+                // DWG(CAD)：v1.5.10 改用原始二进制扫描提取文字（移植自 port_dwg.py improved 模式）
+                //   不再走 JNI 转 DXF（DXF TEXT/MTEXT 含尺寸数值/坐标/格式码导致字数虚高）
                 //   不再走 PythonEngine（Chaquopy subprocess 会触发 AssetFinder/scripts 报错）
-                //   DXF 是 ASCII 文本格式：group-code 行对，0=实体类型, 1=文本值, 3=附加文本
+                //   算法：扫字节 → ASCII/UTF-16LE/CJK 串 → stopwords/元音/数字比例过滤 → 去重 → countTextKotlin
                 dwgFiles.forEachIndexed { i, cf ->
                     val f = cf.file
                     val dName = cf.displayName
                     try {
-                        val dxfPath = f.absolutePath.removeSuffix(".dwg") + ".dxf"
-                        val result = DwgConverter.convert(f.absolutePath, dxfPath)
-                        if (result.path == null) {
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（DWG转换失败 [${result.errorCode}] ${result.diagText}）"))
+                        val rawText = scanDwgRaw(f.absolutePath)
+                        if (rawText.isBlank()) {
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（未提取到文字内容）"))
                             return@forEachIndexed
                         }
-                        // v1.5.9b: Kotlin 纯解析 DXF 提取文字（绕开 Chaquopy subprocess 限制）
-                        val dxfText = extractDxfText(result.path)
-                        val stats = countTextKotlin(dxfText)
+                        val stats = countTextKotlin(rawText)
                         val resMap = mapOf(
                             "name" to dName, "ext" to ".dwg",
                             "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
@@ -2075,7 +2206,7 @@ private fun addFiles(
                         val fr = toFileResult(resMap, f.absolutePath)
                         entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                     } catch (e: Throwable) {
-                        Log.w("WordCount", "DWG 解析失败 ${f.name}: ${e.message}")
+                        Log.w("WordCount", "DWG 扫描失败 ${f.name}: ${e.message}")
                         entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（${e.message}）"))
                     }
                 }
