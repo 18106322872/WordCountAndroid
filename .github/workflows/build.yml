@@ -55,7 +55,7 @@ jobs:
       # Android SELinux 禁止从 app 私有目录 exec 原生二进制，但允许从 APK lib/ 加载 .so（JNI）。
       # 步骤：交叉编译 LibreDWG 静态库 → 编译 JNI wrapper(dwg2dxf_jni.c) 链接成 libdwg2dxf.so → 放 jniLibs。
       # 失败时（exit 1）把编译日志 POST 到 commit comment 便于排查，并让构建失败（不发布残包）。
-      - name: Build libdwg2dxf.so (arm64)
+      - name: Build libdwg2dxf.so (multi-ABI: arm64-v8a + armeabi-v7a)
         id: dwg2dxf
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -67,8 +67,6 @@ jobs:
           NDK="$ANDROID_HOME/ndk/25.2.9519653"
           TOOL="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
           API=21
-          export CC="$TOOL/bin/aarch64-linux-android$API-clang"
-          export CXX="$TOOL/bin/aarch64-linux-android$API-clang++"
           export AR="$TOOL/bin/llvm-ar"
           export RANLIB="$TOOL/bin/llvm-ranlib"
           export STRIP="$TOOL/bin/llvm-strip"
@@ -78,49 +76,59 @@ jobs:
           cd /tmp
           TAG=$(curl -fsSL https://api.github.com/repos/LibreDWG/libredwg/releases/latest | python3 -c "import sys,json;print(json.load(sys.stdin)['tag_name'])")
           echo "LibreDWG tag=$TAG"
-          git clone --depth 1 --branch "$TAG" --recursive https://github.com/LibreDWG/libredwg.git libredwg
+          rm -rf libredwg && git clone --depth 1 --branch "$TAG" --recursive https://github.com/LibreDWG/libredwg.git libredwg
           cd libredwg
           autoreconf -fiv || ./autogen.sh || true
           export ac_cv_func_malloc_0_nonnull=yes
           export ac_cv_func_realloc_0_nonnull=yes
           export ac_cv_c_bigendian=no
-          ./configure --host=aarch64-linux-android --prefix=/tmp/ldinst \
-            --disable-bindings --disable-python --disable-perl --disable-docs \
-            --enable-static --disable-shared --disable-werror || \
-          ./configure --host=aarch64-linux-android --prefix=/tmp/ldinst --disable-docs --enable-static --disable-shared --disable-werror
-          make -j"$(nproc)"
-          # 定位静态库 libdwg.a（autotools+libtool 通常在 src/.libs 或顶层 .libs）
-          LIBDWG=$(find . -name "libdwg.a" | head -1)
-          echo "LIBDWG=$LIBDWG"
-          if [ -z "$LIBDWG" ]; then
-            echo "libdwg.a 未生成"
-            FAIL=1
-          fi
-          # 确保 config.h 可被 include/dwg.h 找到（quote include 搜索 -I 路径）
-          cp /tmp/libredwg/config.h /tmp/libredwg/include/ 2>/dev/null || \
-          cp /tmp/libredwg/src/config.h /tmp/libredwg/include/ 2>/dev/null || true
-          # 编译 JNI wrapper → libdwg2dxf.so（链接 LibreDWG 静态库）
-          mkdir -p "${GITHUB_WORKSPACE:-.}/app/src/main/jniLibs/arm64-v8a"
-          "$CC" --shared -fPIC \
-            -static-libstdc++ \
-            -I/tmp/libredwg/src -I/tmp/libredwg/include -I/tmp/libredwg \
-            -I"$TOOL/sysroot/usr/include" \
-            "${GITHUB_WORKSPACE:-.}/app/src/main/cpp/dwg2dxf_jni.c" \
-            "$LIBDWG" -lm -lz -llog \
-            -o "${GITHUB_WORKSPACE:-.}/app/src/main/jniLibs/arm64-v8a/libdwg2dxf.so"
-          SO_RC=$?
-          if [ $SO_RC -ne 0 ]; then
-            echo "COMPILE FAILED rc=$SO_RC"
-            echo "=== /tmp/so_build.log tail ==="
-            tail -100 /tmp/so_build.log || true
-          fi
-          SO="${GITHUB_WORKSPACE:-.}/app/src/main/jniLibs/arm64-v8a/libdwg2dxf.so"
-          if [ -f "$SO" ]; then
-            "$STRIP" "$SO" || true
-            ls -lh "$SO"
-            file "$SO" || true
-            echo "DWG2DXF_SO_OK"
+          WS="${GITHUB_WORKSPACE:-.}"
+          JNI_SRC="$WS/app/src/main/cpp/dwg2dxf_jni.c"
+          FAIL=""
+          for ABI in arm64-v8a armeabi-v7a; do
+            if [ "$ABI" = "arm64-v8a" ]; then
+              HOST=aarch64-linux-android
+              CC="$TOOL/bin/aarch64-linux-android$API-clang"
+            else
+              HOST=armv7a-linux-androideabi
+              CC="$TOOL/bin/armv7a-linux-androideabi$API-clang"
+            fi
+            echo "=== Building for $ABI (host=$HOST) ==="
+            rm -rf build-$ABI && mkdir -p build-$ABI && cd build-$ABI
+            ../configure --host=$HOST --prefix=/tmp/ldinst-$ABI \
+              --disable-bindings --disable-python --disable-perl --disable-docs \
+              --enable-static --disable-shared --disable-werror || \
+            ../configure --host=$HOST --prefix=/tmp/ldinst-$ABI --disable-docs --enable-static --disable-shared --disable-werror
+            make -j"$(nproc)"
+            LIBDWG=$(find . -name "libdwg.a" | head -1)
+            echo "LIBDWG($ABI)=$LIBDWG"
+            if [ -z "$LIBDWG" ]; then echo "libdwg.a 未生成 for $ABI"; FAIL=1; fi
+            cp ../config.h ../include/ 2>/dev/null || cp ../src/config.h ../include/ 2>/dev/null || true
+            mkdir -p "$WS/app/src/main/jniLibs/$ABI"
+            "$CC" --shared -fPIC \
+              -static-libstdc++ \
+              -I../src -I../include -I.. \
+              -I"$TOOL/sysroot/usr/include" \
+              "$JNI_SRC" \
+              "$LIBDWG" -lm -lz -llog \
+              -o "$WS/app/src/main/jniLibs/$ABI/libdwg2dxf.so"
+            SO_RC=$?
+            if [ $SO_RC -ne 0 ]; then echo "COMPILE FAILED($ABI) rc=$SO_RC"; tail -60 /tmp/so_build.log || true; FAIL=1; fi
+            SO="$WS/app/src/main/jniLibs/$ABI/libdwg2dxf.so"
+            if [ -f "$SO" ]; then
+              "$STRIP" "$SO" || true
+              ls -lh "$SO"; file "$SO" || true; echo "DWG2DXF_SO_OK($ABI)"
+            else
+              echo "libdwg2dxf.so 未生成 for $ABI"; FAIL=1
+            fi
+            cd /tmp/libredwg
+          done
+          if [ -n "$FAIL" ]; then
+            echo "MULTI-ABI BUILD FAILED"
           else
+            echo "ALL ABI BUILDS OK"
+          fi
+          # 下方 else 分支（libdwg2dxf.so 未生成）现由 FAIL 标志处理；保留诊断
             echo "libdwg2dxf.so 未生成"
             python3 - <<'PY'
           import os, json, urllib.request
