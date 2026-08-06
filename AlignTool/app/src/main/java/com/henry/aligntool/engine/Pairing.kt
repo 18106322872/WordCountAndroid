@@ -1,18 +1,18 @@
 package com.henry.aligntool.engine
 
 /**
- * 配对算法（等价桌面 align_core.block_pairs :119 / _block_pairs_pptx :150 / _xlsx_walk :274）。
+ * 配对算法（等价桌面 align_core.block_pairs :119 / _block_pairs_docx :349 / _block_pairs_pptx :150 / _xlsx_walk :274）。
  *
  * 这是桌面版反复修错位才稳定的核心逻辑，手机版 1:1 复刻：
  *   1) 两份都带 Excel 位置 → 按 (sheetIdx,row,col) 同位置匹配
  *   2) 两份都带 PPTX 位置 → 按 (slideIdx,shapeIdx,innerIdx) 同位置匹配
- *   3) 否则（docx / 跨格式兜底）→ 遍历顺序 i↔i 配对
+ *   3) 否则（docx / 跨格式兜底）→ 编号/章节锚定 + 区间回溯（见 anchored）
  * 未配对块进入 extras（附在文档末尾，标记 UNPAIRED_MARK）。
  */
 object Pairing {
 
     data class Result(
-        val pairs: List<Pair<Block, Block>>,      // (骨架块, 对方块)
+        val pairs: List<Pair<Block, Block>>,      // (骨架块, 对方块)，长度 = 骨架块数，与 slots 一一对齐
         val extras: List<Pair<String, Block>>     // ("src"|"tgt", 未配对块)
     )
 
@@ -25,7 +25,7 @@ object Pairing {
                 src.all { it.slideIdx != null } && tgt.all { it.slideIdx != null }
         if (bothPptx) return pptx(src, tgt)
 
-        // docx / 跨格式兜底：编号锚点对齐（v1.0.19 起），避免一段错位整篇级联
+        // docx / 跨格式兜底：编号锚定 + 区间回溯（v1.0.21 起与桌面 _block_pairs_docx 对齐）
         return anchored(src, tgt)
     }
 
@@ -67,196 +67,226 @@ object Pairing {
         return Result(pairs, extras)
     }
 
-    // 编号锚点对齐（docx 主路径，v1.0.19 新增十进制编号锚点，v1.0.20 加章节序号锚点）
-    // 两层锚点 + 局部窗口策略，彻底避免"一段对不上后面全错"的级联错位：
-    //   ① 主锚点：十进制编号（2.1 / 3.2.1）全局贪心配对（v1.0.19 已验证 0 错配，最强）
-    //   ② 补充锚点：章节序号（第一章/Chapter I、一、/I.、二、/II.、（一）/① 等）
-    //      仅在「相邻两个十进制主锚点之间的局部窗口」内前向扫描配对，
-    //      防止跨章重复序号（如两个「一、」「SEC4」）错配到别的章。
-    // 编号之间的无编号段落只在「相邻锚点之间的局部区间」做位置配对，某段对不上只影响局部。
+    // ───────────────────────── docx 主路径：编号/章节锚定 + 区间回溯 ─────────────────────────
+    // 等价桌面 align_core._block_pairs_docx (v1.0.22)：把"一段对不上后面全错"的根因
+    // （块数不等时裸 i↔i 偏移累积）彻底解决。三步：
+    //   ① 综合锚点：优先阿拉伯层级编号（1.1/2.3.4，中英一致）→"D:.."，否则章节序号
+    //      锚点（第一章↔Chapter I →"C:1"、一、↔I. →"I:1" 等）→"C:/S:/P:/A:/I:"；
+    //   ② 短孤立段（封面"施/施"拆字残留、纯标点、单字）标记为 filler，不进位置配对
+    //      （skel 端留空不插入，oth 端进 extras）；⚠️ 表格永不为 filler；
+    //   ③ 按文档顺序贪心配对同名锚点（局部窗口 W=12 容错插入/删除），切区间，区间内
+    //      仅非 filler 索引从首端顺序配对，差异局限区间尾端，绝不跨锚点传播。
     private fun anchored(src: List<Block>, tgt: List<Block>): Result {
-        val usedSrc = BooleanArray(src.size)
-        val usedTgt = BooleanArray(tgt.size)
+        val n = src.size
+        val m = tgt.size
 
-        // ① 主锚点：十进制编号全局贪心（复用 v1.0.19 已验证逻辑，保证 EN 侧单调、0 错配）
-        val srcDec = Array(src.size) { numKey(src[it].text) }
-        val tgtDec = Array(tgt.size) { numKey(tgt[it].text) }
-        val decAnchors = mutableListOf<Pair<Int, Int>>()
-        var di = 0
+        // 1) 标注锚点与 filler（双端）
+        val skelAnchor = LinkedHashMap<Int, String>()   // skel_idx -> 锚点key
+        val othAnchor = LinkedHashMap<Int, String>()
+        val skelFiller = mutableSetOf<Int>()
+        val othFiller = mutableSetOf<Int>()
         for (i in src.indices) {
-            if (usedSrc[i] || srcDec[i] == null) continue
-            var j = di
-            while (j < tgt.size) {
-                if (!usedTgt[j] && tgtDec[j] == srcDec[i]) break
-                j++
-            }
-            if (j < tgt.size) {
-                decAnchors.add(i to j)
-                usedSrc[i] = true
-                usedTgt[j] = true
-                di = j + 1
-            }
+            val k = leadAnchor(src[i].text)
+            if (k != null) skelAnchor[i] = k
+            else if (isDocxFiller(src[i])) skelFiller.add(i)
         }
-        decAnchors.sortBy { it.first }
-
-        // ② 补充锚点：章节序号，限定在相邻主锚点之间的局部窗口前向扫描
-        val srcOrd = Array(src.size) { if (usedSrc[it]) null else ordKey(src[it].text) }
-        val tgtOrd = Array(tgt.size) { if (usedTgt[it]) null else ordKey(tgt[it].text) }
-        // 主锚点边界（含虚拟起点 (-1,-1) 与虚拟终点 (src.size,tgt.size)）
-        val bounds = mutableListOf(Pair(-1, -1))
-        bounds.addAll(decAnchors)
-        bounds.add(Pair(src.size, tgt.size))
-        val ordAnchors = mutableListOf<Pair<Int, Int>>()
-        for (k in 0 until bounds.size - 1) {
-            val sLo = bounds[k].first
-            val tLo = bounds[k].second
-            val sHi = bounds[k + 1].first
-            val tHi = bounds[k + 1].second
-            val sStart = sLo + 1
-            val sEnd = sHi - 1
-            val tStart = tLo + 1
-            val tEnd = tHi - 1
-            if (sStart > sEnd || tStart > tEnd) continue
-            // 局部前向扫描：CN 顺序，每个未用章节序号找下一个未用同 key EN 块
-            var tj = tStart
-            for (si in sStart..sEnd) {
-                if (usedSrc[si] || srcOrd[si] == null) continue
-                var t = tj
-                while (t <= tEnd) {
-                    if (!usedTgt[t] && tgtOrd[t] == srcOrd[si]) break
-                    t++
-                }
-                if (t <= tEnd) {
-                    ordAnchors.add(si to t)
-                    usedSrc[si] = true
-                    usedTgt[t] = true
-                    tj = t + 1
-                }
-            }
+        for (j in tgt.indices) {
+            val k = leadAnchor(tgt[j].text)
+            if (k != null) othAnchor[j] = k
+            else if (isDocxFiller(tgt[j])) othFiller.add(j)
         }
 
-        // 合并主锚点 + 补充锚点，按 CN 顺序排序；EN 侧天然单调（主锚点单调 + 补充锚点在窗口内单调）
-        val anchors = (decAnchors + ordAnchors).sortedBy { it.first }
+        // 2) 按文档顺序贪心配对同名锚点（局部窗口 W 容错插入/删除），保持单调
+        val W = 12
+        val skelAk = skelAnchor.toList().sortedBy { it.first }   // [(idx,key),...]
+        val othAk = othAnchor.toList().sortedBy { it.first }
+        val pairsIdx = mutableListOf<Pair<Int, Int>>()           // (si,oi)，si、oi 均单调递增
+        var i = 0
+        var j = 0
+        while (i < skelAk.size && j < othAk.size) {
+            val ks = skelAk[i].second
+            val ko = othAk[j].second
+            if (ks == ko) {
+                pairsIdx.add(skelAk[i].first to othAk[j].first)
+                i++; j++; continue
+            }
+            // 编号不同：在对方局部窗口内找相同编号，跳过本方多出的条目
+            var found = -1
+            for (jj in j until minOf(j + W, othAk.size)) {
+                if (othAk[jj].second == ks) { found = jj; break }
+            }
+            if (found >= 0) { j = found; continue }
+            found = -1
+            for (ii in i until minOf(i + W, skelAk.size)) {
+                if (skelAk[ii].second == ko) { found = ii; break }
+            }
+            if (found >= 0) { i = found; continue }
+            // 双方均有孤立多出的编号条目（罕见），一并跳过
+            i++; j++
+        }
 
-        val pairs = mutableListOf<Pair<Block, Block>>()
+        // 2.5) 落实锚点对：skel 锚点段直接配对其对应 oth 段
+        val pairArr = Array<Block?>(n) { null }
+        for ((si, oi) in pairsIdx) pairArr[si] = tgt[oi]
+
         val extras = mutableListOf<Pair<String, Block>>()
-        var si = 0
-        var ti = 0
-        for (a in anchors.indices) {
-            val sA = anchors[a].first
-            val tA = anchors[a].second
-            // 局部区间位置配对（区间可能为 0 或负差——译文侧锚点非单调时 tA<ti，
-            // 该区间的骨架块全部进 src-extras，绝不反向索引，防止 IndexOutOfBounds）
-            val sGap = sA - si
-            val tGap = tA - ti
-            if (sGap > 0 && tGap > 0) {
-                val g = minOf(sGap, tGap)
-                for (j in 0 until g) pairs.add(src[si + j] to tgt[ti + j])
-                for (j in g until sGap) extras.add("src" to src[si + j])
-                for (j in g until tGap) extras.add("tgt" to tgt[ti + j])
-            } else if (sGap > 0) {
-                for (j in 0 until sGap) extras.add("src" to src[si + j])
-            } else if (tGap > 0) {
-                for (j in 0 until tGap) extras.add("tgt" to tgt[ti + j])
-            }
-            // 锚点本身严格配对
-            pairs.add(src[sA] to tgt[tA])
-            si = sA + 1
-            ti = tA + 1
+
+        // 3) 区间回溯：哨兵 (-1,-1) + 锚点对 + (n,m)，区间内非 filler 索引从首端顺序配对
+        val bounds = mutableListOf(Pair(-1, -1))
+        bounds.addAll(pairsIdx)
+        bounds.add(Pair(n, m))
+        for (b in 0 until bounds.size - 1) {
+            val s0 = bounds[b].first; val o0 = bounds[b].second
+            val s1 = bounds[b + 1].first; val o1 = bounds[b + 1].second
+            val skelGap = (s0 + 1 until s1).filter { it !in skelFiller }
+            val othGap = (o0 + 1 until o1).filter { it !in othFiller }
+            val L = minOf(skelGap.size, othGap.size)
+            for (k in 0 until L) pairArr[skelGap[k]] = tgt[othGap[k]]
+            // 其他端多出的（区间尾端）→ extras；skel 端多出的（区间尾端）留 null（不插入）
+            for (x in othGap.subList(L, othGap.size)) extras.add("tgt" to tgt[x])
         }
-        // 尾部区间
-        val sGap = src.size - si
-        val tGap = tgt.size - ti
-        if (sGap > 0 && tGap > 0) {
-            val g = minOf(sGap, tGap)
-            for (j in 0 until g) pairs.add(src[si + j] to tgt[ti + j])
-            for (j in g until sGap) extras.add("src" to src[si + j])
-            for (j in g until tGap) extras.add("tgt" to tgt[ti + j])
-        } else if (sGap > 0) {
-            for (j in 0 until sGap) extras.add("src" to src[si + j])
-        } else if (tGap > 0) {
-            for (j in 0 until tGap) extras.add("tgt" to tgt[ti + j])
-        }
+        // 未被配对且为 filler 的 oth 段进 extras（保持桌面语义）
+        for (j2 in othFiller) extras.add("tgt" to tgt[j2])
+
+        // 4) 转成 Result：pairs 长度 = 骨架块数，与 slots 一一对齐；
+        //    未配对的骨架块用 DUMMY 占位（other.text 空 → 写入端跳过，不插入译文）。
+        val pairs = (0 until n).map { i2 -> src[i2] to (pairArr[i2] ?: DUMMY) }
         return Result(pairs, extras)
     }
 
-    /** 段落前缀十进制编号（2.1 / 3.2.1 等）。无则返回 null。 */
-    private fun numKey(text: String): String? {
-        val m = DEC_RE.find(text.trimStart()) ?: return null
-        return m.groupValues[1]
+    /** 占位块：未配对的骨架块以它填充，写入端因 text 为空而跳过插入。 */
+    private val DUMMY = Block("")
+
+    // ── 短孤立段判定（等价桌面 _is_docx_filler）──
+    private fun isDocxFiller(b: Block): Boolean {
+        if (b.isTable || b.isCell) return false   // ⚠️ 表格/单元格永不为 filler（单元格 text 可能短，但成对出现，位置配对）
+        val s = (b.text ?: "").trim()
+        if (s.isEmpty()) return true
+        if (RE_FILLER_FULL.matches(s)) return true
+        val core = s.replace(RE_FILLER_STRIP, "")
+        return core.length <= 1
     }
 
-    /** 章节序号锚点：第一章/Chapter I、一、/I.、二、/II.、（一）/① 等。无则返回 null。 */
-    private fun ordKey(text: String): String? {
-        val t = text.trimStart()
-        CHAP_CN_RE.find(t)?.let { return "CH" + (cnNumToInt(it.groupValues[1]) ?: return null) }
-        CHAP_EN_RE.find(t)?.let {
-            val g = it.groupValues[1]
-            val v = if (g.all { c -> c.isDigit() }) g.toIntOrNull() else romanToInt(g)
-            if (v != null) return "CH$v"
-        }
-        SEC_CN_RE.find(t)?.let { m ->
-            val g = if (m.groupValues[1].isNotEmpty()) m.groupValues[1] else m.groupValues[2]
-            return "SEC" + (cnNumToInt(g) ?: return null)
-        }
-        SEC_EN_RE.find(t)?.let { return "SEC" + (romanToInt(it.groupValues[1]) ?: return null) }
-        CIRCLED_RE.find(t)?.let { return "SEC" + (circledToInt(it.groupValues[1]) ?: return null) }
+    // ── 综合锚点（等价桌面 _lead_anchor）──
+    private fun leadAnchor(text: String?): String? {
+        val d = leadDotten(text)
+        if (d != null) return "D:$d"
+        val sec = leadSection(text)
+        if (sec != null) return sec
         return null
     }
 
-    private val DEC_RE = Regex("""^\s*(\d+(?:\.\d+)*)""")
-    private val CHAP_CN_RE = Regex("""第\s*([一二三四五六七八九十百零〇两]+)\s*章""")
-    private val CHAP_EN_RE = Regex("""Chapter\s+([IVXLCDM]+|\d+)""", RegexOption.IGNORE_CASE)
-    private val SEC_CN_RE = Regex("""^\s*(?:[（(]\s*([一二三四五六七八九十百零〇两]+)\s*[)）]\s*[、.．]?|([一二三四五六七八九十百零〇两]+)\s*[、.．])""")
-    private val SEC_EN_RE = Regex("""^\s*([IVXLCDM]+)\s*\.""", RegexOption.IGNORE_CASE)
-    private val CIRCLED_RE = Regex("""^\s*([①-⑳])""")
+    /** 段首阿拉伯层级编号（1.1 / 2.3.4）；要求至少 1 个 '.'，避免年份/页码误锚。无则 null。 */
+    private fun leadDotten(text: String?): String? {
+        val s = (text ?: "").trim()
+        if (s.isEmpty()) return null
+        val m = RE_LEAD_DOTTED.find(s) ?: return null
+        return m.groupValues[1]
+    }
 
-    /** 中文数字 → 阿拉伯数字（支持 一~九十九、百，如 二十一→21）。 */
-    private fun cnNumToInt(s: String): Int? {
-        val map = mapOf('一' to 1, '二' to 2, '两' to 2, '三' to 3, '四' to 4, '五' to 5,
-            '六' to 6, '七' to 7, '八' to 8, '九' to 9, '零' to 0, '〇' to 0)
-        var total = 0
-        var current = 0
-        for (c in s) {
+    /** 段首章节序号锚点（等价桌面 _lead_section）：归一为 C:/S:/P:/A:/I: 键，跨语言配对。
+     *  显式不锚定 (一)(二) 与 1. 2. 列表（过于细碎、中英常不对称，易触发级联错位）。 */
+    private fun leadSection(text: String?): String? {
+        val s = (text ?: "").trim()
+        if (s.isEmpty()) return null
+        // ---- 章 / 节 / 部分（中文 第X…）----
+        RE_SEC_CHAP_CN_CH.find(s)?.let { m -> cn2int(m.groupValues[1])?.let { return "C:$it" } }
+        RE_SEC_CHAP_CN_SEC.find(s)?.let { m -> cn2int(m.groupValues[1])?.let { return "S:$it" } }
+        RE_SEC_CHAP_CN_PART.find(s)?.let { m -> cn2int(m.groupValues[1])?.let { return "P:$it" } }
+        RE_SEC_APPEND_CN.find(s)?.let { m ->
+            val tok = m.groupValues[1]
+            if (tok.length == 1 && tok[0] in 'A'..'Z') return "A:${tok[0] - 'A' + 1}"
+            if (tok.length == 1 && tok[0] in 'a'..'z') return "A:${tok[0] - 'a' + 1}"
+            cn2int(tok)?.let { return "A:$it" }
+        }
+        // ---- 章 / 节 / 部分 / 附录（英文）----
+        RE_SEC_EN.find(s)?.let { m ->
+            val kind = m.groupValues[1].lowercase()
+            val tok = m.groupValues[2]
+            val v = when {
+                tok.all { it.isDigit() } -> tok.toIntOrNull()
+                tok.all { it.isLetter() } -> {
+                    val up = tok.uppercase()
+                    if (up.all { it in "IVXLCDM" }) roman2int(up)
+                    else if (up.length == 1) (up[0] - 'A' + 1)
+                    else engOrdinal(tok)
+                }
+                else -> null
+            }
+            if (v != null) {
+                val k = when (kind) {
+                    "chapter" -> "C"; "section" -> "S"; "part" -> "P"; "appendix" -> "A"; else -> null
+                }
+                if (k != null) return "$k:$v"
+            }
+        }
+        // ---- 条目：罗马数字 I. II. III.（章节标题风格，非正文列表）----
+        RE_SEC_ROMAN_ITEM.find(s)?.let { m -> roman2int(m.groupValues[1])?.let { return "I:$it" } }
+        // ---- 条目：中文数字 一、二、…（段首中文数字+顿号/点，章节标题风格）----
+        RE_SEC_CN_ITEM.find(s)?.let { m -> cn2int(m.groupValues[1])?.let { return "I:$it" } }
+        return null
+    }
+
+    // ── 正则表 ──
+    private val FILLER_CHARS = "\\s\\-—–…·.,。:：;；、?!！()（）\\[\\]【】\"'"
+    private val RE_FILLER_FULL = Regex("^[$FILLER_CHARS]+\$")
+    private val RE_FILLER_STRIP = Regex("[$FILLER_CHARS]+")
+
+    private val RE_LEAD_DOTTED = Regex("""^\s*(\d+(?:\.\d+){1,3})(?![.\d])""")
+
+    private val RE_SEC_CHAP_CN_CH = Regex("""^第\s*([零一二三四五六七八九十百千两]+)\s*章""")
+    private val RE_SEC_CHAP_CN_SEC = Regex("""^第\s*([零一二三四五六七八九十百千两]+)\s*节""")
+    private val RE_SEC_CHAP_CN_PART = Regex("""^第\s*([零一二三四五六七八九十百千两]+)\s*部分""")
+    private val RE_SEC_APPEND_CN = Regex("""^附录\s*([A-Za-z零一二三四五六七八九十]+)""")
+    private val RE_SEC_EN = Regex("""^(Chapter|CHAPTER|Section|SECTION|Part|PART|Appendix|APPENDIX)\s+([IVXLCDMivxlcdm]+|[0-9]+|[A-Za-z]+)""")
+    private val RE_SEC_ROMAN_ITEM = Regex("""^\s*([IVXLCDM]+)\s*[\.．、]""")
+    private val RE_SEC_CN_ITEM = Regex("""^\s*([零一二三四五六七八九十百千两]+)\s*[、．.]""")
+
+    // ── 数字归一 ──
+    private fun cn2int(s: String?): Int? {
+        val map = mapOf('零' to 0, '一' to 1, '二' to 2, '两' to 2, '三' to 3, '四' to 4,
+            '五' to 5, '六' to 6, '七' to 7, '八' to 8, '九' to 9)
+        val str = (s ?: "").trim()
+        if (str.isEmpty()) return null
+        if (str.length == 1 && str[0] in map) return map[str[0]]
+        if (str == "十") return 10
+        var v = 0
+        var tmp = 0
+        for (ch in str) {
             when {
-                c in map -> current = map[c]!!
-                c == '十' -> { if (current == 0) current = 1; total += current * 10; current = 0 }
-                c == '百' -> { if (current == 0) current = 1; total += current * 100; current = 0 }
-                c == '千' -> { if (current == 0) current = 1; total += current * 1000; current = 0 }
+                ch in map -> tmp = map[ch]!!
+                ch == '十' -> { v += if (tmp > 0) tmp * 10 else 10; tmp = 0 }
+                ch == '百' -> { v += if (tmp > 0) tmp * 100 else 100; tmp = 0 }
+                ch == '千' -> { v += if (tmp > 0) tmp * 1000 else 1000; tmp = 0 }
                 else -> return null
             }
         }
-        total += current
-        return if (total == 0) null else total
+        v += tmp
+        return if (v > 0) v else null
     }
 
-    /** 罗马数字 → 阿拉伯数字（I→1, IV→4, IX→9, XX→20 ...）。 */
-    private fun romanToInt(s: String): Int? {
+    private fun roman2int(s: String?): Int? {
         val map = mapOf('I' to 1, 'V' to 5, 'X' to 10, 'L' to 50, 'C' to 100, 'D' to 500, 'M' to 1000)
+        val str = (s ?: "").trim().uppercase()
+        if (str.isEmpty() || str.any { it !in map }) return null
         var total = 0
         var prev = 0
-        for (c in s.reversed()) {
-            val v = map[c] ?: return null
+        for (ch in str.reversed()) {
+            val v = map[ch]!!
             total += if (v < prev) -v else v
             prev = v
         }
         return if (total == 0) null else total
     }
 
-    /** 带圈数字 ①..⑳ → 1..20。 */
-    private fun circledToInt(s: String): Int? {
-        val code = s.codePointAt(0)
-        return if (code in 0x2460..0x2473) code - 0x2460 + 1 else null
-    }
-
-    // 顺序 i↔i（docx 无编号时的兜底，等价于 anchored 全区间位置配对）
-    private fun sequential(src: List<Block>, tgt: List<Block>): Result {
-        val n = minOf(src.size, tgt.size)
-        val pairs = mutableListOf<Pair<Block, Block>>()
-        for (i in 0 until n) pairs.add(src[i] to tgt[i])
-        val extras = mutableListOf<Pair<String, Block>>()
-        for (i in n until src.size) extras.add("src" to src[i])
-        for (i in n until tgt.size) extras.add("tgt" to tgt[i])
-        return Result(pairs, extras)
+    private fun engOrdinal(s: String?): Int? {
+        val map = mapOf(
+            "one" to 1, "two" to 2, "three" to 3, "four" to 4, "five" to 5, "six" to 6,
+            "seven" to 7, "eight" to 8, "nine" to 9, "ten" to 10, "eleven" to 11, "twelve" to 12,
+            "first" to 1, "second" to 2, "third" to 3, "fourth" to 4, "fifth" to 5,
+            "sixth" to 6, "seventh" to 7, "eighth" to 8, "ninth" to 9, "tenth" to 10,
+            "eleventh" to 11, "twelfth" to 12
+        )
+        return map[(s ?: "").trim().lowercase()]
     }
 }

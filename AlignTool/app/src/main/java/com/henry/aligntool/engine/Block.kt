@@ -48,7 +48,10 @@ data class Block(
     val shapeIdx: Int? = null,
     val innerIdx: Int? = null,
     // SmartArt 位置
-    val modelId: String? = null
+    val modelId: String? = null,
+    // 来自表格单元格的块（等价桌面 table_rows 原子整体）：永不作 filler 过滤，
+    // 避免短单元格被误判 filler 后，表格内译文错位（桌面 _is_docx_filler 对整表返回 False）。
+    val isCell: Boolean = false
 ) {
     val isTable: Boolean get() = tableRows != null
 

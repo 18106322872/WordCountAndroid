@@ -47,7 +47,7 @@ object DocxExtractor {
                     for (tr in child.find("tr")) {
                         for (tc in tr.find("tc")) {
                             val text = OoxmlUtil.collectText(tc, "t")
-                            out.add(Slot(Anchor.DocxCell(tc), Block(text, firstRunFont(tc), align = jcVal(tc))))
+                            out.add(Slot(Anchor.DocxCell(tc), Block(text, firstRunFont(tc), align = jcVal(tc), isCell = true)))
                         }
                     }
                 }
