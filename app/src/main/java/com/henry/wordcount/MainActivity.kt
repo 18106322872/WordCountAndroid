@@ -251,6 +251,7 @@ fun WordCountApp(initialUris: List<Uri>) {
 
     val entries = remember { mutableStateListOf<FileEntry>() }
     var busy by remember { mutableStateOf(false) }
+    var exportingPdfId by remember { mutableStateOf<String?>(null) }
     // v1.1.1: 文档比较模式开关
     var compareMode by remember { mutableStateOf(false) }
 
@@ -427,6 +428,8 @@ fun WordCountApp(initialUris: List<Uri>) {
                             onOpen = { e -> openWithOtherApp(context, e) },
                             onOpenWord = { e -> openWithWord(context, e) },
                             onOpenWps = { e -> openWithWps(context, e) },
+                            onExportPdf = { e -> exportDwgToPdf(context, e, scope, snackbar, onStateChange = { exportingPdfId = it }) },
+                            exportingPdfId = exportingPdfId,
                             hiddenSelected = hiddenSelected,
                             onToggleHidden = { id, name ->
                                 val k = "$id::$name"
@@ -465,6 +468,8 @@ fun FileCard(
     onOpen: (FileEntry) -> Unit,
     onOpenWord: (FileEntry) -> Unit,
     onOpenWps: (FileEntry) -> Unit,
+    onExportPdf: (FileEntry) -> Unit,
+    exportingPdfId: String?,
     hiddenSelected: Map<String, Boolean>,
     onToggleHidden: (String, String) -> Unit
 ) {
@@ -575,6 +580,24 @@ fun FileCard(
                             modifier = Modifier
                                 .padding(top = 4.dp)
                                 .clickable { onOpenWps(entry) })
+                    }
+                    // v1.5.9: DWG 文件显示「PDF」导出按钮（灰色运行中，点击导出后用 WPS 打开）
+                    val isDwg = (entry.result?.ext ?: "").lowercase() == ".dwg"
+                    if (isDwg) {
+                        val isExportingPdf = exportingPdfId == entry.id
+                        if (isExportingPdf) {
+                            Text("导出中…",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.Gray,
+                                modifier = Modifier.padding(top = 4.dp))
+                        } else {
+                            Text("PDF",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFB00020),
+                                modifier = Modifier
+                                    .padding(top = 4.dp)
+                                    .clickable { onExportPdf(entry) })
+                        }
                     }
                 }
             }
@@ -777,6 +800,63 @@ private fun openWithWps(context: android.content.Context, entry: FileEntry) {
         }
     } catch (e: Throwable) {
         Log.w("WordCount", "用Wps打开失败 ${entry.displayName}: ${e.message}")
+    }
+}
+
+/**
+ * v1.5.9: 导出 DWG -> PDF（看图用）。点击文件卡片的「PDF」按钮触发。
+ *   1) 调 DwgConverter.convertToPdf()（C 层 LibreDWG 读 DWG 写 PDF）
+ *   2) 成功：用 WPS 打开（未装 WPS 则弹系统选择器）
+ *   3) 失败：toast 提示错误码
+ * onStateChange(id) 用于按钮灰色/恢复（导出中传 entry.id，结束传 null）
+ */
+private fun exportDwgToPdf(
+    context: android.content.Context,
+    entry: FileEntry,
+    scope: kotlinx.coroutines.CoroutineScope,
+    snackbar: SnackbarHostState,
+    onStateChange: (String?) -> Unit
+) {
+    val pdfPath = entry.cachePath.removeSuffix(".dwg") + ".pdf"
+    onStateChange(entry.id)
+    scope.launch(Dispatchers.IO) {
+        try {
+            val res = DwgConverter.convertToPdf(entry.cachePath, pdfPath)
+            withContext(Dispatchers.Main) {
+                onStateChange(null)
+                if (res.path == null) {
+                    val msg = "DWG转PDF失败 [${res.errorCode}] ${res.diagText}"
+                    Log.w("WordCount", msg)
+                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                    return@withContext
+                }
+                // 打开 PDF：优先 WPS，未装则系统选择器
+                val file = File(pdfPath)
+                val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "application/pdf")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                try {
+                    intent.setPackage("cn.wps.moffice_eng")
+                    context.startActivity(intent)
+                } catch (e: android.content.ActivityNotFoundException) {
+                    // 未安装 WPS -> 系统选择器
+                    try {
+                        context.startActivity(Intent.createChooser(intent, "打开导出的 PDF"))
+                    } catch (e2: Throwable) {
+                        Toast.makeText(context, "未找到可打开 PDF 的应用", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        } catch (e: Throwable) {
+            withContext(Dispatchers.Main) {
+                onStateChange(null)
+                Log.w("WordCount", "DWG转PDF异常 ${entry.displayName}: ${e.message}")
+                Toast.makeText(context, "DWG转PDF失败：${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
     }
 }
 
