@@ -753,7 +753,7 @@ private fun looksLikeRealText(s: String, minRun: Int): Boolean {
     val low = s.lowercase()
     if (low in DWG_STOPWORDS) return false
     // 至少 3 个字母
-    val letters = s.count { it.isAlpha() }
+    val letters = s.count { it.isLetter() }
     if (letters < 3) return false
     // 数字占比不超过 50%（排除坐标）
     val digits = s.count { it.isDigit() }
