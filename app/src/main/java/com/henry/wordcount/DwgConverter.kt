@@ -71,7 +71,7 @@ object DwgConverter {
                     else -> "unknown $rc"
                 }
                 Log.e("DwgConverter", "FAIL: $msg | diag=$diag")
-                DwgResult(errorCode = rc, diagText = "$msg | $diag".trim().stripSuffix("|").trim())
+                DwgResult(errorCode = rc, diagText = "$msg | $diag".trim().removeSuffix("|").trim())
             }
         } catch (e: Throwable) {
             Log.e("DwgConverter", "exception: ${e.message}", e)
