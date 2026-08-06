@@ -728,17 +728,18 @@ fun extractDxfText(dxfPath: String): String {
     try {
         val lines = File(dxfPath).readLines()
         var i = 0
+        var currentEntity = ""  // 追踪当前实体类型（code "0" 的值）
         while (i < lines.size - 1) {
             val code = lines[i].trim()
             val value = if (i + 1 < lines.size) lines[i + 1].trim() else ""
             when (code) {
-                "0" -> { // 实体类型开始
-                    // 记录当前实体类型，后续组码 1/3 的值属于该实体
+                "0" -> {
+                    // 记录当前实体类型：只对 TEXT/MTEXT 提取文字
+                    currentEntity = value.uppercase()
                 }
-                "1", "3" -> { // 文本值 / 附加文本（MTEXT prompt）
-                    // 组码 1 和 3 的值直接追加（不区分实体类型，
-                    // 因为非文字实体的组码 1 通常为空或不含文字）
-                    if (value.isNotEmpty()) {
+                "1", "3" -> {
+                    // 仅在 TEXT/MTEXT/ATTDEF 实体内提取文本组码值
+                    if (value.isNotEmpty() && (currentEntity == "TEXT" || currentEntity == "MTEXT" || currentEntity == "ATTDEF")) {
                         if (sb.isNotEmpty()) sb.append('\n')
                         sb.append(value)
                     }
@@ -854,7 +855,10 @@ private fun exportDwgToPdf(
     snackbar: SnackbarHostState,
     onStateChange: (String?) -> Unit
 ) {
-    val pdfPath = entry.cachePath.removeSuffix(".dwg") + ".pdf"
+    // 大小写无关地去掉 .dwg 后缀，拼接 .pdf
+    val baseName = entry.cachePath.replace(Regex("\\.(dwg|DWG)$"), "")
+    val pdfPath = baseName + ".pdf"
+    Log.d("WordCount", "DWG→PDF: input=${entry.cachePath} → output=$pdfPath")
     onStateChange(entry.id)
     scope.launch(Dispatchers.IO) {
         try {
@@ -869,6 +873,12 @@ private fun exportDwgToPdf(
                 }
                 // 打开 PDF：优先 WPS，未装则系统选择器
                 val file = File(pdfPath)
+                if (!file.exists() || file.length() == 0L) {
+                    Toast.makeText(context, "PDF 文件未生成（转换可能失败）", Toast.LENGTH_LONG).show()
+                    Log.e("WordCount", "PDF 不存在或为空: $pdfPath exists=${file.exists()} size=${file.length()}")
+                    return@withContext
+                }
+                Log.d("WordCount", "PDF 已生成: $pdfPath (${file.length()} bytes)")
                 val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
                 val intent = Intent(Intent.ACTION_VIEW).apply {
                     setDataAndType(uri, "application/pdf")
