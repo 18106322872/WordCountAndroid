@@ -102,10 +102,12 @@ jobs:
           # 编译 JNI wrapper → libdwg2dxf.so（链接 LibreDWG 静态库）
           mkdir -p "${GITHUB_WORKSPACE:-.}/app/src/main/jniLibs/arm64-v8a"
           "$CC" --shared -fPIC \
+            -static-libstdc++ -lc++_static \
+            -Wl,--no-undefined,-z,noexecstack \
             -I/tmp/libredwg/src -I/tmp/libredwg/include -I/tmp/libredwg \
             -I"$TOOL/sysroot/usr/include" \
             "${GITHUB_WORKSPACE:-.}/app/src/main/cpp/dwg2dxf_jni.c" \
-            "$LIBDWG" -lm -lz \
+            "$LIBDWG" -lm -lz -llog -landroid \
             -o "${GITHUB_WORKSPACE:-.}/app/src/main/jniLibs/arm64-v8a/libdwg2dxf.so"
           SO="${GITHUB_WORKSPACE:-.}/app/src/main/jniLibs/arm64-v8a/libdwg2dxf.so"
           if [ -f "$SO" ]; then
