@@ -98,10 +98,10 @@ jobs:
             export CXX="$CC++"
             echo "=== Building for $ABI (host=$HOST) ==="
             rm -rf build-$ABI && mkdir -p build-$ABI && cd build-$ABI
-            ../configure --host=$HOST --prefix=/tmp/ldinst-$ABI \
+            ../configure --host=$HOST CFLAGS="-fPIC" CXXFLAGS="-fPIC" --prefix=/tmp/ldinst-$ABI \
               --disable-bindings --disable-python --disable-perl --disable-docs \
               --enable-static --disable-shared --disable-werror || \
-            ../configure --host=$HOST --prefix=/tmp/ldinst-$ABI --disable-docs --enable-static --disable-shared --disable-werror
+            ../configure --host=$HOST CFLAGS="-fPIC" CXXFLAGS="-fPIC" --prefix=/tmp/ldinst-$ABI --disable-docs --enable-static --disable-shared --disable-werror
             make -j"$(nproc)"
             # LibreDWG 静态库名在不同版本可能是 libdwg.a 或 libredwg.a，两者都搜
             LIBDWG=$(find . \( -name "libdwg.a" -o -name "libredwg.a" \) 2>/dev/null | head -1)
