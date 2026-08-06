@@ -100,9 +100,10 @@ jobs:
               --enable-static --disable-shared --disable-werror || \
             ../configure --host=$HOST --prefix=/tmp/ldinst-$ABI --disable-docs --enable-static --disable-shared --disable-werror
             make -j"$(nproc)"
-            LIBDWG=$(find . -name "libdwg.a" | head -1)
+            # LibreDWG 静态库名在不同版本可能是 libdwg.a 或 libredwg.a，两者都搜
+            LIBDWG=$(find . \( -name "libdwg.a" -o -name "libredwg.a" \) 2>/dev/null | head -1)
             echo "LIBDWG($ABI)=$LIBDWG"
-            if [ -z "$LIBDWG" ]; then echo "libdwg.a 未生成 for $ABI"; FAIL=1; fi
+            if [ -z "$LIBDWG" ]; then echo "libdwg.a/libredwg.a 未生成 for $ABI"; FAIL=1; fi
             cp ../config.h ../include/ 2>/dev/null || cp ../src/config.h ../include/ 2>/dev/null || true
             mkdir -p "$WS/app/src/main/jniLibs/$ABI"
             "$CC" --shared -fPIC \
