@@ -125,10 +125,6 @@ jobs:
           done
           if [ -n "$FAIL" ]; then
             echo "MULTI-ABI BUILD FAILED"
-          else
-            echo "ALL ABI BUILDS OK"
-          fi
-          # 下方 else 分支（libdwg2dxf.so 未生成）现由 FAIL 标志处理；保留诊断
             echo "libdwg2dxf.so 未生成"
             python3 - <<'PY'
           import os, json, urllib.request
@@ -136,7 +132,7 @@ jobs:
               log = open('/tmp/so_build.log', encoding='utf-8', errors='replace').read()
           except Exception as e:
               log = '(no log: %s)' % e
-          body = "## .so build FAILED (v1.5.5)\n\n### 编译日志尾部\n```\n%s\n```" % log[-4500:]
+          body = "## .so build FAILED (v1.5.9)\n\n### 编译日志尾部\n```\n%s\n```" % log[-4500:]
           data = json.dumps({"body": body}).encode('utf-8')
           req = urllib.request.Request(
               "https://api.github.com/repos/18106322872/WordCountAndroid/commits/%s/comments" % os.environ['SHA'],
@@ -152,6 +148,8 @@ jobs:
               print("diag post failed:", e)
           PY
             exit 1
+          else
+            echo "ALL ABI BUILDS OK"
           fi
 
 
