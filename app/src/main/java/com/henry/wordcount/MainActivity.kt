@@ -2183,23 +2183,48 @@ private fun addFiles(
                     }
                 }
 
-                // DWG(CAD)：v1.5.10 改用原始二进制扫描提取文字（移植自 port_dwg.py improved 模式）
-                //   不再走 JNI 转 DXF（DXF TEXT/MTEXT 含尺寸数值/坐标/格式码导致字数虚高）
-                //   不再走 PythonEngine（Chaquopy subprocess 会触发 AssetFinder/scripts 报错）
-                //   算法：扫字节 → ASCII/UTF-16LE/CJK 串 → stopwords/元音/数字比例过滤 → 去重 → countTextKotlin
+                // DWG(CAD)：v1.5.11 原始二进制扫描为主路径 + "CAD 转 PDF 统计"回退分支
+                //   主路径：scanDwgRaw() 直接扫字节（移植自 port_dwg.py improved 模式）
+                //   回退：电脑端 wordcount 已验证——某些 CAD 文字被压缩/特殊编码/代理对象，
+                //         raw scan 拿不到正确字数，必须先导出 PDF 再从 PDF 文本层提取。
+                //         LibreDWG 导出的 PDF 文字是可选中文本层（BT/Tj 操作符），提取即可统计，
+                //         图形乱不影响字数统计。全程免费、Kotlin 原生（PdfExtractor），无 Python 依赖。
                 dwgFiles.forEachIndexed { i, cf ->
                     val f = cf.file
                     val dName = cf.displayName
                     try {
+                        // ── 主路径：原始二进制扫描 ──
                         val rawText = scanDwgRaw(f.absolutePath)
-                        if (rawText.isBlank()) {
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（未提取到文字内容）"))
-                            return@forEachIndexed
+                        var finalStats = countTextKotlin(rawText)
+                        val rawChars = finalStats.fourth
+                        val rawFeRatio = if (rawChars > 0) finalStats.second.toDouble() / rawChars else 0.0
+                        // 回退触发：raw scan 疑似无效
+                        //   a) 提取到的字符过少（<50）→ 文字被压缩/特殊编码，raw scan 拿不到
+                        //   b) 大量字符但中文占比极低（<15%）→ 二进制垃圾被误判为文字
+                        val rawInvalid = rawChars < 50 || (rawChars > 5000 && rawFeRatio < 0.15)
+                        if (rawInvalid) {
+                            // ── 回退：转 PDF 再从 PDF 文本层提取 ──
+                            val pdfPath = "${f.parent}/${f.nameWithoutExtension}.pdf"
+                            val res = DwgConverter.convertToPdf(f.absolutePath, pdfPath)
+                            if (res.path != null) {
+                                val pdfFile = File(pdfPath)
+                                if (pdfFile.exists() && pdfFile.length() > 0) {
+                                    val ktRes = PdfExtractor.extract(pdfFile)
+                                    val pdfStats = countTextKotlin(ktRes.text)
+                                    val pdfFeRatio = if (pdfStats.fourth > 0) pdfStats.second.toDouble() / pdfStats.fourth else 0.0
+                                    // 采用 PDF 结果的条件：PDF 中文占比明显更高，或 raw 是极端垃圾而 PDF 在合理范围
+                                    val pdfBetter = pdfStats.fourth > 0 &&
+                                            (pdfFeRatio > rawFeRatio + 0.1 || (pdfStats.fourth in 50..50000 && rawChars > 50000))
+                                    if (pdfBetter) {
+                                        finalStats = pdfStats
+                                        Log.d("WordCount", "DWG PDF回退 $dName: raw=$rawChars(fe=$rawFeRatio) → pdf=${pdfStats.fourth}(fe=$pdfFeRatio)")
+                                    }
+                                }
+                            }
                         }
-                        val stats = countTextKotlin(rawText)
                         val resMap = mapOf(
                             "name" to dName, "ext" to ".dwg",
-                            "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
+                            "stats" to mapOf("words" to finalStats.first, "fe" to finalStats.second, "nc" to finalStats.third, "chars" to finalStats.fourth),
                             "meta" to emptyMap<String, Any?>(),
                             "pages" to 1
                         )
