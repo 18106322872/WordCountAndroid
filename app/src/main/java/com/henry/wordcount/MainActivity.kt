@@ -583,7 +583,8 @@ fun FileCard(
                                 .clickable { onOpenWps(entry) })
                     }
                     // v1.5.9: DWG 文件显示「PDF」导出按钮（灰色运行中，点击导出后用 WPS 打开）
-                    val isDwg = (entry.result?.ext ?: "").lowercase() == ".dwg"
+                    //   用 cachePath 扩展名判断（不依赖 entry.result，处理失败时 result 为 null 会导致按钮不显示）
+                    val isDwg = entry.cachePath.endsWith(".dwg", ignoreCase = true)
                     if (isDwg) {
                         val isExportingPdf = exportingPdfId == entry.id
                         if (isExportingPdf) {
@@ -714,6 +715,41 @@ fun countTextKotlin(text: String): Quadruple<Int, Int, Int, Int> {
 
     val words = totalFe + totalNc
     return Quadruple(words, totalFe, totalNc, totalChars)
+}
+
+/**
+ * v1.5.9b: 从 DXF 文件提取所有文字内容（纯 Kotlin，不依赖 Python）。
+ * DXF 是 ASCII 文本格式：每对行为「组码行 + 值行」。
+ * 关键组码：0=实体类型(TEXT/MTEXT), 1=文本值, 3=附加文本(MTEXT提示),
+ *         2=属性标签(ATTRIB).
+ */
+fun extractDxfText(dxfPath: String): String {
+    val sb = StringBuilder()
+    try {
+        val lines = File(dxfPath).readLines()
+        var i = 0
+        while (i < lines.size - 1) {
+            val code = lines[i].trim()
+            val value = if (i + 1 < lines.size) lines[i + 1].trim() else ""
+            when (code) {
+                "0" -> { // 实体类型开始
+                    // 记录当前实体类型，后续组码 1/3 的值属于该实体
+                }
+                "1", "3" -> { // 文本值 / 附加文本（MTEXT prompt）
+                    // 组码 1 和 3 的值直接追加（不区分实体类型，
+                    // 因为非文字实体的组码 1 通常为空或不含文字）
+                    if (value.isNotEmpty()) {
+                        if (sb.isNotEmpty()) sb.append('\n')
+                        sb.append(value)
+                    }
+                }
+            }
+            i += 2 // 跳过组码+值这一对
+        }
+    } catch (e: Exception) {
+        Log.w("WordCount", "DXF 文本提取异常: ${e.message}")
+    }
+    return sb.toString()
 }
 
 /** 简单四元组（避免引入额外依赖）*/
@@ -2004,9 +2040,9 @@ private fun addFiles(
                     }
                 }
 
-                // DWG(CAD)：v1.5.5 改用 JNI 加载 libdwg2dxf.so 转换（绕开 SELinux exec 限制）
-                //   DwgConverter.convert() 内部走 System.loadLibrary + native dwg2dxf()
-                //   转换成功后得到 .dxf → 交给 Python 纯文本提取+统计（复用已有逻辑）
+                // DWG(CAD)：v1.5.9b 改用 JNI libdwg2dxf.so 转 DXF + Kotlin 纯文本解析
+                //   不再走 PythonEngine（Chaquopy subprocess 会触发 AssetFinder/scripts 报错）
+                //   DXF 是 ASCII 文本格式：group-code 行对，0=实体类型, 1=文本值, 3=附加文本
                 dwgFiles.forEachIndexed { i, cf ->
                     val f = cf.file
                     val dName = cf.displayName
@@ -2017,39 +2053,17 @@ private fun addFiles(
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（DWG转换失败 [${result.errorCode}] ${result.diagText}）"))
                             return@forEachIndexed
                         }
-                        // 把转换好的 DXF 路径传给 Python 做纯文本提取+统计
-                        val pyResults = PythonEngine.countFiles(context, listOf(result.path))
-                        @Suppress("UNCHECKED_CAST")
-                        val pyList = pyResults as? List<Map<String, Any?>>
-                        if (!pyList.isNullOrEmpty()) {
-                            val py0 = pyList[0]
-                            if (py0["ok"] == true) {
-                                val pyData = py0["result"] as? Map<String, Any?>
-                                if (pyData != null) {
-                                    val pyS = pyData["stats"] as? Map<String, Any?>
-                                    val words = (pyS?.get("words") as? Number)?.toInt() ?: 0
-                                    val fe = (pyS?.get("fe") as? Number)?.toInt() ?: 0
-                                    val nc = (pyS?.get("nc") as? Number)?.toInt() ?: 0
-                                    val chars = (pyS?.get("chars") as? Number)?.toInt() ?: 0
-                                    val pages = (pyData["pages"] as? Number)?.toInt() ?: 1
-                                    val resMap = mapOf(
-                                        "name" to dName, "ext" to ".dwg",
-                                        "stats" to mapOf("words" to words, "fe" to fe, "nc" to nc, "chars" to chars),
-                                        "meta" to emptyMap<String, Any?>(),
-                                        "pages" to pages
-                                    )
-                                    val fr = toFileResult(resMap, f.absolutePath)
-                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-                                } else {
-                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（未返回结果）"))
-                                }
-                            } else {
-                                val err = py0["error"]?.toString() ?: "DWG转换失败"
-                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（${err}）"))
-                            }
-                        } else {
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件"))
-                        }
+                        // v1.5.9b: Kotlin 纯解析 DXF 提取文字（绕开 Chaquopy subprocess 限制）
+                        val dxfText = extractDxfText(result.path)
+                        val stats = countTextKotlin(dxfText)
+                        val resMap = mapOf(
+                            "name" to dName, "ext" to ".dwg",
+                            "stats" to mapOf("words" to stats.first, "fe" to stats.second, "nc" to stats.third, "chars" to stats.fourth),
+                            "meta" to emptyMap<String, Any?>(),
+                            "pages" to 1
+                        )
+                        val fr = toFileResult(resMap, f.absolutePath)
+                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                     } catch (e: Throwable) {
                         Log.w("WordCount", "DWG 解析失败 ${f.name}: ${e.message}")
                         entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（${e.message}）"))
