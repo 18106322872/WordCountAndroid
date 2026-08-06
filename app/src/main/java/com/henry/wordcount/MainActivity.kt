@@ -1931,9 +1931,9 @@ private fun addFiles(
                     val dName = cf.displayName
                     try {
                         val dxfPath = f.absolutePath.removeSuffix(".dwg") + ".dxf"
-                        val converted = DwgConverter.convert(f.absolutePath, dxfPath)
-                        if (converted == null) {
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（DWG转换失败）"))
+                        val result = DwgConverter.convert(f.absolutePath, dxfPath)
+                        if (result.path == null)
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（DWG转换失败 [${result.errorCode}] ${result.diagText}）"))
                             return@forEachIndexed
                         }
                         // 把转换好的 DXF 路径传给 Python 做纯文本提取+统计
@@ -1958,20 +1958,20 @@ private fun addFiles(
                                         "pages" to pages
                                     )
                                     val fr = toFileResult(resMap, f.absolutePath)
-                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（DWG转换失败 [${result.errorCode}] ${result.diagText}）"))
                                 } else {
-                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（未返回结果）"))
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（DWG转换失败 [${result.errorCode}] ${result.diagText}）"))
                                 }
                             } else {
                                 val err = py0["error"]?.toString() ?: "DWG转换失败"
-                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（${err}）"))
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（DWG转换失败 [${result.errorCode}] ${result.diagText}）"))
                             }
                         } else {
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件"))
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（DWG转换失败 [${result.errorCode}] ${result.diagText}）"))
                         }
                     } catch (e: Throwable) {
                         Log.w("WordCount", "DWG 解析失败 ${f.name}: ${e.message}")
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（${e.message}）"))
+                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（DWG转换失败 [${result.errorCode}] ${result.diagText}）"))
                     }
                 }
 
