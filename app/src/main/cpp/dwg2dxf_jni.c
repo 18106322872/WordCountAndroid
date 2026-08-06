@@ -170,6 +170,8 @@ typedef struct {
     double off_y;
     char   buf[8192];    /* content stream buffer */
     int    buf_len;
+    long   len_off;      /* file offset of the Length digits in obj 5 */
+    long   stream_off;   /* file offset where content stream data begins */
 } PdfWriter;
 
 static double g_min_x = 0, g_min_y = 0, g_max_x = 1, g_max_y = 1;
@@ -230,52 +232,24 @@ static int pdf_begin(PdfWriter *w, const char *path, double page_w, double page_
     w->xref[w->obj_num] = ftell(w->fp);
     fprintf(w->fp, "%d 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
             w->obj_num++);
-    /* obj 5: Content stream (filled later by pdf_end) */
+    /* obj 5: Content stream (Length patched in place by pdf_end) */
     w->xref[w->obj_num] = ftell(w->fp);
-    fprintf(w->fp, "%d 0 obj\n<< /Length %d >>\nstream\n", w->obj_num, 0); /* placeholder */
-    /* We'll seek back and patch Length after flush */
+    fprintf(w->fp, "%d 0 obj\n<< /Length ", w->obj_num++);
+    w->len_off = ftell(w->fp);
+    fprintf(w->fp, "0000000000 >>\nstream\n");
+    w->stream_off = ftell(w->fp);
     return 0;
 }
 
-/* Finish PDF: flush content, patch Length, write xref + trailer */
+/* Finish PDF: flush content, patch Length in place, write xref + trailer */
 static int pdf_end(PdfWriter *w)
 {
     pdf_flush(w);
     long content_end = ftell(w->fp);
-    /* patch /Length in obj 5 */
-    /* obj5 started at xref[5]; the "stream\n" is after "<< /Length N >>\nstream\n" */
-    /* Recompute: we stored xref[5] = offset of "5 0 obj". Find "stream" keyword. */
-    /* Simpler: store the offset right before "stream" */
-    /* We'll just rewrite by seeking. */
-    long stream_start = w->xref[5];
-    /* Search for "stream\n" after stream_start */
-    fseek(w->fp, stream_start, SEEK_SET);
-    char tmp[256];
-    long pos = stream_start;
-    long stream_data_offset = 0;
-    while (pos < content_end) {
-        fread(tmp, 1, 1, w->fp);
-        if (tmp[0] == 's') {
-            /* check if "stream" */
-            char s[7];
-            long cur = ftell(w->fp) - 1;
-            fseek(w->fp, cur, SEEK_SET);
-            if (fread(s, 1, 6, w->fp) == 6 && strncmp(s, "stream", 6) == 0) {
-                /* skip "stream\n" (may be \r\n) */
-                char c;
-                do { fread(&c, 1, 1, w->fp); } while (c != '\n' && ftell(w->fp) < content_end);
-                stream_data_offset = ftell(w->fp);
-                break;
-            }
-            fseek(w->fp, cur + 1, SEEK_SET);
-        }
-        pos++;
-    }
-    int length = (int)(content_end - stream_data_offset);
-    /* patch Length */
-    fseek(w->fp, stream_start, SEEK_SET);
-    fprintf(w->fp, "%d 0 obj\n<< /Length %d >>\nstream\n", 5, length);
-    /* now we may have overwritten into stream area; seek to content_end and write endstream */
+    long length = content_end - w->stream_off;
+    /* Patch Length in place using a fixed 10-digit width (no byte shift). */
+    fseek(w->fp, w->len_off, SEEK_SET);
+    fprintf(w->fp, "%010d", (int)length);
     fseek(w->fp, content_end, SEEK_SET);
     fprintf(w->fp, "\nendstream\nendobj\n");
 
@@ -368,6 +342,177 @@ static void pdf_text(PdfWriter *w, double x, double y, double size, const char *
     pdf_cat(w, "BT /F1 %.2f Tf %.2f %.2f Td %s Tj ET\n", size * w->scale, px, py, esc);
 }
 
+/* ---------- DXF-based geometry extraction (version-proof) ----------
+ * Instead of touching LibreDWG's internal entity structs (which change
+ * between releases), we ask LibreDWG to emit a temporary ASCII DXF via
+ * dwg_write_dxf(), then parse the stable DXF group-code text format to
+ * extract LINE / LWPOLYLINE / CIRCLE / ARC / TEXT / MTEXT geometry and
+ * draw it into the PDF. Only dwg_read_file + dwg_write_dxf are used.
+ * ------------------------------------------------------------------ */
+
+#ifndef MAX_DXF_LINE
+#define MAX_DXF_LINE 1024
+#endif
+
+/* Parse a DXF group-code line. Returns 1 if the line is a valid integer
+ * group code (0..65535), else 0 (stray/non-numeric line to be skipped). */
+static int dxf_parse_code(const char *s, int *ok)
+{
+    char *end;
+    long v = strtol(s, &end, 10);
+    *ok = (end != s) && (*end == '\0' || *end == '\n' || *end == '\r' || *end == ' ');
+    return (int)v;
+}
+
+/* Read the next (code, value) pair from a DXF stream. Returns 1 on success,
+ * 0 on EOF. Skips stray non-numeric lines so pairing stays in sync. */
+static int dxf_next(FILE *f, int *code, char *val, int vbsize)
+{
+    char line[MAX_DXF_LINE];
+    for (;;) {
+        if (!fgets(line, sizeof(line), f)) return 0;
+        int ok;
+        int c = dxf_parse_code(line, &ok);
+        if (!ok) continue;            /* skip stray line */
+        *code = c;
+        if (!fgets(val, vbsize, f)) return 0;
+        size_t L = strlen(val);
+        while (L > 0 && (val[L - 1] == '\n' || val[L - 1] == '\r')) val[--L] = '\0';
+        return 1;
+    }
+}
+
+/* Pass 1: compute drawing extents (incl. circle/arc radius padding). */
+static int dxf_bounds(const char *path, double *mnx, double *mny,
+                      double *mxx, double *mxy)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    *mnx = *mny =  1e30;
+    *mxx = *mxy = -1e30;
+    int in_ent = 0, code;
+    char val[MAX_DXF_LINE];
+    char cur[40]; cur[0] = 0;
+    double cx = 0, cy = 0, rad = 0, pendX = 0;
+    int pendSet = 0;
+    #define UPD(x, y) do { if ((x) < *mnx) *mnx = (x); if ((x) > *mxx) *mxx = (x); \
+                           if ((y) < *mny) *mny = (y); if ((y) > *mxy) *mxy = (y); } while (0)
+    while (dxf_next(f, &code, val, sizeof(val))) {
+        if (code == 0) {
+            if (strcmp(val, "ENDSEC") == 0 || strcmp(val, "EOF") == 0) {
+                if (strcmp(val, "EOF") == 0) break;
+                in_ent = 0; cur[0] = 0; continue;
+            }
+            if (strcmp(val, "SECTION") == 0) continue;
+            strncpy(cur, val, sizeof(cur) - 1); cur[sizeof(cur) - 1] = 0;
+            in_ent = 1; cx = cy = rad = 0; continue;
+        }
+        if (!in_ent) continue;
+        if (code == 2) {
+            if (strcmp(val, "ENTITIES") == 0) in_ent = 1;
+            else if (strcmp(val, "ENDSEC") == 0) in_ent = 0;
+            continue;
+        }
+        if (code == 10 || code == 11) { pendX = atof(val); pendSet = 1; }
+        else if (code == 20 || code == 21) {
+            if (pendSet) { double x = pendX, y = atof(val); pendSet = 0; cx = x; cy = y; UPD(x, y); }
+        }
+        else if (code == 40) {
+            if (strcmp(cur, "CIRCLE") == 0 || strcmp(cur, "ARC") == 0) {
+                rad = atof(val); UPD(cx - rad, cy - rad); UPD(cx + rad, cy + rad);
+            }
+        }
+    }
+    #undef UPD
+    fclose(f);
+    if (*mxx <= *mnx || *mxy <= *mny) { *mnx = 0; *mny = 0; *mxx = 100; *mxy = 100; }
+    return 0;
+}
+
+/* Pass 2: draw entities into the PDF writer. */
+static int dxf_draw(const char *path, PdfWriter *w, int *drawn_out)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    int in_ent = 0, code, drawn = 0;
+    char val[MAX_DXF_LINE];
+    char cur[40]; cur[0] = 0;
+
+    double sx = 0, sy = 0, ex = 0, ey = 0; int haveS = 0, haveE = 0;
+    double cx = 0, cy = 0, rad = 0, a1 = 0, a2 = 0;
+    double px = 0, py = 0, ix = 0, iy = 0; int havePrev = 0;
+    double pendX = 0; int pendSet = 0;
+    double height = 0; char text[2048]; text[0] = 0;
+
+    #define RESET_ENT() do { haveS = haveE = 0; rad = 0; a1 = 0; a2 = 0; \
+        havePrev = 0; pendSet = 0; height = 0; text[0] = 0; \
+        cx = cy = 0; sx = sy = ex = ey = 0; ix = iy = 0; } while (0)
+    #define FLUSH_TEXT() do { \
+        if ((strcmp(cur, "TEXT") == 0 || strcmp(cur, "MTEXT") == 0) \
+            && height > 0 && text[0] && (ix != 0 || iy != 0)) { \
+            pdf_text(w, ix, iy, height, text); drawn++; \
+        } else if (strcmp(cur, "LWPOLYLINE") == 0 && havePrev) { \
+            drawn++; \
+        } } while (0)
+
+    while (dxf_next(f, &code, val, sizeof(val))) {
+        if (code == 0) {
+            if (strcmp(val, "ENDSEC") == 0 || strcmp(val, "EOF") == 0) {
+                FLUSH_TEXT();
+                if (strcmp(val, "EOF") == 0) break;
+                in_ent = 0; cur[0] = 0; continue;
+            }
+            if (strcmp(val, "SECTION") == 0) continue;
+            FLUSH_TEXT();          /* flush previous entity */
+            RESET_ENT();
+            strncpy(cur, val, sizeof(cur) - 1); cur[sizeof(cur) - 1] = 0;
+            in_ent = 1; continue;
+        }
+        if (!in_ent) continue;
+        if (code == 2) {
+            if (strcmp(val, "ENTITIES") == 0) in_ent = 1;
+            else if (strcmp(val, "ENDSEC") == 0) in_ent = 0;
+            continue;
+        }
+        if (code == 10 || code == 11) { pendX = atof(val); pendSet = 1; }
+        else if (code == 20 || code == 21) {
+            if (pendSet) {
+                double x = pendX, y = atof(val); pendSet = 0;
+                if (strcmp(cur, "LINE") == 0) {
+                    if (!haveS) { sx = x; sy = y; haveS = 1; }
+                    else if (!haveE) { ex = x; ey = y; haveE = 1;
+                        pdf_line(w, sx, sy, ex, ey); drawn++; }
+                } else if (strcmp(cur, "CIRCLE") == 0) {
+                    cx = x; cy = y;
+                } else if (strcmp(cur, "ARC") == 0) {
+                    cx = x; cy = y;
+                } else if (strcmp(cur, "LWPOLYLINE") == 0) {
+                    if (havePrev) pdf_line(w, px, py, x, y);
+                    px = x; py = y; havePrev = 1;
+                } else if (strcmp(cur, "TEXT") == 0 || strcmp(cur, "MTEXT") == 0) {
+                    ix = x; iy = y;
+                }
+            }
+        }
+        else if (code == 40) {
+            if (strcmp(cur, "CIRCLE") == 0) { rad = atof(val); pdf_circle(w, cx, cy, rad); drawn++; }
+            else if (strcmp(cur, "ARC") == 0) { rad = atof(val); pdf_arc(w, cx, cy, rad, a1, a2); drawn++; }
+            else if (strcmp(cur, "TEXT") == 0 || strcmp(cur, "MTEXT") == 0) { height = atof(val); }
+        }
+        else if (code == 50) { a1 = atof(val); }
+        else if (code == 51) { a2 = atof(val); }
+        else if (code == 1 || code == 3) {
+            if (text[0]) strncat(text, " ", sizeof(text) - strlen(text) - 1);
+            strncat(text, val, sizeof(text) - 1);
+        }
+    }
+    #undef RESET_ENT
+    #undef FLUSH_TEXT
+    fclose(f);
+    *drawn_out = drawn;
+    return 0;
+}
+
 /* ---------- Main dwg2pdf JNI entry ---------- */
 JNIEXPORT jint JNICALL
 Java_com_henry_wordcount_DwgConverter_dwg2pdf(JNIEnv *env, jobject thiz,
@@ -398,54 +543,48 @@ Java_com_henry_wordcount_DwgConverter_dwg2pdf(JNIEnv *env, jobject thiz,
         return -10 + error;
     }
 
-    /* Compute drawing extents from header (fallback to all objects if zero) */
-    g_min_x = dwg.header.extmin.x;
-    g_min_y = dwg.header.extmin.y;
-    g_max_x = dwg.header.extmax.x;
-    g_max_y = dwg.header.extmax.y;
-    if (g_max_x <= g_min_x || g_max_y <= g_min_y) {
-        /* iterate objects to find bounds */
-        g_min_x = g_min_y = 1e30;
-        g_max_x = g_max_y = -1e30;
-        for (unsigned long i = 0; i < dwg.num_objects; i++) {
-            Dwg_Object *obj = &dwg.object[i];
-            if (obj->type == DWG_TYPE_LINE) {
-                double xs[2] = { obj->tio.entity->LINE.start.x, obj->tio.entity->LINE.end.x };
-                double ys[2] = { obj->tio.entity->LINE.start.y, obj->tio.entity->LINE.end.y };
-                for (int k = 0; k < 2; k++) {
-                    if (xs[k] < g_min_x) g_min_x = xs[k];
-                    if (xs[k] > g_max_x) g_max_x = xs[k];
-                    if (ys[k] < g_min_y) g_min_y = ys[k];
-                    if (ys[k] > g_max_y) g_max_y = ys[k];
-                }
-            } else if (obj->type == DWG_TYPE_CIRCLE || obj->type == DWG_TYPE_ARC) {
-                double cx = (obj->type == DWG_TYPE_CIRCLE) ?
-                    obj->tio.entity->CIRCLE.center.x : obj->tio.entity->ARC.center.x;
-                double cy = (obj->type == DWG_TYPE_CIRCLE) ?
-                    obj->tio.entity->CIRCLE.center.y : obj->tio.entity->ARC.center.y;
-                double r = (obj->type == DWG_TYPE_CIRCLE) ?
-                    obj->tio.entity->CIRCLE.radius : obj->tio.entity->ARC.radius;
-                if (cx - r < g_min_x) g_min_x = cx - r;
-                if (cx + r > g_max_x) g_max_x = cx + r;
-                if (cy - r < g_min_y) g_min_y = cy - r;
-                if (cy + r > g_max_y) g_max_y = cy + r;
-            }
-        }
-        if (g_max_x <= g_min_x || g_max_y <= g_min_y) {
-            g_min_x = 0; g_min_y = 0; g_max_x = 100; g_max_y = 100;
-        }
+    /* Write a temporary DXF (LibreDWG handles entity extraction internally). */
+    char dxfpath[1024];
+    snprintf(dxfpath, sizeof(dxfpath), "%s.dxftmp", output);
+    Bit_Chain dat = { 0 };
+    dat.version = dwg.header.version;
+    dat.from_version = dwg.header.from_version;
+    dat.fh = fopen(dxfpath, "wb");
+    if (!dat.fh) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "DXF_FOPEN_FAIL: %s", dxfpath);
+        write_diag(output, buf);
+        dwg_free(&dwg);
+        (*env)->ReleaseStringUTFChars(env, jinput, input);
+        (*env)->ReleaseStringUTFChars(env, joutput, output);
+        return -2;
+    }
+    error = dwg_write_dxf(&dat, &dwg);
+    fclose(dat.fh);
+    if (error >= DWG_ERR_CRITICAL) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "DXF_WRITE_FAIL err=%d", error);
+        write_diag(output, buf);
+        remove(dxfpath);
+        dwg_free(&dwg);
+        (*env)->ReleaseStringUTFChars(env, jinput, input);
+        (*env)->ReleaseStringUTFChars(env, joutput, output);
+        return -20 + error;
     }
 
-    /* Choose page size: fit drawing into A4 (595x842) or A4 landscape */
+    /* Compute extents from the DXF. */
+    double mnx, mny, mxx, mxy;
+    dxf_bounds(dxfpath, &mnx, &mny, &mxx, &mxy);
+    g_min_x = mnx; g_min_y = mny; g_max_x = mxx; g_max_y = mxy;
+
     double draw_w = g_max_x - g_min_x;
     double draw_h = g_max_y - g_min_y;
+    if (draw_w <= 0) draw_w = 1;
+    if (draw_h <= 0) draw_h = 1;
     double margin = 20.0;
     double page_w, page_h;
-    if (draw_w >= draw_h) {
-        page_w = 842.0; page_h = 595.0;   /* landscape A4 */
-    } else {
-        page_w = 595.0; page_h = 842.0;   /* portrait A4 */
-    }
+    if (draw_w >= draw_h) { page_w = 842.0; page_h = 595.0; }   /* landscape A4 */
+    else                  { page_w = 595.0; page_h = 842.0; }   /* portrait A4  */
     double scale_w = (page_w - 2 * margin) / draw_w;
     double scale_h = (page_h - 2 * margin) / draw_h;
     double scale = scale_w < scale_h ? scale_w : scale_h;
@@ -458,96 +597,19 @@ Java_com_henry_wordcount_DwgConverter_dwg2pdf(JNIEnv *env, jobject thiz,
 
     pdf_begin(&w, output, page_w, page_h);
 
-    /* Draw background grid? No. Just entities. */
     int drawn = 0;
-    for (unsigned long i = 0; i < dwg.num_objects; i++) {
-        Dwg_Object *obj = &dwg.object[i];
-        switch (obj->type) {
-            case DWG_TYPE_LINE: {
-                double x1 = obj->tio.entity->LINE.start.x;
-                double y1 = obj->tio.entity->LINE.start.y;
-                double x2 = obj->tio.entity->LINE.end.x;
-                double y2 = obj->tio.entity->LINE.end.y;
-                pdf_line(&w, x1, y1, x2, y2);
-                drawn++;
-                break;
-            }
-            case DWG_TYPE_LWPOLYLINE: {
-                int n = obj->tio.entity->LWPOLYLINE.num_points;
-                dwg_point_2d *pts = obj->tio.entity->LWPOLYLINE.points;
-                if (n >= 2 && pts) {
-                    double xs[4096], ys[4096];
-                    int m = n < 4096 ? n : 4096;
-                    for (int k = 0; k < m; k++) {
-                        xs[k] = pts[k].x;
-                        ys[k] = pts[k].y;
-                    }
-                    pdf_polyline(&w, xs, ys, m);
-                    drawn++;
-                }
-                break;
-            }
-            case DWG_TYPE_POLYLINE: {
-                /* Old-style POLYLINE: vertices in linked entities.
-                   For simplicity, try to read first vertex chain. */
-                /* LibreDWG stores vertices as separate VERTEX objects; skip detailed handling. */
-                break;
-            }
-            case DWG_TYPE_CIRCLE: {
-                double cx = obj->tio.entity->CIRCLE.center.x;
-                double cy = obj->tio.entity->CIRCLE.center.y;
-                double r  = obj->tio.entity->CIRCLE.radius;
-                pdf_circle(&w, cx, cy, r);
-                drawn++;
-                break;
-            }
-            case DWG_TYPE_ARC: {
-                double cx = obj->tio.entity->ARC.center.x;
-                double cy = obj->tio.entity->ARC.center.y;
-                double r  = obj->tio.entity->ARC.radius;
-                double a1 = obj->tio.entity->ARC.start_angle;
-                double a2 = obj->tio.entity->ARC.end_angle;
-                pdf_arc(&w, cx, cy, r, a1, a2);
-                drawn++;
-                break;
-            }
-            case DWG_TYPE_TEXT: {
-                double x  = obj->tio.entity->TEXT.insertion_pt.x;
-                double y  = obj->tio.entity->TEXT.insertion_pt.y;
-                double h  = obj->tio.entity->TEXT.height;
-                char *txt = obj->tio.entity->TEXT.text_value;
-                if (txt && h > 0) {
-                    pdf_text(&w, x, y, h, txt);
-                    drawn++;
-                }
-                break;
-            }
-            case DWG_TYPE_MTEXT: {
-                double x  = obj->tio.entity->MTEXT.insertion_pt.x;
-                double y  = obj->tio.entity->MTEXT.insertion_pt.y;
-                double h  = obj->tio.entity->MTEXT.height;
-                char *txt = obj->tio.entity->MTEXT.text;
-                if (txt && h > 0) {
-                    /* MTEXT may contain formatting codes; strip simple \pxsm flags */
-                    pdf_text(&w, x, y, h, txt);
-                    drawn++;
-                }
-                break;
-            }
-            default:
-                break;
-        }
-    }
+    dxf_draw(dxfpath, &w, &drawn);
 
     pdf_end(&w);
+    remove(dxfpath);
 
-    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "dwg2pdf SUCCESS: drew %d entities", drawn);
     {
-        char buf[128];
+        char buf[160];
         snprintf(buf, sizeof(buf), "SUCCESS drew=%d extents=%.0f,%.0f,%.0f,%.0f",
                  drawn, g_min_x, g_min_y, g_max_x, g_max_y);
         write_diag(output, buf);
     }
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "dwg2pdf SUCCESS: drew %d entities", drawn);
 
     dwg_free(&dwg);
     (*env)->ReleaseStringUTFChars(env, jinput, input);
