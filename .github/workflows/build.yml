@@ -104,11 +104,11 @@ jobs:
             LIBDWG=$(find . \( -name "libdwg.a" -o -name "libredwg.a" \) 2>/dev/null | head -1)
             echo "LIBDWG($ABI)=$LIBDWG"
             if [ -z "$LIBDWG" ]; then echo "libdwg.a/libredwg.a 未生成 for $ABI"; FAIL=1; fi
-            cp ../config.h ../include/ 2>/dev/null || cp ../src/config.h ../include/ 2>/dev/null || true
+            cp src/config.h ../include/ 2>/dev/null || cp ../src/config.h ../include/ 2>/dev/null || true
             mkdir -p "$WS/app/src/main/jniLibs/$ABI"
             "$CC" --shared -fPIC \
               -static-libstdc++ \
-              -I../src -I../include -I.. \
+              -I../src -I../include -I.. -Isrc \
               -I"$TOOL/sysroot/usr/include" \
               "$JNI_SRC" \
               "$LIBDWG" -lm -lz -llog \
