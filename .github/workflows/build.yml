@@ -102,13 +102,18 @@ jobs:
           # 编译 JNI wrapper → libdwg2dxf.so（链接 LibreDWG 静态库）
           mkdir -p "${GITHUB_WORKSPACE:-.}/app/src/main/jniLibs/arm64-v8a"
           "$CC" --shared -fPIC \
-            -static-libstdc++ -lc++_static \
-            -Wl,--no-undefined,-z,noexecstack \
+            -static-libstdc++ \
             -I/tmp/libredwg/src -I/tmp/libredwg/include -I/tmp/libredwg \
             -I"$TOOL/sysroot/usr/include" \
             "${GITHUB_WORKSPACE:-.}/app/src/main/cpp/dwg2dxf_jni.c" \
-            "$LIBDWG" -lm -lz -llog -landroid \
+            "$LIBDWG" -lm -lz -llog \
             -o "${GITHUB_WORKSPACE:-.}/app/src/main/jniLibs/arm64-v8a/libdwg2dxf.so"
+          SO_RC=$?
+          if [ $SO_RC -ne 0 ]; then
+            echo "COMPILE FAILED rc=$SO_RC"
+            echo "=== /tmp/so_build.log tail ==="
+            tail -100 /tmp/so_build.log || true
+          fi
           SO="${GITHUB_WORKSPACE:-.}/app/src/main/jniLibs/arm64-v8a/libdwg2dxf.so"
           if [ -f "$SO" ]; then
             "$STRIP" "$SO" || true
@@ -160,15 +165,24 @@ jobs:
         run: |
           python3 - <<'PY'
           import os, json, urllib.request
+          sha = os.environ.get('SHA','')[:7]
+          parts = []
+          # Try .so build log first
+          try:
+              solines = open('/tmp/so_build.log', encoding='utf-8', errors='replace').read().splitlines()
+              parts.append("### .so build log (tail)\n```\n" + '\n'.join(solines[-120:]) + "\n```")
+          except Exception as e:
+              parts.append("(so_build.log 不存在: %s)" % e)
+          # Try gradle build.log
           try:
               lines = open('build.log', encoding='utf-8', errors='replace').read().splitlines()
+              tail = '\n'.join(lines[-160:])
+              keys = ('e: ', 'error:', 'Error:', 'FAILURE', 'What went wrong', 'Caused by', 'Unresolved', 'Compilation error', 'A problem occurred', '> Task')
+              errlines = [l for l in lines if any(k in l for k in keys)]
+              parts.append("### Gradle log (tail)\n```\n" + ('\n'.join(errlines[-70:]) or '(未匹配到错误关键字)') + "\n\n" + tail[-3000:] + "\n```")
           except Exception as e:
-              lines = ['(build.log 不存在: %s)' % e]
-          tail = '\n'.join(lines[-160:])
-          keys = ('e: ', 'error:', 'Error:', 'FAILURE', 'What went wrong', 'Caused by', 'Unresolved', 'Compilation error', 'A problem occurred', '> Task')
-          errlines = [l for l in lines if any(k in l for k in keys)]
-          body = ("## CI Build Diagnostics (%s)\n\n### 关键错误行\n```\n%s\n```\n\n### 日志尾部\n```\n%s\n```" %
-                  (os.environ.get('SHA','')[:7], '\n'.join(errlines[-70:]) or '(未匹配到错误关键字)', tail[-4500:]))
+              parts.append("(build.log 不存在: %s)" % e)
+          body = ("## CI Build Diagnostics (%s)\n\n" % sha) + "\n\n".join(parts)
           print(body)
           data = json.dumps({"body": body}).encode('utf-8')
           req = urllib.request.Request(
