@@ -190,7 +190,7 @@ object DwgDxfParser {
                     }
                     if (etype == "LWPOLYLINE") {
                         if (c2 == "70") {
-                            if ((v2.toDoubleOrNull()?.toInt() ?: 0) and 1) == 1) closed = true
+                            if (((v2.toDoubleOrNull()?.toInt() ?: 0) and 1) == 1) closed = true
                         } else if (c2 == "10") {
                             val x = v2.toDoubleOrNull()
                             if (x != null && j + 3 < n && lines[j + 2].trim() == "20") {
@@ -201,7 +201,7 @@ object DwgDxfParser {
                     } else { // POLYLINE
                         if (inVertex) {
                             if (c2 == "70") {
-                                if ((v2.toDoubleOrNull()?.toInt() ?: 0) and 1) == 1) closed = true
+                                if (((v2.toDoubleOrNull()?.toInt() ?: 0) and 1) == 1) closed = true
                             } else if (c2 == "10") {
                                 val x = v2.toDoubleOrNull()
                                 if (x != null && j + 3 < n && lines[j + 2].trim() == "20") {
@@ -293,11 +293,11 @@ object DwgDxfParser {
 
     // ── 标题块图号：INSERT 下 ATTRIB 的图号属性去重（端口 _distinct_sheet_numbers） ──
     private fun distinctSheetNumbers(entities: List<DxfEntity>): Int {
-        val sheetTag = Regex("SHEET_NUMBER|图号|页号|DWGNO|NO|PAGE|SHEET|DRAWING_NO|图纸编号|图纸|SOUZAITU|SUOZAI|所在图", RegexOption.IGNORECASE)
-        val strongSheet = Regex("SHEET_NUMBER|图号|页号|DRAWING_NO|图纸编号", RegexOption.IGNORECASE)
-        val titleTag = Regex("DRAWING_TITLE|图名|标题|TITLE|NAME", RegexOption.IGNORECASE)
-        val titleName = Regex("图框|边框|幅面|图纸|标题栏|会签栏|签名栏|FRAME|FRM|BORDER|BORD|TITLE|TBAR|TB|SHEET|FORMAT|GB|国标", RegexOption.IGNORECASE)
-        val detailName = Regex("大样|节点|DETAIL|CALL|CALLOUT|NOTE|局部|NOSING|标高|型材|SECTION|DET|局部放大|索引|放大|详图|节点详图|大样图|详图索引", RegexOption.IGNORECASE)
+        val sheetTag = Regex("(?i)SHEET_NUMBER|图号|页号|DWGNO|NO|PAGE|SHEET|DRAWING_NO|图纸编号|图纸|SOUZAITU|SUOZAI|所在图")
+        val strongSheet = Regex("(?i)SHEET_NUMBER|图号|页号|DRAWING_NO|图纸编号")
+        val titleTag = Regex("(?i)DRAWING_TITLE|图名|标题|TITLE|NAME")
+        val titleName = Regex("(?i)图框|边框|幅面|图纸|标题栏|会签栏|签名栏|FRAME|FRM|BORDER|BORD|TITLE|TBAR|TB|SHEET|FORMAT|GB|国标")
+        val detailName = Regex("(?i)大样|节点|DETAIL|CALL|CALLOUT|NOTE|局部|NOSING|标高|型材|SECTION|DET|局部放大|索引|放大|详图|节点详图|大样图|详图索引")
         val normSheet = Regex("\\d{4,6}")
 
         val sheets = LinkedHashSet<String>()
@@ -329,7 +329,7 @@ object DwgDxfParser {
 
     // ── 详图聚类：大样/节点 INSERT 按位置网格聚类（端口 _count_detail_sheets） ──
     private fun countDetailSheets(entities: List<DxfEntity>, dxfPath: String): Int {
-        val detailPat = Regex("大样|节点|DETAIL|CALLOUT|详图|detail|节点详图|大样图|详图索引", RegexOption.IGNORECASE)
+        val detailPat = Regex("(?i)大样|节点|DETAIL|CALLOUT|详图|detail|节点详图|大样图|详图索引")
         val idTags = setOf("DWGNO", "NO", "PAGE", "页号", "图号", "SHEET")
         val detailPos = mutableListOf<Pair<Double, Double>>()
         for (e in entities) {
