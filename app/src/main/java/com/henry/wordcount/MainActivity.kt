@@ -2206,20 +2206,36 @@ private fun addFiles(
                         //   TEXT/ATTDEF/MTEXT/MULTILEADER 实体（无需 ezdxf）。
                         var dxfPages: Int? = null
                         var dxfPagesReason: String? = null
+                        var dxfMojibake = false
+                        var dxfText = ""
                         val dxfPath = "${f.parent}/${f.nameWithoutExtension}.dxf"
                         val dxfRes = DwgIsolatedRunner.convertToDxf(context, f.absolutePath, dxfPath)
                         if (dxfRes.path != null) {
                             val dxfFile = File(dxfPath)
                             if (dxfFile.exists() && dxfFile.length() > 0) {
                                 val analysis = DwgDxfParser.analyze(dxfPath)
-                                val dxfStats = countTextKotlin(analysis.text)
-                                // 取更丰富的来源（DXF 结构化为主，raw 扫描兜底；二者均为真文本）
-                                if (dxfStats.fourth >= rawChars) {
-                                    finalStats = dxfStats
-                                }
+                                dxfText = analysis.text
+                                val dxfStats = countTextKotlin(dxfText)
                                 dxfPages = analysis.frames
                                 dxfPagesReason = analysis.framesReason
-                                Log.d("WordCount", "DWG dxf $dName: raw=$rawChars dxf=${dxfStats.fourth} pages=$dxfPages($dxfPagesReason)")
+                                // ── v1.5.24: DXF mojibake 检测（巴布亚桩基场景）──
+                                //   LibreDWG 把 GBK 中文误作 Latin-1 解码 → DXF 文本含大量
+                                //   随机 CJK（mojibake）。判据：DXF 含大量 CJK 但常用字占比极低
+                                //   + 密度远超正常 DWG（>2500 字/页）。命中则弃用 DXF 结果，
+                                //   改用 raw 扫描作为基线并触发后续 PDF/GBK 恢复。
+                                var dxfCjkCount = 0; var dxfRealCjk = 0
+                                for (ch in analysis.text) {
+                                    val cp = ch.code
+                                    if (cp in 0x4E00..0x9FFF) { dxfCjkCount++; if (cp in DwgRawCjkScanner.COMMON_CJK_CHARS) dxfRealCjk++ }
+                                }
+                                val dxfCommonRatio = if (dxfCjkCount > 0) dxfRealCjk.toDouble() / dxfCjkCount else 0.0
+                                val dxfDensity = dxfStats.fourth.toDouble() / maxOf(dxfPages ?: 1, 1)
+                                dxfMojibake = (dxfCjkCount >= 200) && (dxfCommonRatio < 0.05) && (dxfDensity > 2500)
+                                // 仅当 DXF 非 mojibake 且字数更丰富时才采用 DXF 结果
+                                if (!dxfMojibake && dxfStats.fourth >= rawChars) {
+                                    finalStats = dxfStats
+                                }
+                                Log.d("WordCount", "DWG dxf $dName: raw=$rawChars dxf=${dxfStats.fourth} cjk=$dxfCjkCount cr=${"%.3f".format(dxfCommonRatio)} den=${"%.0f".format(dxfDensity)} moji=$dxfMojibake pages=$dxfPages($dxfPagesReason)")
                             }
                         }
 
@@ -2232,17 +2248,9 @@ private fun addFiles(
                         val framesForDensity = dxfPages ?: 1
                         val curTotal = finalStats.second + finalStats.third  // fe + nc
                         val density = curTotal.toDouble() / maxOf(framesForDensity, 1)
-                        // 统计当前提取文本中的 CJK 质量指标
+                        // 统计 DXF 文本中的 CJK 质量指标（仅 DXF 结构化结果，不含 raw 扫描噪声）
                         var itemsCjk = 0; var realCjk = 0
-                        val currentText = if (dxfRes.path != null) {
-                            val dxfFile2 = File(dxfPath)
-                            if (dxfFile2.exists() && dxfFile2.length() > 0) {
-                                try { DwgDxfParser.analyze(dxfPath).text } catch (_: Exception) { "" }
-                            } else ""
-                        } else ""
-                        for (ch in currentText) { val cp = ch.code; if (cp in 0x4E00..0x9FFF) { itemsCjk++; if (cp in DwgRawCjkScanner.COMMON_CJK_CHARS) realCjk++ } }
-                        // 也检查 finalStats 对应的文本（可能是 raw scan）
-                        for (ch in rawText) { val cp = ch.code; if (cp in 0x4E00..0x9FFF) { itemsCjk++; if (cp in DwgRawCjkScanner.COMMON_CJK_CHARS) realCjk++ } }
+                        for (ch in dxfText) { val cp = ch.code; if (cp in 0x4E00..0x9FFF) { itemsCjk++; if (cp in DwgRawCjkScanner.COMMON_CJK_CHARS) realCjk++ } }
                         val garbled = (itemsCjk >= 50) && (realCjk.toDouble() / maxOf(itemsCjk, 1) < 0.05)
                         // v1.5.21: 零 CJK + 有实质文本 → 几乎确定编码丢失（给排水_t3 场景：DXF中文=0）
                         val curCjkRatio = if (curTotal > 0) itemsCjk.toDouble() / curTotal else 0.0
@@ -2287,7 +2295,8 @@ private fun addFiles(
                         val cjkNow = finalStats.second
                         // v1.5.21: 零 CJK + 有文本 → 也触发 PDF 回退
                         val invalid = charsNow < 50 || (charsNow > 5000 && feRatioNow < 0.15) ||
-                                      (charsNow >= 500 && cjkNow <= 10 && cjkNow.toDouble() / maxOf(charsNow, 1) < 0.01)
+                                      (charsNow >= 500 && cjkNow <= 10 && cjkNow.toDouble() / maxOf(charsNow, 1) < 0.01) ||
+                                      dxfMojibake
                         if (invalid) {
                             // v1.5.13: 隔离进程运行 dwg2pdf（native 崩溃只杀隔离进程，不闪退主 app）
                             val pdfPath = "${f.parent}/${f.nameWithoutExtension}.pdf"
