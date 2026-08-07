@@ -2223,12 +2223,15 @@ private fun addFiles(
                             }
                         }
 
-                        // ── v1.5.19: 编码丢失检测 + GBK/UTF-16 原始字节 CJK 恢复 ──
+                        // ── v1.5.20: 编码丢失检测 + GBK/UTF-16 原始字节 CJK 恢复（改进版） ──
                         //   桌面版发现 LibreDWG→DXF 常把中文 DWG 的 GBK 字节误作 Latin-1 解码，
                         //   导致 mojibake（乱码）或直接抽空。此处移植桌面的多层恢复：
-                        //     Layer 1: dwggrep（需额外编译，暂不可用）
                         //     Layer 2: _extract_dwg_gbk_cjk → DwgRawCjkScanner.extractGbkCjk()
                         //     Layer 3: _extract_dwg_utf16_cjk → DwgRawCjkScanner.extractUtf16Cjk()
+                        //   v1.5.20 修复：
+                        //     a) 新增"零CJK+大量文本"检测（给排水_t3 中文=0 但应有 13598）
+                        //     b) 降低乱码判定门槛（itemsCjk>=50→按文本量动态调整）
+                        //     c) 使用 shouldReplaceDxfResult 安全门（防止巴布亚桩基超算 2.5x）
                         val framesForDensity = dxfPages ?: 1
                         val curTotal = finalStats.second + finalStats.third  // fe + nc
                         val density = curTotal.toDouble() / maxOf(framesForDensity, 1)
@@ -2242,9 +2245,17 @@ private fun addFiles(
                         } else ""
                         for (ch in currentText) { val cp = ch.code; if (cp in 0x4E00..0x9FFF) { itemsCjk++; if (cp in DwgRawCjkScanner.COMMON_CJK_CHARS) realCjk++ } }
                         // 也检查 finalStats 对应的文本（可能是 raw scan）
-                        for (ch in rawText) { val cp = ch.code; if (cp in 0x4E00..0x9FFF) { itemsCjk++; if (cp in DwgRawCjkScanner.COMMON_CJK_CHARS) realCjk++ } }
-                        val garbled = (itemsCjk >= 50) && (realCjk.toDouble() / maxOf(itemsCjk, 1) < 0.05)
-                        // 稀疏丢失：DWG 原始字节含大量 CJK 但每页真实 CJK 极少
+                        var rawItemsCjk = 0; var rawRealCjk = 0
+                        for (ch in rawText) { val cp = ch.code; if (cp in 0x4E00..0x9FFF) { rawItemsCjk++; if (cp in DwgRawCjkScanner.COMMON_CJK_CHARS) rawRealCjk++ } }
+                        itemsCjk += rawItemsCjk; realCjk += rawRealCjk
+                        val curCjkRatio = if (curTotal > 0) itemsCjk.toDouble() / curTotal else 0.0
+                        // ── 三重编码丢失检测 ──
+                        // 检测 A：零 CJK + 有实质文本 → 几乎确定编码丢失（给排水_t3 场景）
+                        val zeroCjkLoss = (curTotal >= 500) && (itemsCjk <= 5) && (curCjkRatio < 0.01)
+                        // 检测 B：有 CJK 但常用字占比极低 → 乱码
+                        val garbledThreshold = if (curTotal > 5000) 10 else 50
+                        val garbled = (itemsCjk >= garbledThreshold) && (realCjk.toDouble() / maxOf(itemsCjk, 1) < 0.05)
+                        // 检测 C：稀疏丢失——原始字节含大量潜在 CJK 但提取出的极少
                         var sparse = false
                         try {
                             val dwgRawBytes = File(f.absolutePath).readBytes()
@@ -2253,25 +2264,39 @@ private fun addFiles(
                                 val decoded = String(dwgRawBytes, charset("GB18030"))
                                 for (c in decoded) { if (c.code in 0x4E00..0x9FFF) cjkInRaw++ }
                             } catch (_: Exception) {}
-                            sparse = (cjkInRaw > 50000) && (realCjk.toDouble() / maxOf(framesForDensity, 1) < 50.0)
+                            sparse = (cjkInRaw > 50000) && (itemsCjk.toDouble() / maxOf(framesForDensity, 1) < 50.0)
                         } catch (_: Exception) {}
-                        val encodingLoss = garbled || sparse
+                        val encodingLoss = zeroCjkLoss || garbled || sparse
                         val needsRecovery = ((density > 3000.0 && curTotal > framesForDensity * 1000)) || encodingLoss
                         if (needsRecovery) {
                             val recovered = DwgRawCjkScanner.scanRawDwg(f.absolutePath)
-                            Log.d("WordCount", "DWG CJK recovery $dName: method=${recovered.method} cjk=${recovered.cjkTotal} div=${"%.3f".format(recovered.cjkDiversity)} cr=${"%.3f".format(recovered.commonRatio)}")
-                            if (recovered.cjkTotal >= 200 && recovered.cjkDiversity < 0.6 && recovered.commonRatio >= 0.10 && recovered.text.isNotEmpty()) {
+                            Log.d("WordCount", "DWG CJK recovery $dName: method=${recovered.method} cjk=${recovered.cjkTotal} div=${"%.3f".format(recovered.cjkDiversity)} cr=${"%.3f".format(recovered.commonRatio)} reason=${if (zeroCjkLoss)"zeroCjk" else if (garbled)"garbled" else if (sparse)"sparse" else "density"}")
+                            // v1.5.20 安全门：用 shouldReplaceDxfResult 防止好结果被坏结果覆盖
+                            val dxfCjkInFinal = itemsCjk  // DXF+raw 中的 CJK 总数
+                            val mayReplace = DwgRawCjkScanner.shouldReplaceDxfResult(
+                                finalStats.fourth, dxfCjkInFinal, recovered)
+                            if (mayReplace && recovered.text.isNotEmpty()) {
                                 val recStats = countTextKotlin(recovered.text)
-                                finalStats = recStats
-                                dxfPagesReason = "${recovered.method}字节扫描恢复"
-                                Log.d("WordCount", "DWG CJK recovery APPLIED $dName: now=${recStats.fourth} fe=${recStats.second}")
+                                // 二次 sanity：不允许膨胀超过 3x
+                                if (recStats.fourth <= maxOf(finalStats.fourth * DwgRawCjkScanner.MAX_REPLACE_RATIO, 100)) {
+                                    finalStats = recStats
+                                    dxfPagesReason = "${recovered.method}字节扫描恢复"
+                                    Log.d("WordCount", "DWG CJK recovery APPLIED $dName: ${finalStats.fourth} fe=${recStats.second}")
+                                } else {
+                                    Log.w("WordCount", "DWG CJK recovery REJECTED (oversize) $dName: rec=${recStats.fourth} > limit=${maxOf(finalStats.fourth * DwgRawCjkScanner.MAX_REPLACE_RATIO, 100)}")
+                                }
+                            } else {
+                                Log.d("WordCount", "DWG CJK recovery SKIPPED (safety gate) $dName: replace=$mayReplace")
                             }
                         }
 
-                        // ── 回退：raw+dxf 都疑似无效时，转 PDF 再从 PDF 文本层提取 ──
+                        // ── 回退：raw+dxf+recovery 都疑似无效时，转 PDF 再从 PDF 文本层提取 ──
                         val charsNow = finalStats.fourth
                         val feRatioNow = if (charsNow > 0) finalStats.second.toDouble() / charsNow else 0.0
-                        val invalid = charsNow < 50 || (charsNow > 5000 && feRatioNow < 0.15)
+                        val cjkNow = finalStats.second  // fe ≈ Chinese count
+                        // v1.5.20: 零 CJK + 有文本 → 也触发 PDF 回退（给排水场景）
+                        val invalid = charsNow < 50 || (charsNow > 5000 && feRatioNow < 0.15) ||
+                                      (charsNow >= 500 && cjkNow <= 10 && cjkNow.toDouble() / maxOf(charsNow, 1) < 0.01)
                         if (invalid) {
                             // v1.5.13: 隔离进程运行 dwg2pdf（native 崩溃只杀隔离进程，不闪退主 app）
                             val pdfPath = "${f.parent}/${f.nameWithoutExtension}.pdf"
@@ -2283,8 +2308,11 @@ private fun addFiles(
                                     val pdfStats = countTextKotlin(ktRes.text)
                                     val pdfFeRatio = if (pdfStats.fourth > 0) pdfStats.second.toDouble() / pdfStats.fourth else 0.0
                                     // 采用 PDF 结果的条件：PDF 中文占比明显更高，或当前是极端垃圾而 PDF 在合理范围
+                                    // v1.5.20: 零 CJK 时任何有 CJK 的 PDF 结果都接受
                                     val pdfBetter = pdfStats.fourth > 0 &&
-                                            (pdfFeRatio > feRatioNow + 0.1 || (pdfStats.fourth in 50..50000 && charsNow > 50000))
+                                            (pdfFeRatio > feRatioNow + 0.1 ||
+                                             (pdfStats.fourth in 50..50000 && charsNow > 50000) ||
+                                             (cjkNow <= 10 && pdfStats.second > 50))
                                     if (pdfBetter) {
                                         finalStats = pdfStats
                                         if (ktRes.pages != null && ktRes.pages > 0) {
