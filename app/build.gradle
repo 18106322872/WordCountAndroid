@@ -1,138 +1,138 @@
-plugins {
-    id 'com.android.application'
-    id 'org.jetbrains.kotlin.android'
-    id 'com.chaquo.python'
-}
-
-android {
-    namespace 'com.henry.wordcount'
-    compileSdk 34
-
-    defaultConfig {
-        // v1.5.2(WordCount): 修复 DWG 统计 Chaquopy subprocess AssetFinder/scripts bug——改用 Kotlin Runtime.exec() 执行 dwg2dxf
-        applicationId 'com.henry.wordcount2'
-        // minSdk 26：Apache POI 5.x / log4j 用到 MethodHandle.invoke，D8 要求 Android O(26) 起
-        minSdk 26
-        targetSdk 34
-        versionCode 162
-        versionName '1.5.12'
-
-        // 只编 arm64-v8a（华为等现代手机），缩小体积、功能零影响
-        ndk {
-            abiFilters 'arm64-v8a', 'armeabi-v7a'
-        }
-
-        // Chaquopy 17：内嵌 Python + 解析库；图片 OCR 交由 Kotlin 层 ML Kit 完成（模型随 APK 内置，离线可用）
-        // 注：Chaquopy 17 的 DSL 要求 defaultConfig 嵌套层（已验证：删除会导致 pip() 方法找不到）
-        chaquopy {
-            defaultConfig {
-                version "3.10"
-                pip {
-                    install "pdfminer.six"
-                    // 注：已移除 python-docx / openpyxl / python-pptx / ezdxf（均硬依赖 lxml）
-                    //   Android 端 docx/xlsx/pptx 全部由 Kotlin OoXmlEngine 处理，不经过 Python
-                    install "pillow"
-                    install "olefile"
-                    // 注：pymupdf(fitz) / rapidocr 在 Chaquopy 无 Android wheel，不可用
-                }
-            }
-        }
-
-        manifestPlaceholders = [appName: 'WordCount']
-    }
-
-    // Chaquopy 原生库兼容 AGP 8 的打包方式
-    packaging {
-        jniLibs {
-            useLegacyPackaging true
-        }
-        // POI 等 Java 库在安卓打包时的冲突排除（含签名文件，避免 Duplicate files copied in APK META-INF/*）
-        resources {
-            excludes += [
-                'META-INF/DEPENDENCIES',
-                'META-INF/LICENSE',
-                'META-INF/LICENSE.txt',
-                'META-INF/NOTICE',
-                'META-INF/NOTICE.txt',
-                'META-INF/*.kotlin_module',
-                'META-INF/versions/**',
-                'META-INF/*.RSA',
-                'META-INF/*.SF',
-                'META-INF/*.DSA',
-                'META-INF/*.EC'
-            ]
-        }
-    }
-
-    buildTypes {
-        release {
-            minifyEnabled false
-            signingConfig signingConfigs.debug
-        }
-        debug {
-            minifyEnabled false
-        }
-    }
-
-    compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
-    }
-    kotlinOptions {
-        jvmTarget = '17'
-    }
-    buildFeatures {
-        compose true
-    }
-    composeOptions {
-        kotlinCompilerExtensionVersion '1.5.10'
-    }
-}
-
-dependencies {
-    def composeBom = platform('androidx.compose:compose-bom:2024.06.00')
-    implementation composeBom
-    implementation 'androidx.compose.ui:ui'
-    implementation 'androidx.compose.ui:ui-graphics'
-    implementation 'androidx.compose.material3:material3'
-    implementation 'androidx.compose.material:material-icons-extended'
-    implementation 'androidx.activity:activity-compose:1.9.0'
-    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.0'
-    implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.8.0'
-    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
-    implementation 'androidx.documentfile:documentfile:1.0.1'
-    // Manifest 层主题(Theme.Material3.DayNight.NoActionBar / colorSurface attr) 由 MDC 提供；
-    // Compose 内仍用 androidx.compose.material3 的 MaterialTheme。两者共存、互不冲突。
-    implementation 'com.google.android.material:material:1.12.0'
-    // 图片 PDF OCR：Google ML Kit 中文识别器（独立版，自带模型，离线可用，无需 Play 服务动态下发）
-    // 注意：不要再加 com.google.mlkit:text-recognition:16.0.0（Latin 版），该版本已改为 Play Services
-    // 动态下发模型，会与中文版冲突，导致无 Play 服务的设备上模型取不到、OCR 静默返回空。
-    implementation 'com.google.mlkit:text-recognition-chinese:16.0.0'
-    // PDF 扫描件渲染后备：PdfiumAndroid（内置 Pdfium 编译启用 OpenJPEG，可渲染 JPEG2000/JBIG2 压缩的扫描图；
-    //   系统 PdfRenderer/Pdfium 不支持这两种格式，会导致扫描件页面渲染为空白、OCR 认不出字）。
-    // 注：该库传递依赖旧版 com.android.support:support-compat，与 AndroidX 冲突，需 exclude 掉（其运行时不依赖它）。
-    implementation('com.github.barteksc:pdfium-android:1.9.0') {
-        exclude group: 'com.android.support', module: 'support-compat'
-    }
-    // 老格式(.doc/.xls/.ppt)解析：Apache POI（Java，安卓原生运行，不依赖 Windows）
-    // 仅用 poi + poi-scratchpad（HSSF/HWPF/HSLF），不引入 poi-ooxml，避免安卓缺 javax.xml.stream 的坑
-    implementation 'org.apache.poi:poi:5.2.5'
-    implementation 'org.apache.poi:poi-scratchpad:5.2.5'
-    // 新格式(.docx/.xlsx/.pptx)解析：暂缓引入 poi-ooxml（Android StAX 兼容性问题导致 CI 构建失败）
-    // v1.0.14 当前策略：DOCX/XLSX/PPTX 仍走 Python（但其他格式已全部纯 Java/Kotlin，
-    //   Python 引擎仅服务这三种格式，状态污染概率大幅降低）
-    // 后续版本解决 StAX 问题后再切换为纯 Java
-    // implementation 'org.apache.poi:poi-ooxml:5.2.5'
-    // implementation 'org.apache.poi:poi-ooxml-lite:5.2.5'
-    // implementation 'com.fasterxml.aalto-woodstox:aalto-xml:1.2.2'
-    // PDF 文本提取：暂用轻量方案（v1.0.14 先移除 PdfBox，因其在 Android 有 java.awt 编译依赖）
-    // 后续版本可考虑 pdfbox-android（无 AWT 依赖的分支）或自实现 PDF 流解析器
-    // 当前 PDF 格式归入「其他」分类，由 Python/Chaqopy 作为唯一降级方案处理
-    // （因其他格式已全部走纯 Java/Kotlin，Python 引擎仅服务于 PDF，状态污染概率大幅降低）
-    implementation 'org.apache.commons:commons-compress:1.26.1'
-    // RAR4 解压：纯 Java 库（Apache Commons Compress 不支持 RAR）
-    implementation 'com.github.junrar:junrar:7.5.1'
-    implementation 'org.apache.commons:commons-math3:3.6.1'
-}
-
-// 图片 OCR 模型(chi_sim.traineddata)由 CI 下载进 app/src/main/assets/tessdata/，随 APK 内置。
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+    id 'com.chaquo.python'
+}
+
+android {
+    namespace 'com.henry.wordcount'
+    compileSdk 34
+
+    defaultConfig {
+        // v1.5.2(WordCount): 修复 DWG 统计 Chaquopy subprocess AssetFinder/scripts bug——改用 Kotlin Runtime.exec() 执行 dwg2dxf
+        applicationId 'com.henry.wordcount2'
+        // minSdk 26：Apache POI 5.x / log4j 用到 MethodHandle.invoke，D8 要求 Android O(26) 起
+        minSdk 26
+        targetSdk 34
+        versionCode 163
+        versionName '1.5.13'
+
+        // 只编 arm64-v8a（华为等现代手机），缩小体积、功能零影响
+        ndk {
+            abiFilters 'arm64-v8a', 'armeabi-v7a'
+        }
+
+        // Chaquopy 17：内嵌 Python + 解析库；图片 OCR 交由 Kotlin 层 ML Kit 完成（模型随 APK 内置，离线可用）
+        // 注：Chaquopy 17 的 DSL 要求 defaultConfig 嵌套层（已验证：删除会导致 pip() 方法找不到）
+        chaquopy {
+            defaultConfig {
+                version "3.10"
+                pip {
+                    install "pdfminer.six"
+                    // 注：已移除 python-docx / openpyxl / python-pptx / ezdxf（均硬依赖 lxml）
+                    //   Android 端 docx/xlsx/pptx 全部由 Kotlin OoXmlEngine 处理，不经过 Python
+                    install "pillow"
+                    install "olefile"
+                    // 注：pymupdf(fitz) / rapidocr 在 Chaquopy 无 Android wheel，不可用
+                }
+            }
+        }
+
+        manifestPlaceholders = [appName: 'WordCount']
+    }
+
+    // Chaquopy 原生库兼容 AGP 8 的打包方式
+    packaging {
+        jniLibs {
+            useLegacyPackaging true
+        }
+        // POI 等 Java 库在安卓打包时的冲突排除（含签名文件，避免 Duplicate files copied in APK META-INF/*）
+        resources {
+            excludes += [
+                'META-INF/DEPENDENCIES',
+                'META-INF/LICENSE',
+                'META-INF/LICENSE.txt',
+                'META-INF/NOTICE',
+                'META-INF/NOTICE.txt',
+                'META-INF/*.kotlin_module',
+                'META-INF/versions/**',
+                'META-INF/*.RSA',
+                'META-INF/*.SF',
+                'META-INF/*.DSA',
+                'META-INF/*.EC'
+            ]
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+        debug {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+    buildFeatures {
+        compose true
+    }
+    composeOptions {
+        kotlinCompilerExtensionVersion '1.5.10'
+    }
+}
+
+dependencies {
+    def composeBom = platform('androidx.compose:compose-bom:2024.06.00')
+    implementation composeBom
+    implementation 'androidx.compose.ui:ui'
+    implementation 'androidx.compose.ui:ui-graphics'
+    implementation 'androidx.compose.material3:material3'
+    implementation 'androidx.compose.material:material-icons-extended'
+    implementation 'androidx.activity:activity-compose:1.9.0'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.0'
+    implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.8.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
+    implementation 'androidx.documentfile:documentfile:1.0.1'
+    // Manifest 层主题(Theme.Material3.DayNight.NoActionBar / colorSurface attr) 由 MDC 提供；
+    // Compose 内仍用 androidx.compose.material3 的 MaterialTheme。两者共存、互不冲突。
+    implementation 'com.google.android.material:material:1.12.0'
+    // 图片 PDF OCR：Google ML Kit 中文识别器（独立版，自带模型，离线可用，无需 Play 服务动态下发）
+    // 注意：不要再加 com.google.mlkit:text-recognition:16.0.0（Latin 版），该版本已改为 Play Services
+    // 动态下发模型，会与中文版冲突，导致无 Play 服务的设备上模型取不到、OCR 静默返回空。
+    implementation 'com.google.mlkit:text-recognition-chinese:16.0.0'
+    // PDF 扫描件渲染后备：PdfiumAndroid（内置 Pdfium 编译启用 OpenJPEG，可渲染 JPEG2000/JBIG2 压缩的扫描图；
+    //   系统 PdfRenderer/Pdfium 不支持这两种格式，会导致扫描件页面渲染为空白、OCR 认不出字）。
+    // 注：该库传递依赖旧版 com.android.support:support-compat，与 AndroidX 冲突，需 exclude 掉（其运行时不依赖它）。
+    implementation('com.github.barteksc:pdfium-android:1.9.0') {
+        exclude group: 'com.android.support', module: 'support-compat'
+    }
+    // 老格式(.doc/.xls/.ppt)解析：Apache POI（Java，安卓原生运行，不依赖 Windows）
+    // 仅用 poi + poi-scratchpad（HSSF/HWPF/HSLF），不引入 poi-ooxml，避免安卓缺 javax.xml.stream 的坑
+    implementation 'org.apache.poi:poi:5.2.5'
+    implementation 'org.apache.poi:poi-scratchpad:5.2.5'
+    // 新格式(.docx/.xlsx/.pptx)解析：暂缓引入 poi-ooxml（Android StAX 兼容性问题导致 CI 构建失败）
+    // v1.0.14 当前策略：DOCX/XLSX/PPTX 仍走 Python（但其他格式已全部纯 Java/Kotlin，
+    //   Python 引擎仅服务这三种格式，状态污染概率大幅降低）
+    // 后续版本解决 StAX 问题后再切换为纯 Java
+    // implementation 'org.apache.poi:poi-ooxml:5.2.5'
+    // implementation 'org.apache.poi:poi-ooxml-lite:5.2.5'
+    // implementation 'com.fasterxml.aalto-woodstox:aalto-xml:1.2.2'
+    // PDF 文本提取：暂用轻量方案（v1.0.14 先移除 PdfBox，因其在 Android 有 java.awt 编译依赖）
+    // 后续版本可考虑 pdfbox-android（无 AWT 依赖的分支）或自实现 PDF 流解析器
+    // 当前 PDF 格式归入「其他」分类，由 Python/Chaqopy 作为唯一降级方案处理
+    // （因其他格式已全部走纯 Java/Kotlin，Python 引擎仅服务于 PDF，状态污染概率大幅降低）
+    implementation 'org.apache.commons:commons-compress:1.26.1'
+    // RAR4 解压：纯 Java 库（Apache Commons Compress 不支持 RAR）
+    implementation 'com.github.junrar:junrar:7.5.1'
+    implementation 'org.apache.commons:commons-math3:3.6.1'
+}
+
+// 图片 OCR 模型(chi_sim.traineddata)由 CI 下载进 app/src/main/assets/tessdata/，随 APK 内置。

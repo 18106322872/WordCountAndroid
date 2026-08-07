@@ -100,6 +100,14 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- v1.5.13: 隔离 LibreDWG 原生 dwg2pdf 调用到独立进程(:dwgisolated)，
+             防止 Cad 文件触发 native SIGSEGV 时连带杀掉主 app（闪退）。
+             该进程不初始化 Python/Compose，仅加载 libdwg2dxf.so 执行转换。 -->
+        <service
+            android:name=".DwgIsolatedService"
+            android:process=":dwgisolated"
+            android:exported="false" />
     </application>
 
 </manifest>

@@ -969,7 +969,7 @@ private fun openWithWps(context: android.content.Context, entry: FileEntry) {
 
 /**
  * v1.5.10: 导出 DWG -> PDF（实验性，LibreDWG 矢量导出仅支持基础实体）。
- *   1) 调 DwgConverter.convertToPdf()（C 层 LibreDWG 读 DWG→临时DXF→矢量PDF）
+ *   1) 调 DwgIsolatedRunner.convertToPdf()（在 :dwgisolated 进程跑 LibreDWG dwg2pdf，native 崩溃不闪退）
  *   2) 成功：用 WPS 打开（未装 WPS 则弹系统选择器）
  *   3) 失败：toast 提示错误码
  * ⚠️ 已知限制：复杂图纸（天正自定义对象、动态块、代理图形）可能丢失或错乱。
@@ -992,7 +992,8 @@ private fun exportDwgToPdf(
     onStateChange(entry.id)
     scope.launch(Dispatchers.IO) {
         try {
-            val res = DwgConverter.convertToPdf(entry.cachePath, pdfPath)
+            // v1.5.13: 改用隔离进程运行 dwg2pdf（native 崩溃只杀隔离进程，不闪退主 app）
+            val res = DwgIsolatedRunner.convertToPdf(context, entry.cachePath, pdfPath)
             withContext(Dispatchers.Main) {
                 onStateChange(null)
                 if (res.path == null) {
@@ -2204,8 +2205,9 @@ private fun addFiles(
                         val rawInvalid = rawChars < 50 || (rawChars > 5000 && rawFeRatio < 0.15)
                         if (rawInvalid) {
                             // ── 回退：转 PDF 再从 PDF 文本层提取 ──
+                            // v1.5.13: 改用隔离进程运行 dwg2pdf（native 崩溃只杀隔离进程，不闪退主 app）
                             val pdfPath = "${f.parent}/${f.nameWithoutExtension}.pdf"
-                            val res = DwgConverter.convertToPdf(f.absolutePath, pdfPath)
+                            val res = DwgIsolatedRunner.convertToPdf(context, f.absolutePath, pdfPath)
                             if (res.path != null) {
                                 val pdfFile = File(pdfPath)
                                 if (pdfFile.exists() && pdfFile.length() > 0) {

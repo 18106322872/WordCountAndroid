@@ -18,6 +18,17 @@ import com.chaquo.python.android.AndroidPlatform
  */
 class WordCountApplication : Application() {
 
+    private fun isDwgIsolatedProcess(): Boolean {
+        val procName = try {
+            val m = android.app.ActivityManager::class.java
+            val am = getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+            val pids = android.os.Process.myPid()
+            val infos = am.runningAppProcesses
+            infos?.firstOrNull { it.pid == pids }?.processName
+        } catch (_: Throwable) { null }
+        return procName != null && procName.endsWith(":dwgisolated")
+    }
+
     /** Application.onCreate 主线程启动 Python 的结果；null 表示成功 */
     @Volatile
     var pythonStartError: String? = null
@@ -25,6 +36,12 @@ class WordCountApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // v1.5.13: :dwgisolated 进程只做 native dwg2pdf 转换，不初始化 Python（Chaquopy 在
+        // 非主进程初始化会失败且浪费资源，其资源提取还可能干扰主进程）。
+        if (isDwgIsolatedProcess()) {
+            Log.d("WordCountApp", "跳过 Python 初始化（隔离进程）")
+            return
+        }
         try {
             if (!Python.isStarted()) {
                 Python.start(AndroidPlatform(this))
