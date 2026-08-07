@@ -91,7 +91,7 @@ object DwgRawCjkScanner {
     private const val MAX_CJK_OVER_FILE_SIZE_RATIO = 6
 
     /** 允许覆盖 DXF 结果的最大倍数（recovery CJK / DXF CJK 超过此值则拒绝覆盖） */
-    const val MAX_REPLACE_RATIO = 3.5
+    val MAX_REPLACE_RATIO = 3.5
 
     // ───────────────────── 质量判定 ─────────────────────
 
