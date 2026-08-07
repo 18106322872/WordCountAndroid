@@ -307,4 +307,30 @@ object DwgRawCjkScanner {
         // 都不达标 → 返回较好的那个（即使质量勉强），让调用方决定是否使用
         return if (gbk.cjkTotal >= utf16.cjkTotal) gbk else utf16
     }
+
+    // ───────────────────── v1.5.21: 安全门（防止字节扫描器覆盖好结果） ─────────────────────
+
+    /** 允许覆盖 DXF 结果的最大倍数（recovery CJK / DXF CJK 超过此值则拒绝） */
+    val MAX_REPLACE_RATIO = 3.5
+
+    /**
+     * 安全门：判断 recovery 结果是否可信到可以覆盖 DXF 结构化解析的结果。
+     * 桌面版核心逻辑（wordcount.py:3552）：
+     *   "⚠️ 必须 if _real_text is None：优先级 0(ezdxf 出图口径)命中时不得被
+     *    dwggrep 全量覆盖（否则巴布亚又回到 59362 虚高）"
+     */
+    fun shouldReplaceDxfResult(dxfTotalChars: Int, dxfCjkCount: Int,
+                                recovered: ScanResult): Boolean {
+        val dxfCjkRatio = if (dxfTotalChars > 0) dxfCjkCount.toDouble() / dxfTotalChars else 0.0
+        // DXF 已有足够好的中文 → 保护它不被覆盖
+        if (dxfCjkCount >= 500 || dxfCjkRatio >= 0.15) return false
+        // Recovery 结果膨胀过度 → 拒绝
+        if (recovered.cjkTotal > 0 && dxfTotalChars > 0 &&
+            recovered.cjkTotal > dxfTotalChars * MAX_REPLACE_RATIO) return false
+        // Recovery diversity 太高（像随机噪声）→ 拒绝
+        if (recovered.cjkDiversity >= 0.7) return false
+        // Recovery 有实质内容且看起来像真文本 → 允许
+        return recovered.cjkTotal >= 200 && recovered.cjkDiversity < 0.6 &&
+               recovered.commonRatio >= 0.10 && recovered.text.isNotEmpty()
+    }
 }
