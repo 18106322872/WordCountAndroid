@@ -326,7 +326,7 @@ object DwgRawCjkScanner {
         if (dxfCjkCount >= 500 || dxfCjkRatio >= 0.15) return false
         // Recovery 结果膨胀过度 → 拒绝
         if (recovered.cjkTotal > 0 && dxfTotalChars > 0 &&
-            recovered.cjkTotal > dxfTotalChars * MAX_REPLACE_RATIO) return false
+            recovered.cjkTotal.toDouble() > dxfTotalChars * MAX_REPLACE_RATIO) return false
         // Recovery diversity 太高（像随机噪声）→ 拒绝
         if (recovered.cjkDiversity >= 0.7) return false
         // Recovery 有实质内容且看起来像真文本 → 允许

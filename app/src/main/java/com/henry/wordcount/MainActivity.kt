@@ -2268,7 +2268,8 @@ private fun addFiles(
                             if (mayReplace && recovered.text.isNotEmpty()) {
                                 val recStats = countTextKotlin(recovered.text)
                                 // 二次 sanity：不允许膨胀超过 3.5x
-                                if (recStats.fourth <= maxOf(finalStats.fourth * DwgRawCjkScanner.MAX_REPLACE_RATIO, 100)) {
+                                val limit = (finalStats.fourth * DwgRawCjkScanner.MAX_REPLACE_RATIO).toInt().coerceAtLeast(100)
+                                if (recStats.fourth <= limit) {
                                     finalStats = recStats
                                     dxfPagesReason = "${recovered.method}字节扫描恢复"
                                     Log.d("WordCount", "DWG CJK recovery APPLIED $dName: now=${recStats.fourth} fe=${recStats.second}")
