@@ -43,7 +43,7 @@ object DwgIsolatedRunner {
             var serviceMessenger: Messenger? = null
             var done = false
 
-            val finish: (DwgConverter.DwgResult) -> Unit = { result ->
+            val finish: (DwgConverter.DwgResult) -> Unit = finish@{ result ->
                 if (done) return@finish
                 done = true
                 mainHandler.removeCallbacksAndMessages(null)
