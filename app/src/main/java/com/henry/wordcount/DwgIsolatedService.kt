@@ -38,6 +38,30 @@ class DwgIsolatedService : Service() {
     private inner class IncomingHandler : Handler(Looper.getMainLooper()) {
         override fun handleMessage(msg: Message) {
             when (msg.what) {
+                MSG_CONVERT_DXF -> {
+                    // v1.5.16: DWG→DXF（字数统计主路径）。dwg2dxf 同为 LibreDWG 原生调用，
+                    // 可能在某些文件上 native 崩溃，故也放在隔离进程。
+                    val data = msg.data
+                    val input = data.getString(KEY_INPUT) ?: ""
+                    val output = data.getString(KEY_OUTPUT) ?: ""
+                    val replyTo = msg.replyTo
+                    val bundle = Bundle()
+                    try {
+                        val res = DwgConverter.convert(input, output)
+                        bundle.putInt(KEY_RC, res.errorCode)
+                        bundle.putString(KEY_DIAG, res.diagText)
+                        bundle.putString(KEY_PATH, res.path)
+                    } catch (e: Throwable) {
+                        Log.e("DwgIsolated", "convert(dwg2dxf) threw: ${e.message}", e)
+                        bundle.putInt(KEY_RC, -99)
+                        bundle.putString(KEY_DIAG, "exception: ${e.message}")
+                        bundle.putString(KEY_PATH, null)
+                    }
+                    val resp = Message.obtain(null, MSG_RESULT).apply { this.data = bundle }
+                    try { replyTo?.send(resp) } catch (e: Throwable) {
+                        Log.e("DwgIsolated", "reply failed: ${e.message}")
+                    }
+                }
                 MSG_CONVERT -> {
                     val data = msg.data
                     val input = data.getString(KEY_INPUT) ?: ""
@@ -70,6 +94,7 @@ class DwgIsolatedService : Service() {
 
     companion object {
         const val MSG_CONVERT = 1
+        const val MSG_CONVERT_DXF = 3
         const val MSG_RESULT = 2
         const val KEY_INPUT = "input"
         const val KEY_OUTPUT = "output"

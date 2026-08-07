@@ -33,10 +33,26 @@ object DwgIsolatedRunner {
     private const val CONVERT_TIMEOUT_MS = 35_000L
 
     /**
-     * 在 :dwgisolated 进程执行 dwg2pdf。
+     * 在 :dwgisolated 进程执行 dwg2pdf（DWG 导出看图 / 字数 PDF 回退）。
      * 返回 DwgConverter.DwgResult；失败（超时/崩溃/未绑定）时 path==null、errorCode 描述原因。
      */
     suspend fun convertToPdf(context: Context, input: String, output: String): DwgConverter.DwgResult {
+        return runConvert(context, input, output, DwgIsolatedService.MSG_CONVERT)
+    }
+
+    /**
+     * v1.5.16: 在 :dwgisolated 进程执行 dwg2dxf（DWG→DXF，字数统计主路径）。
+     * dwg2dxf 同为 LibreDWG 原生调用，可能在某些文件上 native 崩溃，故同样隔离。
+     */
+    suspend fun convertToDxf(context: Context, input: String, output: String): DwgConverter.DwgResult {
+        return runConvert(context, input, output, DwgIsolatedService.MSG_CONVERT_DXF)
+    }
+
+    /**
+     * 通用隔离进程转换调用（dwg2pdf / dwg2dxf 共用）。
+     * 绑定超时 8s + 转换超时 35s + 进程崩溃(onServiceDisconnected)兜底。
+     */
+    private suspend fun runConvert(context: Context, input: String, output: String, requestWhat: Int): DwgConverter.DwgResult {
         return suspendCancellableCoroutine { cont ->
             val mainHandler = Handler(Looper.getMainLooper())
             var connection: ServiceConnection? = null
@@ -72,7 +88,7 @@ object DwgIsolatedRunner {
                     }
                     serviceMessenger = Messenger(binder)
                     // 构造请求
-                    val request = Message.obtain(null, DwgIsolatedService.MSG_CONVERT).apply {
+                    val request = Message.obtain(null, requestWhat).apply {
                         data = Bundle().apply {
                             putString(DwgIsolatedService.KEY_INPUT, input)
                             putString(DwgIsolatedService.KEY_OUTPUT, output)

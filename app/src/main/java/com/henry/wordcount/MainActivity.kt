@@ -2194,18 +2194,41 @@ private fun addFiles(
                     val f = cf.file
                     val dName = cf.displayName
                     try {
-                        // ── 主路径：原始二进制扫描 ──
+                        // ── 兜底层：原始二进制扫描（保留为回退） ──
                         val rawText = scanDwgRaw(f.absolutePath)
                         var finalStats = countTextKotlin(rawText)
                         val rawChars = finalStats.fourth
                         val rawFeRatio = if (rawChars > 0) finalStats.second.toDouble() / rawChars else 0.0
-                        // 回退触发：raw scan 疑似无效
-                        //   a) 提取到的字符过少（<50）→ 文字被压缩/特殊编码，raw scan 拿不到
-                        //   b) 大量字符但中文占比极低（<15%）→ 二进制垃圾被误判为文字
-                        val rawInvalid = rawChars < 50 || (rawChars > 5000 && rawFeRatio < 0.15)
-                        if (rawInvalid) {
-                            // ── 回退：转 PDF 再从 PDF 文本层提取 ──
-                            // v1.5.13: 改用隔离进程运行 dwg2pdf（native 崩溃只杀隔离进程，不闪退主 app）
+
+                        // ── 主路径（v1.5.16）：dwg→dxf 结构化文字抽取 + 图框页数 ──
+                        //   端口桌面 extract_text_custom + count_cad_frames：dwg2dxf 由隔离进程执行
+                        //   （native 崩溃只杀隔离进程，不闪退主 app），dxf 由 Kotlin 直接解析
+                        //   TEXT/ATTDEF/MTEXT/MULTILEADER 实体（无需 ezdxf）。
+                        var dxfPages: Int? = null
+                        var dxfPagesReason: String? = null
+                        val dxfPath = "${f.parent}/${f.nameWithoutExtension}.dxf"
+                        val dxfRes = DwgIsolatedRunner.convertToDxf(context, f.absolutePath, dxfPath)
+                        if (dxfRes.path != null) {
+                            val dxfFile = File(dxfPath)
+                            if (dxfFile.exists() && dxfFile.length() > 0) {
+                                val analysis = DwgDxfParser.analyze(dxfPath)
+                                val dxfStats = countTextKotlin(analysis.text)
+                                // 取更丰富的来源（DXF 结构化为主，raw 扫描兜底；二者均为真文本）
+                                if (dxfStats.fourth >= rawChars) {
+                                    finalStats = dxfStats
+                                }
+                                dxfPages = analysis.frames
+                                dxfPagesReason = analysis.framesReason
+                                Log.d("WordCount", "DWG dxf $dName: raw=$rawChars dxf=${dxfStats.fourth} pages=$dxfPages($dxfPagesReason)")
+                            }
+                        }
+
+                        // ── 回退：raw+dxf 都疑似无效时，转 PDF 再从 PDF 文本层提取 ──
+                        val charsNow = finalStats.fourth
+                        val feRatioNow = if (charsNow > 0) finalStats.second.toDouble() / charsNow else 0.0
+                        val invalid = charsNow < 50 || (charsNow > 5000 && feRatioNow < 0.15)
+                        if (invalid) {
+                            // v1.5.13: 隔离进程运行 dwg2pdf（native 崩溃只杀隔离进程，不闪退主 app）
                             val pdfPath = "${f.parent}/${f.nameWithoutExtension}.pdf"
                             val res = DwgIsolatedRunner.convertToPdf(context, f.absolutePath, pdfPath)
                             if (res.path != null) {
@@ -2214,21 +2237,26 @@ private fun addFiles(
                                     val ktRes = PdfExtractor.extract(pdfFile)
                                     val pdfStats = countTextKotlin(ktRes.text)
                                     val pdfFeRatio = if (pdfStats.fourth > 0) pdfStats.second.toDouble() / pdfStats.fourth else 0.0
-                                    // 采用 PDF 结果的条件：PDF 中文占比明显更高，或 raw 是极端垃圾而 PDF 在合理范围
+                                    // 采用 PDF 结果的条件：PDF 中文占比明显更高，或当前是极端垃圾而 PDF 在合理范围
                                     val pdfBetter = pdfStats.fourth > 0 &&
-                                            (pdfFeRatio > rawFeRatio + 0.1 || (pdfStats.fourth in 50..50000 && rawChars > 50000))
+                                            (pdfFeRatio > feRatioNow + 0.1 || (pdfStats.fourth in 50..50000 && charsNow > 50000))
                                     if (pdfBetter) {
                                         finalStats = pdfStats
-                                        Log.d("WordCount", "DWG PDF回退 $dName: raw=$rawChars(fe=$rawFeRatio) → pdf=${pdfStats.fourth}(fe=$pdfFeRatio)")
+                                        if (ktRes.pages != null && ktRes.pages > 0) {
+                                            dxfPages = ktRes.pages
+                                            dxfPagesReason = "PDF页数兜底"
+                                        }
+                                        Log.d("WordCount", "DWG PDF回退 $dName: now=$charsNow → pdf=${pdfStats.fourth}")
                                     }
                                 }
                             }
                         }
+                        val pages = dxfPages ?: estimatePages(finalStats.fourth)
                         val resMap = mapOf(
                             "name" to dName, "ext" to ".dwg",
                             "stats" to mapOf("words" to finalStats.first, "fe" to finalStats.second, "nc" to finalStats.third, "chars" to finalStats.fourth),
-                            "meta" to emptyMap<String, Any?>(),
-                            "pages" to 1
+                            "meta" to mapOf<String, Any?>("pages_reason" to (dxfPagesReason ?: "")),
+                            "pages" to pages
                         )
                         val fr = toFileResult(resMap, f.absolutePath)
                         entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
