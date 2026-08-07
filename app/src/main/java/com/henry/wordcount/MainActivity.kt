@@ -2207,7 +2207,7 @@ private fun addFiles(
 
                         var dxfPages: Int? = null
                         var dxfPagesReason: String? = null
-                        var finalStats: Quadruple<Int, Int, Int, Int>
+                        var finalStats: Quadruple<Int, Int, Int,Int> = Quadruple(0, 0, 0, 0)
                         var needsPdfExport = false       // 桌面 meta["needs_pdf"]
                         var rasterizedWarning: String? = null
 
