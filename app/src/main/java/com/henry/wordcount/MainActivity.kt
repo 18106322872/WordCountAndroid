@@ -2223,6 +2223,51 @@ private fun addFiles(
                             }
                         }
 
+                        // ── v1.5.19: 编码丢失检测 + GBK/UTF-16 原始字节 CJK 恢复 ──
+                        //   桌面版发现 LibreDWG→DXF 常把中文 DWG 的 GBK 字节误作 Latin-1 解码，
+                        //   导致 mojibake（乱码）或直接抽空。此处移植桌面的多层恢复：
+                        //     Layer 1: dwggrep（需额外编译，暂不可用）
+                        //     Layer 2: _extract_dwg_gbk_cjk → DwgRawCjkScanner.extractGbkCjk()
+                        //     Layer 3: _extract_dwg_utf16_cjk → DwgRawCjkScanner.extractUtf16Cjk()
+                        val framesForDensity = dxfPages ?: 1
+                        val curTotal = finalStats.second + finalStats.third  // fe + nc
+                        val density = curTotal.toDouble() / maxOf(framesForDensity, 1)
+                        // 统计当前提取文本中的 CJK 质量指标
+                        var itemsCjk = 0; var realCjk = 0
+                        val currentText = if (dxfRes.path != null) {
+                            val dxfFile2 = File(dxfPath)
+                            if (dxfFile2.exists() && dxfFile2.length() > 0) {
+                                try { DwgDxfParser.analyze(dxfPath).text } catch (_: Exception) { "" }
+                            } else ""
+                        } else ""
+                        for (ch in currentText) { val cp = ch.code; if (cp in 0x4E00..0x9FFF) { itemsCjk++; if (cp in DwgRawCjkScanner.COMMON_CJK_CHARS) realCjk++ } }
+                        // 也检查 finalStats 对应的文本（可能是 raw scan）
+                        for (ch in rawText) { val cp = ch.code; if (cp in 0x4E00..0x9FFF) { itemsCjk++; if (cp in DwgRawCjkScanner.COMMON_CJK_CHARS) realCjk++ } }
+                        val garbled = (itemsCjk >= 50) && (realCjk.toDouble() / maxOf(itemsCjk, 1) < 0.05)
+                        // 稀疏丢失：DWG 原始字节含大量 CJK 但每页真实 CJK 极少
+                        var sparse = false
+                        try {
+                            val dwgRawBytes = File(f.absolutePath).readBytes()
+                            var cjkInRaw = 0
+                            try {
+                                val decoded = String(dwgRawBytes, charset("GB18030"))
+                                for (c in decoded) { if (c.code in 0x4E00..0x9FFF) cjkInRaw++ }
+                            } catch (_: Exception) {}
+                            sparse = (cjkInRaw > 50000) && (realCjk.toDouble() / maxOf(framesForDensity, 1) < 50.0)
+                        } catch (_: Exception) {}
+                        val encodingLoss = garbled || sparse
+                        val needsRecovery = ((density > 3000.0 && curTotal > framesForDensity * 1000)) || encodingLoss
+                        if (needsRecovery) {
+                            val recovered = DwgRawCjkScanner.scanRawDwg(f.absolutePath)
+                            Log.d("WordCount", "DWG CJK recovery $dName: method=${recovered.method} cjk=${recovered.cjkTotal} div=${"%.3f".format(recovered.cjkDiversity)} cr=${"%.3f".format(recovered.commonRatio)}")
+                            if (recovered.cjkTotal >= 200 && recovered.cjkDiversity < 0.6 && recovered.commonRatio >= 0.10 && recovered.text.isNotEmpty()) {
+                                val recStats = countTextKotlin(recovered.text)
+                                finalStats = recStats
+                                dxfPagesReason = "${recovered.method}字节扫描恢复"
+                                Log.d("WordCount", "DWG CJK recovery APPLIED $dName: now=${recStats.fourth} fe=${recStats.second}")
+                            }
+                        }
+
                         // ── 回退：raw+dxf 都疑似无效时，转 PDF 再从 PDF 文本层提取 ──
                         val charsNow = finalStats.fourth
                         val feRatioNow = if (charsNow > 0) finalStats.second.toDouble() / charsNow else 0.0
