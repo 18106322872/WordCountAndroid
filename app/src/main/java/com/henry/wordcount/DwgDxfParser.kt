@@ -83,7 +83,7 @@ object DwgDxfParser {
         val text = try {
             String(raw, Charsets.UTF_8)
         } catch (_: Exception) {
-            try { String(raw, Charsets.GB18030) } catch (_: Exception) { return null }
+            try { String(raw, charset("GB18030")) } catch (_: Exception) { return null }
         }
         return text.split("\n")
     }
