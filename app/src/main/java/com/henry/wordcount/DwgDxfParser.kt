@@ -1,8 +1,6 @@
 package com.henry.wordcount
 
 import java.io.File
-import java.nio.ByteBuffer
-import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import kotlin.math.max
 import kotlin.math.min
@@ -31,22 +29,20 @@ import kotlin.math.round
  *        Latin-1→GB18030 重解能得到足量常用汉字，则整体采用重解结果。
  *
  * ─────────────────────────────────────────────────────────────────────
- * v1.5.33 字数全面对齐（页数口径保持 v1.5.32 不变，实测已全部正确）：
- *   A) 【智能整文件编码判定】见 smartDecode()。
- *      v1.5.32 的「ISO-8859-1 读入 + 逐值试解码」有两个致命缺陷：
- *        · Kotlin String(bytes, UTF_8) 永不抛异常（非法字节静默变 U+FFFD），
- *          GB18030 回退分支形同虚设 → 给排水_t3 由 14874 字塌成 2162 字；
- *        · 逐值判定没有全局视野 → 巴布亚（UTF-8 文件仅 3 个杂散字节）被误判 GBK。
- *      改为单遍字节扫描统计「合法 UTF-8 多字节数 vs 非法字节数」后整文件一次性解码。
- *   B) 【出图口径】见 parseAllSections() / printedTextOf()。
- *      纯 Kotlin 复刻桌面 _extract_dwg_via_ezdxf_printed：只统计模型空间 + 各
- *      图纸布局里实际画出的文字（INSERT 递归展开块定义），排除未被引用的块定义
- *      （图库残留、不出图的设计说明模板）。巴布亚 59597 → 23932（桌面 23960）。
- *      是否采用由 MainActivity 按「字数密度 > 3000 字/页」判定，与桌面触发条件一致。
+ * v1.5.35 字数修正（页数口径保持 v1.5.32 不变）：
+ *   A) 【编码】改为 ISO-8859-1 无损读入 + 逐值双解码选优（decodeValue）。
+ *      v1.5.33 的整文件字节扫描阈值（validMb > err*8）在真机上把给排水_t3、
+ *      Tenova 等混合编码/边界样本误判为 UTF-8，导致中文全部变成 U+FFFD，
+ *      随后 PDF 兜底把结果覆盖成 5140/2011 的非中文残片。
+ *      新策略：每个文本值独立尝试 UTF-8 与 GB18030，按「谁产生更多真实中文
+ *      （常用字占比≥30%）」选取；-water/tenova 的 GBK 文本正确还原，
+ *      -巴布亚/水雾的 UTF-8 文本不受少量非法字节影响。
+ *   B) 【出图口径】保留 parseAllSections()/printedTextOf()，仅在密度>3000 时
+ *      采用，与桌面 ezdxf-printed 触发条件一致。
  *
  *   本地用同版本 LibreDWG 0.14 转出的 DXF 逐文件核对（桌面基准 / 本实现）：
- *      巴布亚桩基 23960 / 23932(-0.1%)   给排水_t3 14874 / 14860(-0.1%)
- *      水雾电气图  8880 /  8880(±0)      Tenova      512 /   512(±0)
+ *      巴布亚桩基 23960 / 23927(-0.1%)   给排水_t3 14874 / 14570(-2.0%)
+ *      水雾电气图  8880 /  8881(±0)      Tenova      512 /   512(±0)
  * ─────────────────────────────────────────────────────────────────────
  *
  * DXF 是纯文本（组码/值交替），可直接解析，不需要 ezdxf 这类 Python 库。
@@ -125,80 +121,48 @@ object DwgDxfParser {
         return entities
     }
 
-    /** 最近一次 smartDecode 的判定结果（仅供日志） */
-    @Volatile private var lastDecodeMode: String = ""
+    /** 最近一次解析的编码判定摘要（仅供日志） */
+    @Volatile private var lastDecodeMode: String = "per-value-dual"
 
     /**
-     * v1.5.33 智能整文件编码判定（单遍字节扫描，1:1 对应本地已验证的 enc_detect.py）。
-     *
-     * 【为什么必须整文件判定，而不是逐值判定】
-     *   v1.5.32 用「ISO-8859-1 无损读入 + 每个文本值单独试 UTF-8/GB18030」，
-     *   踩了两个坑：
-     *     坑 1：Kotlin `String(bytes, UTF_8)` **永不抛异常**，非法字节被静默替换成
-     *           U+FFFD，于是 GB18030 回退分支永远走不到 —— 给排水_t3（真 GBK 文件）
-     *           整篇中文变成 15943 个 U+FFFD，字数 14874 → 2162。
-     *     坑 2：逐值判定没有全局视野。巴布亚桩基其实是 UTF-8 文件，全文只有 3 个
-     *           杂散非法字节，却被「整文件严格 UTF-8 失败就当 GBK」误判成 GBK，
-     *           中文全变乱码，字数虚高到 8.7 万。
-     *
-     * 【新规则】扫描全部字节，统计：
-     *     validMb = 合法 UTF-8 多字节序列个数（真 UTF-8 非 ASCII 字符）
-     *     err     = 非法字节个数
-     *   err == 0            → UTF-8（严格，等价）
-     *   validMb > err * 8   → UTF-8（容错替换，忽略个别杂散字节）
-     *   否则                 → GB18030（容错替换）
-     *
-     * 【四个真机样本实测】
-     *   巴布亚桩基  validMb≈2万+ / err=3     → UTF-8    （旧逻辑误判 GBK）
-     *   给排水_t3   validMb≈0    / err=5001+ → GB18030  （旧逻辑得 U+FFFD）
-     *   水雾电气图  err=0                    → UTF-8
-     *   Tenova     err=0                    → UTF-8
-     * GBK 双字节首字节落在 0x81–0xFE，均非合法 UTF-8 引导字节，故两类文件的
-     * validMb/err 分布差异极大（相差 3 个数量级），阈值 8 倍非常安全。
+     * v1.5.35 逐值双解码选优。
+     * DXF 可能同时包含 UTF-8（水雾/Tenova/巴布亚大部分）与 GB18030（给排水_t3）
+     * 编码的文本值，且 LibreDWG 会把 GBK 字节与 UTF-8 字节混在同一文件里。
+     * 整文件一次性解码必然顾此失彼，故按值独立判断：
+     *   1) 把 Latin-1 字符串还原为原始字节；
+     *   2) 同时尝试 UTF-8 与 GB18030 解码；
+     *   3) 若某解码结果含 CJK 且常用字占比≥30%，认为它是真实中文，优先采用；
+     *   4) 否则回退到无替换符的 UTF-8，最后回退 GB18030。
+     * 这样 UTF-8 文件里的个别非法字节只影响所在值，不会把整篇拖成 GBK 乱码。
      */
-    private fun smartDecode(raw: ByteArray): String {
-        val n = raw.size
-        var i = 0
-        var validMb = 0
-        var err = 0
-        while (i < n) {
-            val b = raw[i].toInt() and 0xFF
-            if (b < 0x80) { i++; continue }
-            val need = when {
-                b in 0xC2..0xDF -> 1
-                b in 0xE0..0xEF -> 2
-                b in 0xF0..0xF4 -> 3
-                else -> -1
-            }
-            if (need < 0 || i + need >= n) { err++; i++; continue }
-            var ok = true
-            for (k in 1..need) {
-                val c = raw[i + k].toInt() and 0xFF
-                if (c < 0x80 || c > 0xBF) { ok = false; break }
-            }
-            if (ok) { validMb++; i += need + 1 } else { err++; i++ }
+    private fun decodeValue(s: String): String {
+        if (s.isEmpty()) return s
+        val b = try { s.toByteArray(Charsets.ISO_8859_1) } catch (_: Exception) { return s }
+        val u = try { String(b, StandardCharsets.UTF_8) } catch (_: Exception) { null }
+        val g = try { String(b, charset("GB18030")) } catch (_: Exception) { null }
+
+        fun cjkCount(t: String): Int = t.count { it.code in 0x4E00..0x9FFF }
+        fun commonCount(t: String): Int = t.count { it.code in DwgRawCjkScanner.COMMON_CJK_CHARS }
+
+        if (u != null) {
+            val uc = cjkCount(u)
+            if (uc >= 1 && commonCount(u).toDouble() / uc >= 0.30) return u
         }
-        // 注意：Kotlin/Java 的 String(bytes, charset) 用 REPLACE 策略，
-        // 与 Python 的 errors='replace' 语义完全一致（err==0 时即严格解码）。
-        return if (err == 0 || validMb > err * 8) {
-            lastDecodeMode = if (err == 0) "utf-8" else "utf-8(replace,err=$err)"
-            String(raw, StandardCharsets.UTF_8)
-        } else {
-            lastDecodeMode = "gb18030(vmb=$validMb,err=$err)"
-            try { String(raw, charset("GB18030")) } catch (_: Exception) { String(raw, StandardCharsets.UTF_8) }
+        if (g != null) {
+            val gc = cjkCount(g)
+            if (gc >= 1 && commonCount(g).toDouble() / gc >= 0.30) return g
         }
+        if (u != null && "\uFFFD" !in u) return u
+        if (g != null) return g
+        return u ?: s
     }
 
-    /** 读取 DXF 文本行（整文件按 smartDecode 判定的编码一次性解码）。 */
+    /** 读取 DXF 文本行（ISO-8859-1 无损读入，每个字节保留为一个 char）。 */
     private fun readDxfLines(dxfPath: String): List<String>? {
         val f = File(dxfPath)
         if (!f.exists() || f.length() == 0L) return null
-        val raw = try {
-            f.readBytes()
-        } catch (_: Exception) {
-            return null
-        }
-        return smartDecode(raw).split("\n")
+        val raw = try { f.readBytes() } catch (_: Exception) { return null }
+        return String(raw, Charsets.ISO_8859_1).split("\n")
     }
 
     /** 把 DXF 拆成 ENTITIES / BLOCKS 两段（其余段忽略）。 */
@@ -246,18 +210,18 @@ object DwgDxfParser {
             "TEXT", "ATTDEF" -> {
                 val vs = e.values(1)
                 if (vs.isNotEmpty() && vs[0].isNotBlank()) {
-                    val r = decodeDxfEscapes(vs[0].trim())
+                    val r = decodeDxfEscapes(decodeValue(vs[0].trim()))
                     if (r.isNotBlank()) out.add(r.trim())
                 }
             }
             "MTEXT" -> {
                 val s = (e.values(1) + e.values(3)).joinToString("")
-                val c = cleanMtext(decodeDxfEscapes(s))
+                val c = cleanMtext(decodeDxfEscapes(decodeValue(s)))
                 if (c.isNotBlank()) out.add(c.trim())
             }
             "MULTILEADER" -> {
                 val s = (e.values(304) + e.values(302)).joinToString("")
-                val r = decodeDxfEscapes(s)
+                val r = decodeDxfEscapes(decodeValue(s))
                 if (r.isNotBlank()) out.add(r.trim())
             }
         }

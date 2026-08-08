@@ -2359,24 +2359,16 @@ private fun addFiles(
                         val charsNow = finalStats.fourth
                         val feRatioNow = if (charsNow > 0) finalStats.second.toDouble() / charsNow else 0.0
                         val cjkNow = finalStats.second
-                        //   v1.5.33: 补齐桌面 3792 行的 `not meta.get("printed_scope")` 守卫——
-                        //   已按出图口径统计的结果不再被 PDF 兜底覆盖。
-                        //   v1.5.33 关键保护：DXF 已抽到「足量且可信」的中文时，禁止 PDF 兜底覆盖。
-                        //     桌面版这条兜底走的是 OCR / 同名文字型 PDF，多数环境根本不可用，
-                        //     所以触发了也不改变结果；Android 的 dwg2pdf 却总能生成 PDF，
-                        //     一旦 LibreDWG 渲染的 PDF 文字层残缺，pdfBetter 里的
-                        //     `pdfFeRatio > feRatioNow + 0.1` 极易被满足（水雾电气图 feRatio 仅 0.16），
-                        //     把已经正确的 8880 字换成几百字的残片。
-                        //     保护判据与 DwgRawCjkScanner.shouldReplaceDxfResult 同源：
-                        //     中文字数 ≥200 且常用字占比 ≥0.30 视为真实文本，不再兜底。
-                        //     （给排水_t3 早期「5140 字 / 0 中文」那种确实抽空的场景 cr=0，
-                        //       不受保护，PDF 兜底照常触发。）
-                        val curCommonRatio = if (itemsCjk > 0) realCjk.toDouble() / itemsCjk else 0.0
-                        val hasTrustedChinese = (itemsCjk >= 200) && (curCommonRatio >= 0.30)
+                        //   v1.5.35: 移除 v1.5.33 的 hasTrustedChinese 硬守卫。
+                        //     桌面版 extract_cad:3788-3799 的 PDF 兜底触发条件只有
+                        //     `frames>=1 && not printed_scope && not encoder_garbled && words < frames*1000`，
+                        //     并不检查当前是否已有可信中文。Android 若因为 DXF 已抽到中文就跳过
+                        //     PDF 兜底，会错失 dwg2pdf 能渲染出的栅格化文字（如水雾电气图）。
+                        //     是否采用 PDF 结果仍由下面的 pdfBetter 门把守：PDF 中文占比必须
+                        //     明显更高、或当前接近零中文、或当前字符极稀疏，才会替换。
                         val rasterizedTrigger = framesKnown
                                 && !recoverySucceeded
                                 && !printedScope
-                                && !hasTrustedChinese
                                 && (finalWords4 < framesVal4 * 1000)
                         // 保留"几乎无内容"兜底 + 桌面式栅格化/稀疏触发
                         val invalid = (charsNow < 50) || rasterizedTrigger
