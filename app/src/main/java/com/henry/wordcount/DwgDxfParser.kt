@@ -1,6 +1,7 @@
 package com.henry.wordcount
 
 import java.io.File
+import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import kotlin.math.max
@@ -89,7 +90,7 @@ object DwgDxfParser {
             val decoder = StandardCharsets.UTF_8.newDecoder()
                 .onMalformedInput(CodingErrorAction.REPORT)
                 .onUnmappableCharacter(CodingErrorAction.REPORT)
-            String(raw, decoder)
+            decoder.decode(ByteBuffer.wrap(raw)).toString()
         } catch (_: Exception) {
             try { String(raw, charset("GB18030")) } catch (_: Exception) { return null }
         }
