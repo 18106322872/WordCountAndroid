@@ -2300,18 +2300,19 @@ private fun addFiles(
                         }
 
                         // ── 回退：raw+dxf+recovery 都疑似无效时，转 PDF 再从 PDF 文本层提取 ──
-                        // v1.5.26 重要修复：
-                        //   旧逻辑：dxfMojibake 直接导致 invalid=true → PDF 兜底 → 覆盖可能已修复的结果
-                        //   新逻辑：dxfMojibake 不再直接触发 PDF；仅当恢复后结果仍差（少中文/极端偏斜）时才 PDF
+                        // v1.5.28 核心修复：
+                        //   v1.5.26 修复了 invalid 条件中的 dxfMojibake（加 !recoverySucceeded 保护）
+                        //   但遗漏了栅格化检测（rasterized）这条独立的 PDF 兜底路径
+                        //   结果：CJK 恢复成功后，栅格化检测仍以「字数<图框×1000」为由覆盖恢复结果
+                        //   实例：给排水_t3 恢复到14874字/15页 → 14874<15000 → PDF覆盖回5140
+                        //   修复：恢复成功后完全跳过所有 PDF 兜底（invalid + 栅格化 两条路径）
                         val charsNow = finalStats.fourth
                         val feRatioNow = if (charsNow > 0) finalStats.second.toDouble() / charsNow else 0.0
                         val cjkNow = finalStats.second
-                        // v1.5.26: 移除 dxfMojibake 条件——mojibake 只说明 DXF 差，不代表恢复后结果差
-                        //   新增 recoverySucceeded 保护：CJK 字节扫描已成功修复时不轻易丢弃
                         val invalid = charsNow < 50 ||
-                                      (charsNow > 5000 && feRatioNow < 0.15 && !recoverySucceeded) ||
-                                      (charsNow >= 500 && cjkNow <= 10 && cjkNow.toDouble() / maxOf(charsNow, 1) < 0.01 && !recoverySucceeded)
-                        if (invalid) {
+                                      (charsNow > 5000 && feRatioNow < 0.15) ||
+                                      (charsNow >= 500 && cjkNow <= 10 && cjkNow.toDouble() / maxOf(charsNow, 1) < 0.01)
+                        if (invalid && !recoverySucceeded) {
                             // v1.5.13: 隔离进程运行 dwg2pdf（native 崩溃只杀隔离进程，不闪退主 app）
                             val pdfPath = "${f.parent}/${f.nameWithoutExtension}.pdf"
                             val res = DwgIsolatedRunner.convertToPdf(context, f.absolutePath, pdfPath)
@@ -2337,13 +2338,14 @@ private fun addFiles(
                                 }
                             }
                         }
-                        // ── v1.5.22: 栅格化检测（对齐桌面 wordcount.py:3788-3842）──
+                        // ── v1.5.22/v1.5.28: 栅格化检测（对齐桌面 wordcount.py:3788-3842）──
                         //   条件：DWG 提取总字数 < 图框数 × 1000（低于 1000 字/页 = 栅格化文字）
                         //   桌面对此显示「字数需导出PDF」/「失败」；Android 尝试自动 PDF 兜底
+                        //   v1.5.28: 恢复成功后跳过（CJK字节扫描已提取到真实文本，低字数/页是正常的）
                         val framesVal4 = dxfPages ?: 1
                         val finalWords4 = finalStats.second + finalStats.third
                         val rasterized4 = (framesVal4 >= 1) && (finalWords4 < framesVal4 * 1000)
-                        if (rasterized4 && (dxfPagesReason != "PDF页数兜底")) {
+                        if (rasterized4 && !recoverySucceeded && (dxfPagesReason != "PDF页数兜底")) {
                             Log.d("WordCount", "DWG rasterized $dName: words=$finalWords4 frames=$framesVal4 threshold=${framesVal4 * 1000}")
                             val pdfPath4 = "${f.parent}/${f.nameWithoutExtension}.pdf"
                             val pdfRes4 = DwgIsolatedRunner.convertToPdf(context, f.absolutePath, pdfPath4)
