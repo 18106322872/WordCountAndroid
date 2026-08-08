@@ -30,6 +30,25 @@ import kotlin.math.round
  *     5) 补一个「全局兜底」：若整篇抽取结果一个中文都没有，但按
  *        Latin-1→GB18030 重解能得到足量常用汉字，则整体采用重解结果。
  *
+ * ─────────────────────────────────────────────────────────────────────
+ * v1.5.33 字数全面对齐（页数口径保持 v1.5.32 不变，实测已全部正确）：
+ *   A) 【智能整文件编码判定】见 smartDecode()。
+ *      v1.5.32 的「ISO-8859-1 读入 + 逐值试解码」有两个致命缺陷：
+ *        · Kotlin String(bytes, UTF_8) 永不抛异常（非法字节静默变 U+FFFD），
+ *          GB18030 回退分支形同虚设 → 给排水_t3 由 14874 字塌成 2162 字；
+ *        · 逐值判定没有全局视野 → 巴布亚（UTF-8 文件仅 3 个杂散字节）被误判 GBK。
+ *      改为单遍字节扫描统计「合法 UTF-8 多字节数 vs 非法字节数」后整文件一次性解码。
+ *   B) 【出图口径】见 parseAllSections() / printedTextOf()。
+ *      纯 Kotlin 复刻桌面 _extract_dwg_via_ezdxf_printed：只统计模型空间 + 各
+ *      图纸布局里实际画出的文字（INSERT 递归展开块定义），排除未被引用的块定义
+ *      （图库残留、不出图的设计说明模板）。巴布亚 59597 → 23932（桌面 23960）。
+ *      是否采用由 MainActivity 按「字数密度 > 3000 字/页」判定，与桌面触发条件一致。
+ *
+ *   本地用同版本 LibreDWG 0.14 转出的 DXF 逐文件核对（桌面基准 / 本实现）：
+ *      巴布亚桩基 23960 / 23932(-0.1%)   给排水_t3 14874 / 14860(-0.1%)
+ *      水雾电气图  8880 /  8880(±0)      Tenova      512 /   512(±0)
+ * ─────────────────────────────────────────────────────────────────────
+ *
  * DXF 是纯文本（组码/值交替），可直接解析，不需要 ezdxf 这类 Python 库。
  */
 
@@ -54,9 +73,20 @@ object DwgDxfParser {
     private data class DxfSections(val entities: List<String>, val blocks: List<String>)
 
     data class AnalysisResult(
+        /** 全量口径：文件里所有实体的文字（含未被引用的块定义/图库残留） */
         val text: String,
+        /** 出图口径：只含模型空间 + 各图纸布局实际画出的文字（端口桌面 ezdxf-printed） */
+        val printedText: String,
         val frames: Int?,
-        val framesReason: String?
+        val framesReason: String?,
+        /** 整文件编码判定结果，仅供日志 */
+        val decodeMode: String
+    )
+
+    /** DXF 作用域：模型空间实体 + 块定义表（块名 → 块内实体） */
+    private data class DxfScopes(
+        val ms: List<DxfEntity>,
+        val blocks: LinkedHashMap<String, MutableList<DxfEntity>>
     )
 
     /** ezdxf 口径下不算「顶层实体」的从属记录：POLYLINE 的顶点、INSERT 的属性、序列结束符 */
@@ -95,14 +125,71 @@ object DwgDxfParser {
         return entities
     }
 
-    /** 读取 DXF 文本行。
-     *  v1.5.32 修正：LibreDWG 0.14 写出的 DXF 字节编码混杂——
-     *    部分 UTF-8、部分 GBK、个别非法字节，导致整文件严格 UTF-8 或 GB18030
-     *    解码都会失败，进而整篇统计判空、全部归零（巴布亚/给排水实测如此）。
-     *  改为用 ISO-8859-1 无损读入（每个字节保留为一个 char），
-     *  结构解析（组码/实体名/块名均为 ASCII）完全不受影响；
-     *  文本值再在 extractTextFromEntities 里按原字节回解为 UTF-8/GB18030（见 decodeValue）。
+    /** 最近一次 smartDecode 的判定结果（仅供日志） */
+    @Volatile private var lastDecodeMode: String = ""
+
+    /**
+     * v1.5.33 智能整文件编码判定（单遍字节扫描，1:1 对应本地已验证的 enc_detect.py）。
+     *
+     * 【为什么必须整文件判定，而不是逐值判定】
+     *   v1.5.32 用「ISO-8859-1 无损读入 + 每个文本值单独试 UTF-8/GB18030」，
+     *   踩了两个坑：
+     *     坑 1：Kotlin `String(bytes, UTF_8)` **永不抛异常**，非法字节被静默替换成
+     *           U+FFFD，于是 GB18030 回退分支永远走不到 —— 给排水_t3（真 GBK 文件）
+     *           整篇中文变成 15943 个 U+FFFD，字数 14874 → 2162。
+     *     坑 2：逐值判定没有全局视野。巴布亚桩基其实是 UTF-8 文件，全文只有 3 个
+     *           杂散非法字节，却被「整文件严格 UTF-8 失败就当 GBK」误判成 GBK，
+     *           中文全变乱码，字数虚高到 8.7 万。
+     *
+     * 【新规则】扫描全部字节，统计：
+     *     validMb = 合法 UTF-8 多字节序列个数（真 UTF-8 非 ASCII 字符）
+     *     err     = 非法字节个数
+     *   err == 0            → UTF-8（严格，等价）
+     *   validMb > err * 8   → UTF-8（容错替换，忽略个别杂散字节）
+     *   否则                 → GB18030（容错替换）
+     *
+     * 【四个真机样本实测】
+     *   巴布亚桩基  validMb≈2万+ / err=3     → UTF-8    （旧逻辑误判 GBK）
+     *   给排水_t3   validMb≈0    / err=5001+ → GB18030  （旧逻辑得 U+FFFD）
+     *   水雾电气图  err=0                    → UTF-8
+     *   Tenova     err=0                    → UTF-8
+     * GBK 双字节首字节落在 0x81–0xFE，均非合法 UTF-8 引导字节，故两类文件的
+     * validMb/err 分布差异极大（相差 3 个数量级），阈值 8 倍非常安全。
      */
+    private fun smartDecode(raw: ByteArray): String {
+        val n = raw.size
+        var i = 0
+        var validMb = 0
+        var err = 0
+        while (i < n) {
+            val b = raw[i].toInt() and 0xFF
+            if (b < 0x80) { i++; continue }
+            val need = when {
+                b in 0xC2..0xDF -> 1
+                b in 0xE0..0xEF -> 2
+                b in 0xF0..0xF4 -> 3
+                else -> -1
+            }
+            if (need < 0 || i + need >= n) { err++; i++; continue }
+            var ok = true
+            for (k in 1..need) {
+                val c = raw[i + k].toInt() and 0xFF
+                if (c < 0x80 || c > 0xBF) { ok = false; break }
+            }
+            if (ok) { validMb++; i += need + 1 } else { err++; i++ }
+        }
+        // 注意：Kotlin/Java 的 String(bytes, charset) 用 REPLACE 策略，
+        // 与 Python 的 errors='replace' 语义完全一致（err==0 时即严格解码）。
+        return if (err == 0 || validMb > err * 8) {
+            lastDecodeMode = if (err == 0) "utf-8" else "utf-8(replace,err=$err)"
+            String(raw, StandardCharsets.UTF_8)
+        } else {
+            lastDecodeMode = "gb18030(vmb=$validMb,err=$err)"
+            try { String(raw, charset("GB18030")) } catch (_: Exception) { String(raw, StandardCharsets.UTF_8) }
+        }
+    }
+
+    /** 读取 DXF 文本行（整文件按 smartDecode 判定的编码一次性解码）。 */
     private fun readDxfLines(dxfPath: String): List<String>? {
         val f = File(dxfPath)
         if (!f.exists() || f.length() == 0L) return null
@@ -111,8 +198,7 @@ object DwgDxfParser {
         } catch (_: Exception) {
             return null
         }
-        val text = String(raw, Charsets.ISO_8859_1)
-        return text.split("\n")
+        return smartDecode(raw).split("\n")
     }
 
     /** 把 DXF 拆成 ENTITIES / BLOCKS 两段（其余段忽略）。 */
@@ -154,36 +240,142 @@ object DwgDxfParser {
 
     // ───────────────────────────── 文字抽取（extract_text_custom） ─────────────────────────────
 
-    private fun extractTextFromEntities(entities: List<DxfEntity>): String {
-        val collected = mutableListOf<String>()
-        for (e in entities) {
-            when (e.type) {
-                "TEXT", "ATTDEF" -> {
-                    val vs = e.values(1)
-                    if (vs.isNotEmpty() && vs[0].isNotBlank()) {
-                        val recovered = decodeDxfEscapes(decodeValue(vs[0].trim()))
-                        if (recovered.isNotBlank()) collected.add(recovered)
-                    }
-                }
-                "MTEXT" -> {
-                    val s = (e.values(1) + e.values(3)).joinToString("")
-                    val cleaned = cleanMtext(decodeDxfEscapes(decodeValue(s)))
-                    if (cleaned.isNotBlank()) collected.add(cleaned.trim())
-                }
-                "MULTILEADER" -> {
-                    val s = (e.values(304) + e.values(302)).joinToString("")
-                    val recovered = decodeDxfEscapes(decodeValue(s))
-                    if (recovered.isNotBlank()) collected.add(recovered.trim())
+    /** 从单个实体里取文字（端口桌面 extract_text_from_dxf 的实体分支） */
+    private fun grabText(e: DxfEntity, out: MutableList<String>) {
+        when (e.type) {
+            "TEXT", "ATTDEF" -> {
+                val vs = e.values(1)
+                if (vs.isNotEmpty() && vs[0].isNotBlank()) {
+                    val r = decodeDxfEscapes(vs[0].trim())
+                    if (r.isNotBlank()) out.add(r.trim())
                 }
             }
+            "MTEXT" -> {
+                val s = (e.values(1) + e.values(3)).joinToString("")
+                val c = cleanMtext(decodeDxfEscapes(s))
+                if (c.isNotBlank()) out.add(c.trim())
+            }
+            "MULTILEADER" -> {
+                val s = (e.values(304) + e.values(302)).joinToString("")
+                val r = decodeDxfEscapes(s)
+                if (r.isNotBlank()) out.add(r.trim())
+            }
         }
-        // 去重（保序）
+    }
+
+    /** 去重（保序）后拼成整段文本 */
+    private fun joinUnique(items: List<String>): String {
         val seen = LinkedHashSet<String>()
         val out = mutableListOf<String>()
-        for (c in collected) {
+        for (c in items) {
             if (c !in seen) { seen.add(c); out.add(c) }
         }
         return globalRecoverCjk(out.joinToString("\n"))
+    }
+
+    /** 全量口径：整个 DXF 文件里所有实体的文字（含未被引用的块定义/图库残留） */
+    private fun extractTextFromEntities(entities: List<DxfEntity>): String {
+        val collected = mutableListOf<String>()
+        for (e in entities) grabText(e, collected)
+        return joinUnique(collected)
+    }
+
+    // ─────────────────────── 出图口径（端口桌面 _extract_dwg_via_ezdxf_printed） ───────────────────────
+
+    /**
+     * 一次遍历同时拿到「模型空间实体」与「块定义表」。
+     * ENTITIES 段 == 桌面 doc.modelspace()（LibreDWG 不写组码 67）；
+     * BLOCKS 段每个 BLOCK…ENDBLK 是一个块定义，其中 *Paper_SpaceN 就是各图纸布局。
+     */
+    private fun parseAllSections(lines: List<String>): DxfScopes {
+        val ms = mutableListOf<DxfEntity>()
+        val blocks = LinkedHashMap<String, MutableList<DxfEntity>>()
+        var section: String? = null
+        var curEnt: DxfEntity? = null
+        var curList: MutableList<DxfEntity>? = null
+        var curBlock: String? = null
+        var awaitingName = false
+        val n = lines.size
+        var i = 0
+        while (i < n - 1) {
+            val code = lines[i].trim()
+            val value = lines[i + 1]
+            val vs = value.trim()
+            i += 2
+            if (code == "0" && vs == "SECTION") {
+                if (i + 1 < n && lines[i].trim() == "2") {
+                    section = lines[i + 1].trim()
+                    i += 2
+                }
+                continue
+            }
+            if (code == "0" && vs == "ENDSEC") {
+                section = null; curEnt = null; curList = null; curBlock = null; awaitingName = false
+                continue
+            }
+            if (section == "ENTITIES") {
+                if (code == "0") {
+                    val e = DxfEntity(vs); ms.add(e); curEnt = e
+                } else {
+                    val ci = code.toIntOrNull()
+                    if (ci != null) curEnt?.items?.add(ci to value)
+                }
+            } else if (section == "BLOCKS") {
+                if (code == "0") {
+                    when (vs) {
+                        "BLOCK" -> { curBlock = null; awaitingName = true; curList = mutableListOf(); curEnt = null }
+                        "ENDBLK" -> {
+                            val nm = curBlock
+                            if (nm != null) blocks[nm] = curList ?: mutableListOf()
+                            curBlock = null; curList = null; curEnt = null; awaitingName = false
+                        }
+                        else -> {
+                            val e = DxfEntity(vs); curEnt = e; curList?.add(e)
+                        }
+                    }
+                } else if (code == "2" && awaitingName && curEnt == null) {
+                    curBlock = vs; awaitingName = false
+                } else {
+                    val ci = code.toIntOrNull()
+                    if (ci != null) curEnt?.items?.add(ci to value)
+                }
+            }
+        }
+        return DxfScopes(ms, blocks)
+    }
+
+    /**
+     * 出图口径文字：遍历模型空间 + 各 *Paper_SpaceN 布局，
+     *   INSERT   → 递归展开其块定义（visited 防环）后取里面的文字
+     *   其他实体 → 直接取文字
+     * 未被任何 INSERT 引用的块定义（图库残留 / 不出图的说明模板）不计入。
+     *
+     * 巴布亚桩基实测：全量 59597 字 → 出图 23932 字，桌面基准 23960 字（偏差 -0.1%）。
+     */
+    private fun printedTextOf(scopes: DxfScopes): String {
+        val out = mutableListOf<String>()
+
+        fun expand(ins: DxfEntity, visited: MutableSet<String>) {
+            val nm = ins.values(2).firstOrNull()?.trim() ?: ""
+            if (nm.isEmpty() || nm in visited) return
+            visited.add(nm)
+            val blk = scopes.blocks[nm] ?: return
+            for (be in blk) {
+                if (be.type == "INSERT") expand(be, visited) else grabText(be, out)
+            }
+        }
+
+        fun walk(ents: List<DxfEntity>) {
+            for (e in ents) {
+                if (e.type == "INSERT") expand(e, HashSet()) else grabText(e, out)
+            }
+        }
+
+        walk(scopes.ms)
+        for ((name, ents) in scopes.blocks) {
+            if (PAPER_BLOCK_NAME.containsMatchIn(name)) walk(ents)
+        }
+        return joinUnique(out)
     }
 
     /** 端口桌面 clean_mtext()：去掉 MTEXT 格式码 */
@@ -238,22 +430,6 @@ object DwgDxfParser {
         return r
     }
 
-    /**
-     * 把 readDxfLines 以 ISO-8859-1 读入的「字节即字符」字符串还原为真实文本。
-     * 先按原字节以 UTF-8 严格解码（LibreDWG 0.14 嵌入中文多为 UTF-8），
-     * 失败再试 GB18030（兼容老 GBK 字节），仍失败则保留原样。
-     * GBK 双字节的首字节落在 0x81–0xFE，均不是合法 UTF-8 引导字节，
-     * 故 UTF-8 严格解码会失败并安全回退到 GB18030，二者不会误判。
-     */
-    private fun decodeValue(latin1: String): String {
-        if (latin1.isEmpty()) return latin1
-        val bytes = latin1.toByteArray(Charsets.ISO_8859_1)
-        val asUtf8 = try { String(bytes, StandardCharsets.UTF_8) } catch (_: Exception) { null }
-        if (asUtf8 != null) return asUtf8
-        val asGbk = try { String(bytes, charset("GB18030")) } catch (_: Exception) { null }
-        return asGbk ?: latin1
-    }
-
     private fun cjkCountOf(t: String): Int = t.count { it.code in 0x4E00..0x9FFF }
     private fun commonCountOf(t: String): Int = t.count { it.code in DwgRawCjkScanner.COMMON_CJK_CHARS }
 
@@ -278,9 +454,11 @@ object DwgDxfParser {
 
     /** 对外主入口：一次性解析出文字 + 页数 */
     fun analyze(dxfPath: String): AnalysisResult {
-        val lines = readDxfLines(dxfPath) ?: return AnalysisResult("", null, "DXF 读取失败")
+        val lines = readDxfLines(dxfPath) ?: return AnalysisResult("", "", null, "DXF 读取失败", "")
         val entities = parseEntities(lines)
         val text = extractTextFromEntities(entities)
+        // v1.5.33：额外算一份「出图口径」文字，交由 MainActivity 在密度异常时采用
+        val printed = try { printedTextOf(parseAllSections(lines)) } catch (_: Throwable) { "" }
 
         val sec = splitSections(lines)
         // ENTITIES 段 == 桌面 doc.modelspace()（LibreDWG 不写组码 67）
@@ -297,7 +475,7 @@ object DwgDxfParser {
         val sheets = distinctSheetNumbers(entities)
         val det = countDetailSheets(entities, msLines)
         val (frames, reason) = pickFrames(geo, paper, sheets, det, entities.isNotEmpty(), msEnts, paperTotalEnts)
-        return AnalysisResult(text, frames, reason)
+        return AnalysisResult(text, printed, frames, reason, lastDecodeMode)
     }
 
     /** 端口桌面 count_cad_frames 的判定优先级（逐行对齐 wordcount.py:2461-2498） */

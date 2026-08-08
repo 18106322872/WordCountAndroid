@@ -2208,6 +2208,8 @@ private fun addFiles(
                         var dxfPagesReason: String? = null
                         var dxfMojibake = false
                         var dxfText = ""
+                        // v1.5.33: 是否已按「出图口径」统计（对齐桌面 meta["printed_scope"]）
+                        var printedScope = false
                         val dxfPath = "${f.parent}/${f.nameWithoutExtension}.dxf"
                         val dxfRes = DwgIsolatedRunner.convertToDxf(context, f.absolutePath, dxfPath)
                         if (dxfRes.path != null) {
@@ -2215,16 +2217,55 @@ private fun addFiles(
                             if (dxfFile.exists() && dxfFile.length() > 0) {
                                 val analysis = DwgDxfParser.analyze(dxfPath)
                                 dxfText = analysis.text
-                                val dxfStats = countTextKotlin(dxfText)
+                                var dxfStats = countTextKotlin(dxfText)
                                 dxfPages = analysis.frames
                                 dxfPagesReason = analysis.framesReason
+
+                                // ── v1.5.33: 出图口径裁剪（端口桌面 _extract_dwg_via_ezdxf_printed）──
+                                //   桌面版在「字数密度异常高」时改用 ezdxf 只读模型空间+各布局
+                                //   实际画出的文字，排除未被任何 INSERT 引用的块定义
+                                //   （图库残留、不出图的结构设计说明模板）。
+                                //   巴布亚桩基：全量 59597 字 / 11 页 = 5418 字/页（远超正常
+                                //   1500-3000），改用出图口径后 23932 字，桌面基准 23960。
+                                //   触发条件与桌面 extract_cad:3466 的 density 判据一致，
+                                //   给排水(1063)/水雾(278)/Tenova(512) 密度正常，完全不受影响。
+                                if (analysis.printedText.isNotEmpty() && dxfPages != null && dxfPages!! > 0) {
+                                    val allWords = dxfStats.second + dxfStats.third
+                                    val allDensity = allWords.toDouble() / dxfPages!!
+                                    if (allDensity > 3000.0 && allWords > dxfPages!! * 1000) {
+                                        var pCjk = 0; var pCommon = 0
+                                        val pSet = HashSet<Char>()
+                                        for (ch in analysis.printedText) {
+                                            val cp = ch.code
+                                            if (cp in 0x4E00..0x9FFF) {
+                                                pCjk++; pSet.add(ch)
+                                                if (cp in DwgRawCjkScanner.COMMON_CJK_CHARS) pCommon++
+                                            }
+                                        }
+                                        val pCr = if (pCjk > 0) pCommon.toDouble() / pCjk else 0.0
+                                        val pDv = if (pCjk > 0) pSet.size.toDouble() / pCjk else 1.0
+                                        val pStats = countTextKotlin(analysis.printedText)
+                                        val pWords = pStats.second + pStats.third
+                                        // 质量门（对齐桌面 3517-3545）：足量中文 + 常用字占比够高
+                                        // + 多样性够低（排除「二进制巧合」式假中文），且确实是裁剪而非放大
+                                        if (pCjk >= 200 && pCr >= 0.30 && pDv < 0.60 && pWords in 1 until allWords) {
+                                            dxfText = analysis.printedText
+                                            dxfStats = pStats
+                                            printedScope = true
+                                            dxfPagesReason = "${dxfPagesReason ?: ""}·出图口径统计"
+                                            Log.d("WordCount", "DWG 出图口径 $dName: 全量=$allWords(密度${"%.0f".format(allDensity)}) → 出图=$pWords cjk=$pCjk cr=${"%.2f".format(pCr)} dv=${"%.2f".format(pDv)}")
+                                        } else {
+                                            Log.d("WordCount", "DWG 出图口径 REJECTED $dName: pWords=$pWords all=$allWords cjk=$pCjk cr=${"%.2f".format(pCr)} dv=${"%.2f".format(pDv)}")
+                                        }
+                                    }
+                                }
                                 // ── v1.5.24: DXF mojibake 检测（巴布亚桩基场景）──
                                 //   LibreDWG 把 GBK 中文误作 Latin-1 解码 → DXF 文本含大量
                                 //   随机 CJK（mojibake）。判据：DXF 含大量 CJK 但常用字占比极低
                                 //   + 密度远超正常 DWG（>2500 字/页）。命中则弃用 DXF 结果，
                                 //   改用 raw 扫描作为基线并触发后续 PDF/GBK 恢复。
                                 var dxfCjkCount = 0; var dxfRealCjk = 0
-                                for (ch in analysis.text) {
+                                for (ch in dxfText) {
                                     val cp = ch.code
                                     if (cp in 0x4E00..0x9FFF) { dxfCjkCount++; if (cp in DwgRawCjkScanner.COMMON_CJK_CHARS) dxfRealCjk++ }
                                 }
@@ -2232,10 +2273,12 @@ private fun addFiles(
                                 val dxfDensity = dxfStats.fourth.toDouble() / maxOf(dxfPages ?: 1, 1)
                                 dxfMojibake = (dxfCjkCount >= 200) && (dxfCommonRatio < 0.05) && (dxfDensity > 2500)
                                 // 仅当 DXF 非 mojibake 且字数更丰富时才采用 DXF 结果
-                                if (!dxfMojibake && dxfStats.fourth >= rawChars) {
+                                // v1.5.33: 出图口径是「主动裁剪」，字符数必然少于 raw 扫描，
+                                //   不能被 `>= rawChars` 这道门挡掉（桌面版同样是直接替换 items）。
+                                if (printedScope || (!dxfMojibake && dxfStats.fourth >= rawChars)) {
                                     finalStats = dxfStats
                                 }
-                                Log.d("WordCount", "DWG dxf $dName: raw=$rawChars dxf=${dxfStats.fourth} cjk=$dxfCjkCount cr=${"%.3f".format(dxfCommonRatio)} den=${"%.0f".format(dxfDensity)} moji=$dxfMojibake pages=$dxfPages($dxfPagesReason)")
+                                Log.d("WordCount", "DWG dxf $dName: enc=${analysis.decodeMode} raw=$rawChars dxf=${dxfStats.fourth} cjk=$dxfCjkCount cr=${"%.3f".format(dxfCommonRatio)} den=${"%.0f".format(dxfDensity)} moji=$dxfMojibake pages=$dxfPages($dxfPagesReason)")
                             }
                         }
 
@@ -2316,8 +2359,24 @@ private fun addFiles(
                         val charsNow = finalStats.fourth
                         val feRatioNow = if (charsNow > 0) finalStats.second.toDouble() / charsNow else 0.0
                         val cjkNow = finalStats.second
+                        //   v1.5.33: 补齐桌面 3792 行的 `not meta.get("printed_scope")` 守卫——
+                        //   已按出图口径统计的结果不再被 PDF 兜底覆盖。
+                        //   v1.5.33 关键保护：DXF 已抽到「足量且可信」的中文时，禁止 PDF 兜底覆盖。
+                        //     桌面版这条兜底走的是 OCR / 同名文字型 PDF，多数环境根本不可用，
+                        //     所以触发了也不改变结果；Android 的 dwg2pdf 却总能生成 PDF，
+                        //     一旦 LibreDWG 渲染的 PDF 文字层残缺，pdfBetter 里的
+                        //     `pdfFeRatio > feRatioNow + 0.1` 极易被满足（水雾电气图 feRatio 仅 0.16），
+                        //     把已经正确的 8880 字换成几百字的残片。
+                        //     保护判据与 DwgRawCjkScanner.shouldReplaceDxfResult 同源：
+                        //     中文字数 ≥200 且常用字占比 ≥0.30 视为真实文本，不再兜底。
+                        //     （给排水_t3 早期「5140 字 / 0 中文」那种确实抽空的场景 cr=0，
+                        //       不受保护，PDF 兜底照常触发。）
+                        val curCommonRatio = if (itemsCjk > 0) realCjk.toDouble() / itemsCjk else 0.0
+                        val hasTrustedChinese = (itemsCjk >= 200) && (curCommonRatio >= 0.30)
                         val rasterizedTrigger = framesKnown
                                 && !recoverySucceeded
+                                && !printedScope
+                                && !hasTrustedChinese
                                 && (finalWords4 < framesVal4 * 1000)
                         // 保留"几乎无内容"兜底 + 桌面式栅格化/稀疏触发
                         val invalid = (charsNow < 50) || rasterizedTrigger
