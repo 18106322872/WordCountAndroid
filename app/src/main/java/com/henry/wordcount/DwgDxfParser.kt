@@ -1,6 +1,8 @@
 package com.henry.wordcount
 
 import java.io.File
+import java.nio.charset.CodingErrorAction
+import java.nio.charset.StandardCharsets
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.round
@@ -71,7 +73,10 @@ object DwgDxfParser {
         return entities
     }
 
-    /** 读取 DXF 文本行（UTF-8 优先，失败回退 GB18030） */
+    /** 读取 DXF 文本行（严格 UTF-8，失败回退 GB18030）。
+     *  Kotlin/JVM 默认 UTF-8 解码遇到非法字节会静默替换为 U+FFFD，
+     *  导致含 GBK 字节的 DXF 永远走不到 GB18030 回退。这里用 REPORT 模式，
+     *  非法字节时抛异常，强制进入 GB18030 解码，与桌面 Python 行为一致。 */
     private fun readDxfLines(dxfPath: String): List<String>? {
         val f = File(dxfPath)
         if (!f.exists() || f.length() == 0L) return null
@@ -81,7 +86,10 @@ object DwgDxfParser {
             return null
         }
         val text = try {
-            String(raw, Charsets.UTF_8)
+            val decoder = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+            String(raw, decoder)
         } catch (_: Exception) {
             try { String(raw, charset("GB18030")) } catch (_: Exception) { return null }
         }
@@ -96,16 +104,20 @@ object DwgDxfParser {
             when (e.type) {
                 "TEXT", "ATTDEF" -> {
                     val vs = e.values(1)
-                    if (vs.isNotEmpty() && vs[0].isNotBlank()) collected.add(vs[0].trim())
+                    if (vs.isNotEmpty() && vs[0].isNotBlank()) {
+                        val recovered = tryRecoverMojibake(vs[0].trim())
+                        if (recovered.isNotBlank()) collected.add(recovered)
+                    }
                 }
                 "MTEXT" -> {
                     val s = (e.values(1) + e.values(3)).joinToString("")
-                    val cleaned = cleanMtext(s)
+                    val cleaned = cleanMtext(tryRecoverMojibake(s))
                     if (cleaned.isNotBlank()) collected.add(cleaned.trim())
                 }
                 "MULTILEADER" -> {
                     val s = (e.values(304) + e.values(302)).joinToString("")
-                    if (s.isNotBlank()) collected.add(s.trim())
+                    val recovered = tryRecoverMojibake(s)
+                    if (recovered.isNotBlank()) collected.add(recovered.trim())
                 }
             }
         }
@@ -125,6 +137,44 @@ object DwgDxfParser {
         r = r.replace(Regex("\\\\[A-Za-z][^;{}]*;"), "")
         r = r.replace("\\\\", "\\").replace("{", "").replace("}", "").replace("\\", "")
         return r
+    }
+
+    /**
+     * 尝试逆转 DXF 文本中常见的编码误读。
+     * LibreDWG 写 DXF 时，若把源 DWG 里的 GBK/GB18030 字节误按 Latin-1 或 UTF-8
+     * 解码，就会出现 mojibake。这里把字符串按 Latin-1 / UTF-8 回编码成字节后
+     * 再用 GB18030 解码，若得到明显更多的真实中文则采用。
+     */
+    private fun tryRecoverMojibake(s: String): String {
+        if (s.isEmpty()) return s
+        fun cjkCount(t: String): Int = t.count { it.code in 0x4E00..0x9FFF }
+        fun commonCount(t: String): Int = t.count { it.code in DwgRawCjkScanner.COMMON_CJK_CHARS }
+        val origCjk = cjkCount(s)
+        val origCommon = commonCount(s)
+
+        // 尝试 1：Latin-1 字节 → GB18030
+        val viaLatin1 = try {
+            val bytes = s.toByteArray(Charsets.ISO_8859_1)
+            String(bytes, charset("GB18030"))
+        } catch (_: Exception) { null }
+        if (viaLatin1 != null) {
+            val c = cjkCount(viaLatin1)
+            val cc = commonCount(viaLatin1)
+            if (c > origCjk && cc > origCommon && cc >= 2) return viaLatin1
+        }
+
+        // 尝试 2：UTF-8 字节 → GB18030（处理 UTF-8 误解码出的随机 CJK 码点）
+        val viaUtf8 = try {
+            val bytes = s.toByteArray(Charsets.UTF_8)
+            String(bytes, charset("GB18030"))
+        } catch (_: Exception) { null }
+        if (viaUtf8 != null) {
+            val c = cjkCount(viaUtf8)
+            val cc = commonCount(viaUtf8)
+            if (c > origCjk && cc > origCommon && cc >= 2) return viaUtf8
+        }
+
+        return s
     }
 
     // ───────────────────────────── 页数统计（count_cad_frames 全分支） ─────────────────────────────
