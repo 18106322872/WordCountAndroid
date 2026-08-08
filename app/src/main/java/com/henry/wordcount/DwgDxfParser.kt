@@ -189,14 +189,18 @@ object DwgDxfParser {
         val paper = rawLayoutCount(dxfPath)
         val sheets = distinctSheetNumbers(entities)
         val det = countDetailSheets(entities, dxfPath)
-        val (frames, reason) = pickFrames(geo, paper, sheets, det, entities.isNotEmpty())
+        val (msEnts, paperTotalEnts) = countBlockEntities(dxfPath)
+        val (frames, reason) = pickFrames(geo, paper, sheets, det, entities.isNotEmpty(), msEnts, paperTotalEnts)
         return AnalysisResult(text, frames, reason)
     }
 
     /** 端口桌面 count_cad_frames 的判定优先级 */
-    private fun pickFrames(geo: Int, paper: Int, sheets: Int, det: Int, hasEntities: Boolean): Pair<Int?, String?> {
+    private fun pickFrames(geo: Int, paper: Int, sheets: Int, det: Int, hasEntities: Boolean,
+                          msEnts: Int, paperTotalEnts: Int): Pair<Int?, String?> {
         // 布局稀疏 → 改用几何图框（dwg2dxf 常把所有图挤进 Model 空间）
-        if (geo >= 3 && geo > paper + 1) {
+        // 对齐桌面守卫：modelspace 实体 >1000 且每个 paper 布局平均实体 <=8 才覆盖
+        val sparsePaper = paper >= 1 && paperTotalEnts <= paper * 8
+        if (geo >= 3 && geo > paper + 1 && msEnts > 1000 && sparsePaper) {
             return Pair(geo, "布局稀疏·改用几何图框估算")
         }
         if (paper >= 1) return Pair(paper, "布局计数")
@@ -340,6 +344,63 @@ object DwgDxfParser {
             unique.add(s)
         }
         return unique.size
+    }
+
+    /**
+     * 统计 BLOCKS 段里 *Model_Space 与 *Paper_Space* 块内的实体数。
+     * 端口桌面 count_cad_frames:2461 的守卫：仅当 modelspace 实体极多
+     * (>1000) 且每个 paper 空间布局实体极少 (<=8) 时，才把「布局计数」
+     * 覆盖为「几何图框」。缺少这个守卫会导致 巴布亚桩基 这类
+     * 布局正常但几何框偏多的文件被误报成 19 页。
+     */
+    private fun countBlockEntities(dxfPath: String): Pair<Int, Int> {
+        val lines = readDxfLines(dxfPath) ?: return Pair(0, 0)
+        var inBlocks = false
+        var inBlock = false
+        var blockName: String? = null
+        var msEnts = 0
+        var paperTotalEnts = 0
+        val n = lines.size
+        var i = 0
+        while (i < n - 1) {
+            val code = lines[i].trim()
+            val value = lines[i + 1].trim()
+            i += 2
+            if (code == "0" && value == "SECTION") {
+                if (i < n - 1 && lines[i].trim() == "2") {
+                    val sectionName = lines[i + 1].trim()
+                    if (sectionName == "BLOCKS") {
+                        inBlocks = true
+                    } else if (inBlocks) {
+                        break
+                    }
+                    i += 2
+                }
+                continue
+            }
+            if (!inBlocks) continue
+            if (code == "0" && value == "BLOCK") {
+                inBlock = true
+                blockName = null
+                continue
+            }
+            if (code == "0" && value == "ENDBLK") {
+                inBlock = false
+                blockName = null
+                continue
+            }
+            if (inBlock && code == "2" && blockName == null) {
+                blockName = value
+                continue
+            }
+            if (inBlock && blockName != null && code == "0") {
+                when (blockName) {
+                    "*Model_Space" -> msEnts++
+                    else -> if (blockName.startsWith("*Paper_Space")) paperTotalEnts++
+                }
+            }
+        }
+        return Pair(msEnts, paperTotalEnts)
     }
 
     // ── 标题块图号：INSERT 下 ATTRIB 的图号属性去重（端口 _distinct_sheet_numbers） ──

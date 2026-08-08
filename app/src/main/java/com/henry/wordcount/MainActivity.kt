@@ -2301,17 +2301,21 @@ private fun addFiles(
                         }
 
                         // ── 回退：raw+dxf+recovery 都疑似无效时，转 PDF 再从 PDF 文本层提取 ──
-                        // v1.5.28 核心修复：
-                        //   v1.5.26 修复了 invalid 条件中的 dxfMojibake（加 !recoverySucceeded 保护）
-                        //   但遗漏了栅格化检测（rasterized）这条独立的 PDF 兜底路径
-                        //   结果：CJK 恢复成功后，栅格化检测仍以「字数<图框×1000」为由覆盖恢复结果
-                        //   实例：给排水_t3 恢复到14874字/15页 → 14874<15000 → PDF覆盖回5140
-                        //   修复：恢复成功后完全跳过所有 PDF 兜底（invalid + 栅格化 两条路径）
+                        // v1.5.31: 对齐桌面 extract_cad:3796 的 PDF 兜底触发条件：
+                        //   当 recovery 未成功，且总字数 < 图框数×1000 时，尝试把 DWG 自己渲染成 PDF
+                        //   再走 PDF 文字层提取。这样给排水_t3 这类「矢量文字被抽空/栅格化」文件
+                        //   能拿到 PDF 里的真实字数，而不是停留在 5140/0。
+                        //   同时保留 v1.5.28 的保险：CJK 恢复成功后完全跳过 PDF 兜底，避免覆盖好结果。
+                        val framesVal4 = dxfPages ?: 1
+                        val finalWords4 = finalStats.second + finalStats.third
                         val charsNow = finalStats.fourth
                         val feRatioNow = if (charsNow > 0) finalStats.second.toDouble() / charsNow else 0.0
                         val cjkNow = finalStats.second
-                        // v1.5.29: 仅"几乎无内容"才算 invalid（对齐桌面：不做 DWG→PDF 自动转换）
-                        val invalid = charsNow < 50
+                        val rasterizedTrigger = !recoverySucceeded
+                                && (framesVal4 >= 1)
+                                && (finalWords4 < framesVal4 * 1000)
+                        // 保留"几乎无内容"兜底 + 桌面式栅格化/稀疏触发
+                        val invalid = (charsNow < 50) || rasterizedTrigger
                         if (invalid) {
                             // v1.5.13: 隔离进程运行 dwg2pdf（native 崩溃只杀隔离进程，不闪退主 app）
                             val pdfPath = "${f.parent}/${f.nameWithoutExtension}.pdf"
@@ -2338,12 +2342,10 @@ private fun addFiles(
                                 }
                             }
                         }
-                        // ── v1.5.29: 栅格化检测仅日志，不再自动转 PDF（对齐桌面行为）──
-                        val framesVal4 = dxfPages ?: 1
-                        val finalWords4 = finalStats.second + finalStats.third
+                        // ── v1.5.31: 栅格化检测仍然记录日志（PDF 兜底已按桌面条件触发）──
                         val rasterized4 = (framesVal4 >= 1) && (finalWords4 < framesVal4 * 1000)
                         if (rasterized4) {
-                            Log.d("WordCount", "DWG rasterized (no auto-PDF) $dName: words=$finalWords4 frames=$framesVal4")
+                            Log.d("WordCount", "DWG rasterized $dName: words=$finalWords4 frames=$framesVal4 recovery=$recoverySucceeded")
                         }
 
                         val pages = dxfPages ?: estimatePages(finalStats.fourth)
