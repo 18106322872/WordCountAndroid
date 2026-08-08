@@ -2246,11 +2246,13 @@ private fun addFiles(
                         //     Layer 2: _extract_dwg_gbk_cjk → DwgRawCjkScanner.extractGbkCjk()
                         //     Layer 3: _extract_dwg_utf16_cjk → DwgRawCjkScanner.extractUtf16Cjk()
                         val framesForDensity = dxfPages ?: 1
-                        val curTotal = finalStats.second + finalStats.third  // fe + nc
+                        var curTotal = finalStats.second + finalStats.third  // fe + nc
                         val density = curTotal.toDouble() / maxOf(framesForDensity, 1)
-                        // 统计 DXF 文本中的 CJK 质量指标（仅 DXF 结构化结果，不含 raw 扫描噪声）
+                        // 统计当前结果中的 CJK 质量指标
                         var itemsCjk = 0; var realCjk = 0
-                        for (ch in dxfText) { val cp = ch.code; if (cp in 0x4E00..0x9FFF) { itemsCjk++; if (cp in DwgRawCjkScanner.COMMON_CJK_CHARS) realCjk++ } }
+                        // v1.5.26: 同时统计 dxfText 和最终文本的 CJK（recovery 后 finalStats 可能已变）
+                        val textForCjkCheck = if (dxfText.isNotEmpty()) dxfText else rawText
+                        for (ch in textForCjkCheck) { val cp = ch.code; if (cp in 0x4E00..0x9FFF) { itemsCjk++; if (cp in DwgRawCjkScanner.COMMON_CJK_CHARS) realCjk++ } }
                         val garbled = (itemsCjk >= 50) && (realCjk.toDouble() / maxOf(itemsCjk, 1) < 0.05)
                         // v1.5.21: 零 CJK + 有实质文本 → 几乎确定编码丢失（给排水_t3 场景：DXF中文=0）
                         val curCjkRatio = if (curTotal > 0) itemsCjk.toDouble() / curTotal else 0.0
@@ -2267,19 +2269,27 @@ private fun addFiles(
                             sparse = (cjkInRaw > 50000) && (realCjk.toDouble() / maxOf(framesForDensity, 1) < 50.0)
                         } catch (_: Exception) {}
                         val encodingLoss = zeroCjkLoss || garbled || sparse
-                        val needsRecovery = ((density > 3000.0 && curTotal > framesForDensity * 1000)) || encodingLoss
+                        // v1.5.26: 当 dxfMojibake 时强制恢复（DXF 已知不可信，必须尝试字节扫描）
+                        val needsRecovery = ((density > 3000.0 && curTotal > framesForDensity * 1000)) || encodingLoss || dxfMojibake
+                        var recoverySucceeded = false  // v1.5.26: 追踪恢复是否成功
                         if (needsRecovery) {
                             val recovered = DwgRawCjkScanner.scanRawDwg(f.absolutePath)
                             Log.d("WordCount", "DWG CJK recovery $dName: method=${recovered.method} cjk=${recovered.cjkTotal} div=${"%.3f".format(recovered.cjkDiversity)} cr=${"%.3f".format(recovered.commonRatio)}")
                             // v1.5.21 安全门：防止字节扫描器覆盖已合理的 DXF 结果（桌面:3552 逻辑）
-                            val mayReplace = DwgRawCjkScanner.shouldReplaceDxfResult(finalStats.fourth, itemsCjk, recovered)
+                            // v1.5.26: 当 dxfMojibake 时放松安全门（DXF 已确认不可信，恢复结果更可信）
+                            val mayReplace = dxfMojibake ||
+                                    DwgRawCjkScanner.shouldReplaceDxfResult(finalStats.fourth, itemsCjk, recovered)
                             if (mayReplace && recovered.text.isNotEmpty()) {
                                 val recStats = countTextKotlin(recovered.text)
-                                // 二次 sanity：不允许膨胀超过 3.5x
-                                val limit = (finalStats.fourth * DwgRawCjkScanner.MAX_REPLACE_RATIO).toInt().coerceAtLeast(100)
+                                // v1.5.26: 当 dxfMojibake 时放宽膨胀限制（从 3.5x → 8x），因为 DXF 基线本身不可信
+                                val effectiveMaxRatio = if (dxfMojibake) 8.0 else DwgRawCjkScanner.MAX_REPLACE_RATIO
+                                val limit = (finalStats.fourth * effectiveMaxRatio).toInt().coerceAtLeast(100)
                                 if (recStats.fourth <= limit) {
                                     finalStats = recStats
                                     dxfPagesReason = "${recovered.method}字节扫描恢复"
+                                    recoverySucceeded = true
+                                    // v1.5.26: 恢复成功后更新 curTotal 用于后续 invalid 判定
+                                    curTotal = finalStats.second + finalStats.third
                                     Log.d("WordCount", "DWG CJK recovery APPLIED $dName: now=${recStats.fourth} fe=${recStats.second}")
                                 } else {
                                     Log.w("WordCount", "DWG CJK recovery REJECTED (oversize) $dName")
@@ -2290,13 +2300,17 @@ private fun addFiles(
                         }
 
                         // ── 回退：raw+dxf+recovery 都疑似无效时，转 PDF 再从 PDF 文本层提取 ──
+                        // v1.5.26 重要修复：
+                        //   旧逻辑：dxfMojibake 直接导致 invalid=true → PDF 兜底 → 覆盖可能已修复的结果
+                        //   新逻辑：dxfMojibake 不再直接触发 PDF；仅当恢复后结果仍差（少中文/极端偏斜）时才 PDF
                         val charsNow = finalStats.fourth
                         val feRatioNow = if (charsNow > 0) finalStats.second.toDouble() / charsNow else 0.0
                         val cjkNow = finalStats.second
-                        // v1.5.21: 零 CJK + 有文本 → 也触发 PDF 回退
-                        val invalid = charsNow < 50 || (charsNow > 5000 && feRatioNow < 0.15) ||
-                                      (charsNow >= 500 && cjkNow <= 10 && cjkNow.toDouble() / maxOf(charsNow, 1) < 0.01) ||
-                                      dxfMojibake
+                        // v1.5.26: 移除 dxfMojibake 条件——mojibake 只说明 DXF 差，不代表恢复后结果差
+                        //   新增 recoverySucceeded 保护：CJK 字节扫描已成功修复时不轻易丢弃
+                        val invalid = charsNow < 50 ||
+                                      (charsNow > 5000 && feRatioNow < 0.15 && !recoverySucceeded) ||
+                                      (charsNow >= 500 && cjkNow <= 10 && cjkNow.toDouble() / maxOf(charsNow, 1) < 0.01 && !recoverySucceeded)
                         if (invalid) {
                             // v1.5.13: 隔离进程运行 dwg2pdf（native 崩溃只杀隔离进程，不闪退主 app）
                             val pdfPath = "${f.parent}/${f.nameWithoutExtension}.pdf"
