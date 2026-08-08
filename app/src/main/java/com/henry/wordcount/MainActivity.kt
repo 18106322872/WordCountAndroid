@@ -2306,13 +2306,18 @@ private fun addFiles(
                         //   再走 PDF 文字层提取。这样给排水_t3 这类「矢量文字被抽空/栅格化」文件
                         //   能拿到 PDF 里的真实字数，而不是停留在 5140/0。
                         //   同时保留 v1.5.28 的保险：CJK 恢复成功后完全跳过 PDF 兜底，避免覆盖好结果。
-                        val framesVal4 = dxfPages ?: 1
+                        //   v1.5.32: 补齐桌面 `isinstance(frames, int) and frames >= 1` 守卫——
+                        //   页数未知时（dxfPages == null）桌面根本不进这个兜底块，
+                        //   旧代码用 `dxfPages ?: 1` 把 null 当 1 页，会把「页数都数不出来」
+                        //   的文件也一律拖去渲染 PDF。
+                        val framesKnown = (dxfPages != null) && (dxfPages!! >= 1)
+                        val framesVal4 = if (framesKnown) dxfPages!! else 1
                         val finalWords4 = finalStats.second + finalStats.third
                         val charsNow = finalStats.fourth
                         val feRatioNow = if (charsNow > 0) finalStats.second.toDouble() / charsNow else 0.0
                         val cjkNow = finalStats.second
-                        val rasterizedTrigger = !recoverySucceeded
-                                && (framesVal4 >= 1)
+                        val rasterizedTrigger = framesKnown
+                                && !recoverySucceeded
                                 && (finalWords4 < framesVal4 * 1000)
                         // 保留"几乎无内容"兜底 + 桌面式栅格化/稀疏触发
                         val invalid = (charsNow < 50) || rasterizedTrigger
@@ -2343,7 +2348,7 @@ private fun addFiles(
                             }
                         }
                         // ── v1.5.31: 栅格化检测仍然记录日志（PDF 兜底已按桌面条件触发）──
-                        val rasterized4 = (framesVal4 >= 1) && (finalWords4 < framesVal4 * 1000)
+                        val rasterized4 = framesKnown && (finalWords4 < framesVal4 * 1000)
                         if (rasterized4) {
                             Log.d("WordCount", "DWG rasterized $dName: words=$finalWords4 frames=$framesVal4 recovery=$recoverySucceeded")
                         }
