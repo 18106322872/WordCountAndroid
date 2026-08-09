@@ -11,6 +11,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,6 +28,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -48,6 +50,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -193,6 +196,8 @@ data class FileEntry(
     val result: FileResult? = null,
     val error: String? = null,
     val rawResult: Map<*, *>? = null,
+    // v1.5.56: 用户手动重命名的文件名（优先于自动 displayName 显示）
+    val userRenamedName: String? = null,
 )
 
 /** 从 URI 推断文件扩展名（优先 filename，其次 MIME type） */
@@ -280,6 +285,9 @@ fun WordCountApp(initialUris: List<Uri>) {
     var busy by remember { mutableStateOf(false) }
     // v1.5.36: 用户为「统计不准」的 DWG 点选文字型 PDF 时，记录当前正在选 PDF 的条目 id
     var pdfPickEntryId by remember { mutableStateOf<String?>(null) }
+    // v1.5.56: 用户手动重命名文件条目
+    var renameEntry by remember { mutableStateOf<FileEntry?>(null) }
+    var renameText by remember { mutableStateOf("") }
     // v1.1.1: 文档比较模式开关
     var compareMode by remember { mutableStateOf(false) }
 
@@ -518,6 +526,11 @@ fun WordCountApp(initialUris: List<Uri>) {
                                 pdfPickEntryId = e.id
                                 pdfPicker.launch(arrayOf("application/pdf"))
                             },
+                            // v1.5.56: 长按文件名或点编辑图标 → 手动重命名（解决微信分享拿不到原文件名的问题）
+                            onRename = { e ->
+                                renameEntry = e
+                                renameText = e.userRenamedName ?: e.displayName
+                            },
                             hiddenSelected = hiddenSelected,
                             onToggleHidden = { id, name ->
                                 val k = "$id::$name"
@@ -558,6 +571,8 @@ fun FileCard(
     onOpenWps: (FileEntry) -> Unit,
     // v1.5.36: DWG 统计不准时，点击红色提示 → 弹窗选文字型 PDF 重新统计
     onPickPdf: (FileEntry) -> Unit,
+    // v1.5.56: 长按文件名或点编辑图标可手动重命名
+    onRename: (FileEntry) -> Unit,
     hiddenSelected: Map<String, Boolean>,
     onToggleHidden: (String, String) -> Unit
 ) {
@@ -578,14 +593,22 @@ fun FileCard(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(checked = entry.selected, onCheckedChange = { onToggle(entry) })
                 // v1.3.36: 文件名行只显示纯文件名，不显示"备"/"图"/"隐"等前缀
+                // v1.5.56: 优先显示用户重命名，长按或点编辑图标可改名
                 Text(
-                    entry.displayName,
+                    entry.userRenamedName ?: entry.displayName,
                     fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier
                         .weight(1f)
-                        .clickable { onOpen(entry) }
+                        .combinedClickable(
+                            onClick = { onOpen(entry) },
+                            onLongClick = { onRename(entry) }
+                        )
                 )
+                // 编辑文件名按钮
+                IconButton(onClick = { onRename(entry) }, modifier = Modifier.size(28.dp)) {
+                    Icon(imageVector = Icons.Default.Edit, contentDescription = "重命名", tint = Color.Gray)
+                }
                 // 删除按钮
                 IconButton(onClick = { onDelete(entry) }, modifier = Modifier.size(32.dp)) {
                     Icon(imageVector = Icons.Default.Close, contentDescription = "删除", tint = Color.Gray)
@@ -1257,6 +1280,28 @@ private fun resolveDisplayName(context: android.content.Context, uri: Uri): Stri
             t.count { it.isLetterOrDigit() } > t.length * 0.9) return true
         return false
     }
+
+    // 策略0（v1.5.56）: 部分 ROM / 微信分享 ContentProvider 在 _data 列暴露真实文件路径，
+    //   从路径里取到的文件名通常比 DISPLAY_NAME 可靠。
+    try {
+        context.contentResolver.query(
+            uri,
+            arrayOf("_data"),
+            null, null, null
+        )?.use { cursor ->
+            if (cursor.moveToFirst() && cursor.columnCount > 0) {
+                val path = cursor.getString(0)
+                if (!path.isNullOrBlank()) {
+                    val name = path.trim().substringAfterLast('/').substringAfterLast('\\')
+                    if (name.isNotBlank() && name.contains('.') && !looksLikeHash(name)) {
+                        Log.d("WordCount", "resolveDisplayName s0(_data path OK): '$name'")
+                        return name.trim()
+                    }
+                    Log.d("WordCount", "resolveDisplayName s0 _data 被hash拦截/无扩展名: '$name'")
+                }
+            }
+        }
+    } catch (_: Throwable) {}
 
     // 策略1（最可靠）: ContentResolver 查询 OpenableColumns.DISPLAY_NAME
     try {
@@ -3140,6 +3185,37 @@ fun CompareScreen(
                 }
             },
             confirmButton = { TextButton(onClick = { showListPicker = 0 }) { Text("取消") } }
+        )
+    }
+
+    // v1.5.56: 手动重命名文件对话框（微信分享等场景系统不暴露原文件名时兜底）
+    renameEntry?.let { entry ->
+        AlertDialog(
+            onDismissRequest = { renameEntry = null },
+            title = { Text("重命名") },
+            text = {
+                TextField(
+                    value = renameText,
+                    onValueChange = { renameText = it },
+                    label = { Text("新文件名") },
+                    singleLine = true
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val newName = renameText.trim()
+                    if (newName.isNotBlank()) {
+                        val i = entries.indexOfFirst { it.id == entry.id }
+                        if (i >= 0) {
+                            entries[i] = entry.copy(userRenamedName = newName)
+                        }
+                    }
+                    renameEntry = null
+                }) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameEntry = null }) { Text("取消") }
+            }
         )
     }
 }
