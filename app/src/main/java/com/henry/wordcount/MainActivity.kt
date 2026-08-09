@@ -1473,21 +1473,18 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFi
     val originalName = resolveDisplayName(context, uri)
     Log.d("WordCount", "copyUriToCache originalName='$originalName'")
 
-    // v1.1.38 放宽检测：确保各种无意义文件名都走内部标题提取。
-    // 检测范围：
+    // v1.5.53 修正：basename <= 8 会误伤正常短文件名（如 Tenova.dwg、图.dwg），
+    //   把它们全换成 "文档_<hash>.dwg" 导致用户无法识别。改为只拦截真正无意义的：
     //   A. hash/UUID/内部ID（looksLikeHashString / isSuspiciousFilename）
-    //   B. 编号模式："1-1"、"1-(1)"、"图1"、"Sheet1"、"1-1)." 等
-    //   C. 通用名前缀（"Word文档"/"PDF文档" 等）
-    //   D. 短名字（basename <= 8 字符，v1.1.38: 5→8，捕获更多编号模式）
+    //   B. 编号模式："1-1"、"1-(1)"、"图1"、"Sheet1"、纯数字、"No.1" 等
+    //   C. 通用名前缀（"Word文档"/"PDF文档" 等，含安全网自身生成的前缀）
+    //   D. 明确 "数字-数字)" 等带括号的短编号
     val baseName = originalName.substringBeforeLast('.').ifBlank { originalName }
-    val isShortOrGeneric = baseName.length <= 8  // v1.1.38: 5→8，更宽松捕获编号模式
-            || looksLikeHashString(originalName)
+    val isShortOrGeneric = looksLikeHashString(originalName)
             || isSuspiciousFilename(originalName)
             || isNumberedOrGenericName(originalName)
-            // v1.1.38 新增：明确捕获 "数字-数字)" 等带括号的短编号
+            // 明确捕获 "数字-数字)" 等带括号的短编号
             || Regex("""^\d+[)-]\d+\)?$""").matches(baseName)
-            // v1.1.38 新增：纯 ASCII 短名且无元音（像编号/代码）
-            || (baseName.length <= 10 && baseName.all { it.code in 0..127 } && !baseName.any { it.lowercaseChar() in 'a'..'z' && it.lowercaseChar() in setOf('a','e','i','o','u') })
 
     val displayName = if (isShortOrGeneric) {
         val ext = guessExt(context, uri)
