@@ -663,13 +663,6 @@ fun FileCard(
                             modifier = Modifier
                                 .padding(top = 4.dp)
                                 .clickable { onPickPdf(entry) })
-                        // v1.5.40: 调试诊断（临时）——把 DXF 编码探测结果打在卡片上，便于定位真机仍 0 中文的原因
-                        entry.result?.diag?.let { d ->
-                            Text(d,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color.Gray,
-                                modifier = Modifier.padding(top = 2.dp))
-                        }
                     }
                 }
             }
@@ -2337,7 +2330,11 @@ private fun addFiles(
                                 // v1.5.51: raw 扫描会包含二进制里的 ASCII 垃圾，字符数虽多但质量差；
                                 //   当 DXF 抽到足量且常用字占比正常的中文时，应优先采用 DXF，
                                 //   避免高质量 DXF 被 raw 字数门错误地挡掉（给排水_t3 实测）。
-                                val dxfQualityGood = (dxfCjkCount >= 500) && (dxfCommonRatio >= 0.20) && (dxfCommonRatio < 0.98)
+                                // v1.5.52: 降低高质量 DXF 判定阈值。v1.5.51 的 >=500 中文把
+                                //   Tenova 这类单页小图（真机约 239 CJK）误挡在 PDF 提示里；
+                                //   桌面版 Tenova 本就直接出数。改为 >=50 中文且常用字占比 >=30%
+                                //   即视为可信任的 DXF 文本，直接采用。
+                                val dxfQualityGood = (dxfCjkCount >= 50) && (dxfCommonRatio >= 0.30) && (dxfCommonRatio < 0.98)
                                 if (printedScope || (!dxfMojibake && (dxfStats.fourth >= rawChars || dxfQualityGood))) {
                                     finalStats = dxfStats
                                 }
