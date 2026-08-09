@@ -10,6 +10,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -547,6 +548,37 @@ fun WordCountApp(initialUris: List<Uri>) {
             }
         }
     }
+
+    // v1.5.56: 手动重命名文件对话框（微信分享等场景系统不暴露原文件名时兜底）
+    renameEntry?.let { entry ->
+        AlertDialog(
+            onDismissRequest = { renameEntry = null },
+            title = { Text("重命名") },
+            text = {
+                TextField(
+                    value = renameText,
+                    onValueChange = { renameText = it },
+                    label = { Text("新文件名") },
+                    singleLine = true
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val newName = renameText.trim()
+                    if (newName.isNotBlank()) {
+                        val i = entries.indexOfFirst { it.id == entry.id }
+                        if (i >= 0) {
+                            entries[i] = entry.copy(userRenamedName = newName)
+                        }
+                    }
+                    renameEntry = null
+                }) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameEntry = null }) { Text("取消") }
+            }
+        )
+    }
 }
 
 @Composable
@@ -561,6 +593,7 @@ private fun TabToggle(label: String, selected: Boolean, onClick: () -> Unit) {
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun FileCard(
     entry: FileEntry,
@@ -3188,36 +3221,6 @@ fun CompareScreen(
         )
     }
 
-    // v1.5.56: 手动重命名文件对话框（微信分享等场景系统不暴露原文件名时兜底）
-    renameEntry?.let { entry ->
-        AlertDialog(
-            onDismissRequest = { renameEntry = null },
-            title = { Text("重命名") },
-            text = {
-                TextField(
-                    value = renameText,
-                    onValueChange = { renameText = it },
-                    label = { Text("新文件名") },
-                    singleLine = true
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    val newName = renameText.trim()
-                    if (newName.isNotBlank()) {
-                        val i = entries.indexOfFirst { it.id == entry.id }
-                        if (i >= 0) {
-                            entries[i] = entry.copy(userRenamedName = newName)
-                        }
-                    }
-                    renameEntry = null
-                }) { Text("确定") }
-            },
-            dismissButton = {
-                TextButton(onClick = { renameEntry = null }) { Text("取消") }
-            }
-        )
-    }
 }
 
 @Composable
