@@ -2334,7 +2334,11 @@ private fun addFiles(
                                 // 仅当 DXF 非 mojibake 且字数更丰富时才采用 DXF 结果
                                 // v1.5.33: 出图口径是「主动裁剪」，字符数必然少于 raw 扫描，
                                 //   不能被 `>= rawChars` 这道门挡掉（桌面版同样是直接替换 items）。
-                                if (printedScope || (!dxfMojibake && dxfStats.fourth >= rawChars)) {
+                                // v1.5.51: raw 扫描会包含二进制里的 ASCII 垃圾，字符数虽多但质量差；
+                                //   当 DXF 抽到足量且常用字占比正常的中文时，应优先采用 DXF，
+                                //   避免高质量 DXF 被 raw 字数门错误地挡掉（给排水_t3 实测）。
+                                val dxfQualityGood = (dxfCjkCount >= 500) && (dxfCommonRatio >= 0.20) && (dxfCommonRatio < 0.98)
+                                if (printedScope || (!dxfMojibake && (dxfStats.fourth >= rawChars || dxfQualityGood))) {
                                     finalStats = dxfStats
                                 }
                                 Log.d("WordCount", "DWG dxf $dName: enc=${analysis.decodeMode} raw=$rawChars dxf=${dxfStats.fourth} cjk=$dxfCjkCount cr=${"%.3f".format(dxfCommonRatio)} den=${"%.0f".format(dxfDensity)} moji=$dxfMojibake pages=$dxfPages($dxfPagesReason)")
