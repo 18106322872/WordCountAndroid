@@ -2376,7 +2376,11 @@ private fun addFiles(
                                 val recStats = countTextKotlin(recovered.text)
                                 // v1.5.26: 当 dxfMojibake 时放宽膨胀限制（从 3.5x → 8x），因为 DXF 基线本身不可信
                                 val effectiveMaxRatio = if (dxfMojibake) 8.0 else DwgRawCjkScanner.MAX_REPLACE_RATIO
-                                val limit = (finalStats.fourth * effectiveMaxRatio).toInt().coerceAtLeast(100)
+                                // v1.5.39: 当 DXF 抽到的字符数极少（<=50，基本是空结果）时，膨胀检查
+                                //   不应以 0 为基数（会让任何恢复都被拒）。改用恢复结果自身为基数，
+                                //   此时是否采用完全由 recovered 质量门（mayReplace/shouldReplaceDxfResult）决定。
+                                val base = if (finalStats.fourth <= 50) recStats.fourth else finalStats.fourth
+                                val limit = (base * effectiveMaxRatio).toInt().coerceAtLeast(100)
                                 if (recStats.fourth <= limit) {
                                     finalStats = recStats
                                     dxfPagesReason = "${recovered.method}字节扫描恢复"

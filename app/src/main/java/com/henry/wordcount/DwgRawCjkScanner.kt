@@ -324,8 +324,10 @@ object DwgRawCjkScanner {
         val dxfCjkRatio = if (dxfTotalChars > 0) dxfCjkCount.toDouble() / dxfTotalChars else 0.0
         // DXF 已有足够好的中文 → 保护它不被覆盖
         if (dxfCjkCount >= 500 || dxfCjkRatio >= 0.15) return false
-        // Recovery 结果膨胀过度 → 拒绝
-        if (recovered.cjkTotal > 0 && dxfTotalChars > 0 &&
+        // v1.5.39: DXF 抽到的中文为 0（基数=0）时，跳过「膨胀过度」比较——
+        //   旧逻辑 recovered.cjkTotal > 0 * 3.5 恒为真，会把任何恢复都误判为
+        //   膨胀过度而拒绝；此时没有 DXF 结果可保护，只要恢复本身质量可信即可。
+        if (dxfTotalChars > 0 && recovered.cjkTotal > 0 &&
             recovered.cjkTotal.toDouble() > dxfTotalChars * MAX_REPLACE_RATIO) return false
         // Recovery diversity 太高（像随机噪声）→ 拒绝
         if (recovered.cjkDiversity >= 0.7) return false

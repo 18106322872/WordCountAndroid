@@ -163,18 +163,37 @@ object DwgDxfParser {
         return EncodingDecision(if (gbCjk > u8Cjk * 2) "GB18030" else "UTF-8", u8Cjk, gbCjk)
     }
 
+    /**
+     * v1.5.39 逐值双解码（按「常用汉字更多 + 常用占比更高」择优）。
+     * 不再依赖整文件全局编码判定：DXF 里 UTF-8 与 GB18030 文本可能混排，且真机
+     * ARM 输出的编码分布与本地不同，全局判定容易把整篇误判，导致中文全丢
+     * （给排水_t3 / Tenova 在 v1.5.38 因此显示「点选PDF统计」且字数为 0）。
+     * 改为每个文本值独立试 UTF-8 / GB18030，取「常用汉字数更多、且常用字占比更高」
+     * 的一方；都为 0 时取无替换符的一方。decodeDxfEscapes(\U+XXXX/\M+XXXX) 由
+     * grabText 在 decodeValue 之后统一处理，转义与编码无关，优先级最高。
+     */
     private fun decodeValue(s: String, enc: String): String {
         if (s.isEmpty()) return s
         val b = try { s.toByteArray(Charsets.ISO_8859_1) } catch (_: Exception) { return s }
-        val primary = try {
-            String(b, if (enc == "GB18030") charset("GB18030") else StandardCharsets.UTF_8)
-        } catch (_: Exception) { null }
-        val fallback = try {
-            String(b, if (enc == "GB18030") StandardCharsets.UTF_8 else charset("GB18030"))
-        } catch (_: Exception) { null }
-        if (primary != null && "\uFFFD" !in primary) return primary
-        if (fallback != null && "\uFFFD" !in fallback) return fallback
-        return primary ?: fallback ?: s
+        val u8 = try { String(b, StandardCharsets.UTF_8) } catch (_: Exception) { null }
+        val gb = try { String(b, charset("GB18030")) } catch (_: Exception) { null }
+        fun score(t: String?): Pair<Int, Double> {
+            if (t == null) return 0 to 0.0
+            val cjk = cjkCountOf(t)
+            if (cjk == 0) return 0 to 0.0
+            val common = commonCountOf(t)
+            return common to (common.toDouble() / cjk)
+        }
+        val su = score(u8); val sg = score(gb)
+        val winner = when {
+            sg.first > 0 && su.first == 0 -> gb
+            su.first > 0 && sg.first == 0 -> u8
+            sg.first > 0 && su.first > 0 -> if (sg.second >= su.second) gb else u8
+            u8 != null && "\uFFFD" !in u8 -> u8
+            gb != null && "\uFFFD" !in gb -> gb
+            else -> u8 ?: gb ?: s
+        }
+        return winner ?: s
     }
 
     /** 读取 DXF 文本行（ISO-8859-1 无损读入，每个字节保留为一个 char）。 */
