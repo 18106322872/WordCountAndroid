@@ -91,6 +91,9 @@ class MainActivity : ComponentActivity() {
     /** 外部可通过此引用向已有列表追加新文件（onNewIntent 时使用） */
     companion object {
         @Volatile var pendingUris: List<Uri>? = null
+        // v1.5.55: 微信等分享传入时，Intent EXTRA_SUBJECT 常携带原文件名，
+        // 但 ContentResolver.DISPLAY_NAME 只返回内部缓存 ID。这里临时保存 hint。
+        @Volatile var pendingUriNames: MutableMap<Uri, String> = mutableMapOf()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -111,16 +114,37 @@ class MainActivity : ComponentActivity() {
 
     private fun extractUrisFromIntent(intent: Intent?): List<Uri> {
         if (intent == null) return emptyList()
+        val nameHints = mutableMapOf<Uri, String>()
+        // 微信/QQ 等分享时，原文件名可能放在这些 extras 里
+        val candidateNames = listOfNotNull(
+            intent.getStringExtra(Intent.EXTRA_SUBJECT),
+            intent.getStringExtra(Intent.EXTRA_TITLE),
+            intent.getStringExtra("android.intent.extra.SUBJECT"),
+            intent.getStringExtra("title"),
+            intent.getStringExtra("_display_name"),
+            intent.getStringExtra(Intent.EXTRA_TEXT)
+        ).map { it.trim() }.filter { it.isNotBlank() }
         return mutableListOf<Uri>().apply {
+            fun recordHint(uri: Uri) {
+                if (candidateNames.isNotEmpty()) {
+                    // 多个文件共享一个 SUBJECT 时，所有文件都用同一个 hint；
+                    // 实际微信通常一次只发一个文件，问题不大。
+                    nameHints[uri] = candidateNames.first()
+                }
+            }
             when (intent.action) {
                 Intent.ACTION_SEND -> {
-                    (intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))?.let { add(it) }
+                    (intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))?.let { recordHint(it); add(it) }
                 }
                 Intent.ACTION_SEND_MULTIPLE -> {
-                    intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.forEach { add(it) }
+                    intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.forEach { uri ->
+                        recordHint(uri); add(uri)
+                    }
                 }
                 Intent.ACTION_VIEW -> { intent.data?.let { add(it) } }
             }
+        }.also {
+            pendingUriNames = nameHints
         }
     }
 }
@@ -1136,6 +1160,56 @@ private fun looksLikeRealFilename(s: String): Boolean {
 }
 
 /**
+ * v1.5.55: 扫描 URI 的所有可见部分（path segments / query / fragment / lastPathSegment），
+ * 尝试找回被 ContentResolver 隐藏的真实文件名。微信/QQ 等应用分享文件时，
+ * DISPLAY_NAME 经常返回内部缓存 ID，但原文件名可能仍保留在 URI 的某个片段里。
+ */
+private fun scanUriForRealName(uri: Uri): String? {
+    val knownExts = setOf(
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt",
+        "png", "jpg", "jpeg", "bmp", "gif", "webp", "tif", "tiff",
+        "zip", "rar", "7z", "dwg", "dxf"
+    )
+    val rawSources = listOfNotNull(
+        uri.toString(),
+        uri.encodedPath,
+        uri.path,
+        uri.query,
+        uri.fragment,
+        uri.lastPathSegment
+    )
+    val parts = mutableListOf<String>()
+    rawSources.forEach { raw ->
+        // 有些路径会被整体 URL 编码一次甚至两次，逐级解码
+        var current = raw
+        repeat(3) {
+            val decoded = try { java.net.URLDecoder.decode(current, "UTF-8") } catch (_: Throwable) { current }
+            if (decoded == current) return@repeat
+            parts.addAll(decoded.split('/', '\\', '?', '&', '=', '#', ':', ';'))
+            current = decoded
+        }
+        // 最后也把未解码的源本身按分隔符拆开（防止解码失败时遗漏）
+        parts.addAll(raw.split('/', '\\', '?', '&', '=', '#', ':', ';'))
+    }
+
+    return parts.asSequence()
+        .map { it.trim() }
+        .filter { it.length in 5..250 }
+        .filter { cand ->
+            val dot = cand.lastIndexOf('.')
+            if (dot <= 0 || dot >= cand.length - 1) return@filter false
+            cand.substring(dot + 1).lowercase() in knownExts
+        }
+        .filterNot { looksLikeHashString(it) }
+        .sortedWith(
+            compareByDescending<String> { it.any { c -> c.code in 0x4E00..0x9FFF } }
+                .thenByDescending { it.length }
+                .thenByDescending { it.count { c -> c.isLetterOrDigit() } }
+        )
+        .firstOrNull()
+}
+
+/**
  * 获取 URI 对应的显示文件名。
  * v1.0.35 重写：所有策略结果必须通过 looksLikeHash() 检测，
  * 某些 ROM 的 ContentResolver / DocumentFile 返回内部 ID（如 9e20f478899dc29...），
@@ -1209,6 +1283,15 @@ private fun resolveDisplayName(context: android.content.Context, uri: Uri): Stri
             return name.trim()
         }
         Log.d("WordCount", "resolveDisplayName s2 被hash拦截/空: '$name'")
+    }
+
+    // 策略2.5 (v1.5.55): 扫描 URI 全部片段（path/query/fragment）。
+    // 微信/QQ 等分享时，ContentResolver 只返回内部缓存 ID，但原文件名可能还藏在 URI 里。
+    scanUriForRealName(uri)?.let { name ->
+        if (name.isNotBlank()) {
+            Log.d("WordCount", "resolveDisplayName s2.5(URI scan OK): '$name'")
+            return name.trim()
+        }
     }
 
     // 策略3: 从 URI path 提取文件名（SAF 编码路径解码）
@@ -1470,8 +1553,17 @@ private fun isNumberedOrGenericName(s: String): Boolean {
 }
 
 private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFile {
-    val originalName = resolveDisplayName(context, uri)
-    Log.d("WordCount", "copyUriToCache originalName='$originalName'")
+    // v1.5.55: 微信/QQ 等分享传入时，Intent extras(EXTRA_SUBJECT/TITLE/_display_name)
+    // 常携带原文件名，比 ContentResolver.DISPLAY_NAME 更可靠。
+    val intentNameHint = MainActivity.pendingUriNames[uri]?.trim()
+    val resolvedName = resolveDisplayName(context, uri)
+    val originalName = when {
+        intentNameHint.isNullOrBlank() -> resolvedName
+        looksLikeHashString(intentNameHint) || isSuspiciousFilename(intentNameHint)
+            || isNumberedOrGenericName(intentNameHint) -> resolvedName
+        else -> intentNameHint
+    }
+    Log.d("WordCount", "copyUriToCache originalName='$originalName' hint='${intentNameHint ?: ""}' resolved='$resolvedName'")
 
     // v1.5.53 修正：basename <= 8 会误伤正常短文件名（如 Tenova.dwg、图.dwg），
     //   把它们全换成 "文档_<hash>.dwg" 导致用户无法识别。改为只拦截真正无意义的：
@@ -1488,21 +1580,35 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFi
 
     val displayName = if (isShortOrGeneric) {
         val ext = guessExt(context, uri)
-        val typeLabel = when (ext.lowercase()) {
-            "pdf" -> "PDF文档"
-            "doc", "docx" -> "Word文档"
-            "xls", "xlsx" -> "Excel表格"
-            "ppt", "pptx" -> "PPT演示"
-            "txt" -> "文本文件"
-            "png", "jpg", "jpeg", "bmp", "gif", "webp" -> "图片"
-            else -> "文档"
-        }
         val safeExt = if (ext.isNotBlank()) ".$ext" else ""
-        // v1.1.50: 用文件路径hash生成短后缀（4位hex），确保同名文件可区分
-        val shortHash = absoluteHashCode(originalName).toString(16).takeLast(4).uppercase()
-        val result = "${typeLabel}_${shortHash}${safeExt}"
-        Log.w("WordCount", "copyUriToCache 安全网触发: '$originalName' → '$result' (baseName='$baseName' len=${baseName.length})")
-        result
+        // v1.5.55: 对内部 ID/编号等无意义名，优先直接显示清理后的原始 ID，
+        // 比 "文档_xxxx.dwg" 更简洁，也保留更多识别信息。
+        val cleanedOriginal = originalName.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
+        val directName = if (cleanedOriginal.contains('.') && cleanedOriginal.length in 5..128) cleanedOriginal else ""
+        val isSafeNetPrefix = directName.startsWith("Word文档") || directName.startsWith("PDF文档")
+            || directName.startsWith("Excel表格") || directName.startsWith("PPT演示")
+            || directName.startsWith("文本文件") || directName.startsWith("图片")
+            || directName.startsWith("文档") || directName.startsWith("压缩包")
+            || directName.startsWith("CAD图纸")
+        if (directName.isNotBlank() && !isSafeNetPrefix) {
+            Log.w("WordCount", "copyUriToCache 安全网直接显示内部ID: '$originalName' → '$directName'")
+            directName
+        } else {
+            val typeLabel = when (ext.lowercase()) {
+                "pdf" -> "PDF文档"
+                "doc", "docx" -> "Word文档"
+                "xls", "xlsx" -> "Excel表格"
+                "ppt", "pptx" -> "PPT演示"
+                "txt" -> "文本文件"
+                "png", "jpg", "jpeg", "bmp", "gif", "webp" -> "图片"
+                else -> "文档"
+            }
+            // v1.1.50: 用文件路径hash生成短后缀（4位hex），确保同名文件可区分
+            val shortHash = absoluteHashCode(originalName).toString(16).takeLast(4).uppercase()
+            val result = "${typeLabel}_${shortHash}${safeExt}"
+            Log.w("WordCount", "copyUriToCache 安全网触发: '$originalName' → '$result' (baseName='$baseName' len=${baseName.length})")
+            result
+        }
     } else {
         originalName
     }
@@ -1784,6 +1890,8 @@ private fun addFiles(
                 val pyStartResult = runCatching { PythonEngine.start(context) }
                 Log.d("WordCount", "PythonEngine.start: ${if (pyStartResult.isSuccess) "OK" else "FAIL: ${pyStartResult.exceptionOrNull()?.message}"}")
                 val cachedFiles = uris.map { copyUriToCache(context, it) }
+                // 文件名 hint 已使用，清空避免影响后续通过 SAF 选择的文件
+                MainActivity.pendingUriNames.clear()
                 val files = cachedFiles.map { it.file }
             val imageFiles = mutableListOf<CachedFile>()
             val oldOfficeFiles = mutableListOf<CachedFile>()
