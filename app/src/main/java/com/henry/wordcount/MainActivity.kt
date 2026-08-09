@@ -338,10 +338,16 @@ fun WordCountApp(initialUris: List<Uri>) {
 
     val totals = run {
         val sel = entries.filter { it.selected && it.result != null }
-        var w = 0; var fe = 0; var nc = 0; var ch = 0; var pg = 0
+        var w = 0; var fe = 0; var nc = 0; var ch = 0; var pg = 0; var pendingPdf = 0
         sel.forEach { r ->
-            w += r.result!!.words; fe += r.result!!.fe; nc += r.result!!.nc; ch += r.result!!.chars
-            pg += r.result!!.pages ?: estimatePages(r.result!!.chars)
+            // v1.5.37: 需要 PDF 来统计的 DWG 不计入字数合计，只计页数
+            if (r.result!!.needsPdf) {
+                pg += r.result!!.pages ?: estimatePages(r.result!!.chars)
+                pendingPdf += 1
+            } else {
+                w += r.result!!.words; fe += r.result!!.fe; nc += r.result!!.nc; ch += r.result!!.chars
+                pg += r.result!!.pages ?: estimatePages(r.result!!.chars)
+            }
             // 勾选的隐藏工作表计入合计（页数不另计，沿用文件级页数）
             r.result!!.hiddenSheets.forEach { hs ->
                 if (hiddenSelected["${r.id}::${hs.name}"] == true) {
@@ -355,7 +361,7 @@ fun WordCountApp(initialUris: List<Uri>) {
                 }
             }
         }
-        mapOf("words" to w, "fe" to fe, "nc" to nc, "chars" to ch, "pages" to pg)
+        mapOf("words" to w, "fe" to fe, "nc" to nc, "chars" to ch, "pages" to pg, "pendingPdf" to pendingPdf)
     }
 
     Scaffold(
@@ -399,7 +405,14 @@ fun WordCountApp(initialUris: List<Uri>) {
                             Text("合计（已选 ${entries.count { it.selected }} 项）", fontWeight = FontWeight.Bold)
                         }
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                            Text("字数 ${totals["words"]} ｜ 中文 ${totals["fe"]} ｜ 非中文 ${totals["nc"]} ｜ 页数 ${totals["pages"]}")
+                            // v1.5.37: 有 DWG 待 PDF 统计时，合计行与电脑 APP 一致：字数/中文/非中文处显示"-"，只显示页数
+                            val pending = totals["pendingPdf"] ?: 0
+                            val totalText = if (pending > 0) {
+                                "字数 - ｜ 中文 - ｜ 非中文 - ｜ 页数 ${totals["pages"]}"
+                            } else {
+                                "字数 ${totals["words"]} ｜ 中文 ${totals["fe"]} ｜ 非中文 ${totals["nc"]} ｜ 页数 ${totals["pages"]}"
+                            }
+                            Text(totalText)
                         }
                         Spacer(Modifier.padding(4.dp))
                         var isExporting by remember { mutableStateOf(false) }
@@ -563,9 +576,16 @@ fun FileCard(
                             r.pagesReason?.contains("layout") == true
                         val pageLabel = if (isEstimated) "页 ${r.pages ?: estimatePages(r.chars)}(估)"
                             else "页 ${r.pages ?: estimatePages(r.chars)}"
-                        Text(
+                        // v1.5.37: 需要 PDF 统计的 DWG 与电脑 APP 一致：字数/中文/非中文显示"-"，只保留页数
+                        val statsText = if (r.needsPdf) {
+                            "字数 - ｜ 中文 - ｜ 非中文 - ｜ $pageLabel" +
+                                    (if (r.pagesReason != null && !isEstimated) " ｜ ${r.pagesReason}" else "")
+                        } else {
                             "字数 ${r.words} ｜ 中文 ${r.fe} ｜ 非中文 ${r.nc} ｜ $pageLabel" +
-                                    (if (r.pagesReason != null && !isEstimated) " ｜ ${r.pagesReason}" else ""),
+                                    (if (r.pagesReason != null && !isEstimated) " ｜ ${r.pagesReason}" else "")
+                        }
+                        Text(
+                            statsText,
                             style = MaterialTheme.typography.bodySmall, color = Color.Gray
                         )
                         // v1.3.6: 明细折叠/展开切换（点击统计行展开）
@@ -632,12 +652,12 @@ fun FileCard(
                                 .padding(top = 4.dp)
                                 .clickable { onOpenWps(entry) })
                     }
-                    // v1.5.36: DWG 统计不准（needsPdf）时，在右下角显示可点击红色提示，
+                    // v1.5.37: DWG 统计不准（needsPdf）时，在右下角显示可点击红色提示，
                     //   点此弹窗选一份文字型 PDF 来重新统计该 DWG（取代旧版「导出 PDF」按钮——
                     //   旧版 LibreDWG 自渲染的 PDF 文字层是栅格化图像，抽不到字、没用）。
                     //   用 entry.result?.needsPdf 判断（不依赖 cachePath 后缀）。
                     if (entry.result?.needsPdf == true) {
-                        Text("统计可能不准 · 点此选文字型PDF重新统计",
+                        Text("点选PDF统计",
                             style = MaterialTheme.typography.labelSmall,
                             color = Color(0xFFB00020),
                             modifier = Modifier
@@ -2330,9 +2350,9 @@ private fun addFiles(
                         val curCjkRatio = if (curTotal > 0) itemsCjk.toDouble() / curTotal else 0.0
                         val zeroCjkLoss = (curTotal >= 500) && (itemsCjk <= 5) && (curCjkRatio < 0.01)
                         var sparse = false
+                        var cjkInRaw = 0
                         try {
                             val dwgRawBytes = File(f.absolutePath).readBytes()
-                            var cjkInRaw = 0
                             try {
                                 val decoded = String(dwgRawBytes, charset("GB18030"))
                                 for (c in decoded) { if (c.code in 0x4E00..0x9FFF) cjkInRaw++ }
@@ -2399,17 +2419,22 @@ private fun addFiles(
                                 && !recoverySucceeded
                                 && !printedScope
                                 && (finalWords4 < framesVal4 * 1000)
-                                // v1.5.36: 仅当图框数≥3 时才认为「统计不准需文字型PDF」——
-                                //   单/双页 DWG（如 Tenova 1页512字）本就字少，按桌面 words<frames*1000
-                                //   会误报，而它其实已统计正确；3页以上的图纸若字数远低于页框×1000，
-                                //   才说明文字被栅格化/抽空（如水雾电气图 32页仅8880字）。
-                                && (framesVal4 >= 3)
+                        // v1.5.38: 取消 v1.5.36 的 frames>=3 硬守卫，并新增「中文全部丢失」触发：
+                        //   真机 Tenova 1 页 2011/0/2011、给排水_t3 14 页 5140/0/5140 都是 DXF 编码
+                        //   路径把中文弄丢。只要最终中文≤5 且非中文≥100，并且原始 DWG 按 GB18030
+                        //   扫描能找到中文（cjkInRaw>=100），就说明该文件其实有中文、需要文字型
+                        //   PDF 来正确统计。去掉 frames>=3 后 Tenova 也能显示「点选PDF统计」。
+                        val cjkLostTrigger = framesKnown
+                                && !recoverySucceeded
+                                && (finalStats.second <= 5)
+                                && (finalStats.third >= 100)
+                                && (cjkInRaw >= 100)
                         // v1.5.36: 取消自动 dwg2pdf 自渲染兜底——
                         //   LibreDWG 渲染出的 PDF 文字层是栅格化图像，PdfExtractor 抽不到多少字，
                         //   对统计无益且用户反馈"取不全完全没有用"。改为：当 DWG 统计明显偏少
                         //   （栅格化/稀疏）时置 needsPdf，由 UI 提示用户在手机上选一份文字型 PDF
                         //   来重新统计（见 onPickPdf / pdfPicker），不再自动渲染无用的 PDF。
-                        val needsPdf = rasterizedTrigger || (charsNow < 50)
+                        val needsPdf = rasterizedTrigger || cjkLostTrigger || (charsNow < 50)
                         // ── v1.5.31: 栅格化检测仍然记录日志（PDF 兜底已按桌面条件触发）──
                         val rasterized4 = framesKnown && (finalWords4 < framesVal4 * 1000)
                         if (rasterized4) {

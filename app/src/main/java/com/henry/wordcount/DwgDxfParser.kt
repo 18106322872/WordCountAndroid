@@ -37,8 +37,13 @@ import kotlin.math.round
  *      新策略：每个文本值独立尝试 UTF-8 与 GB18030，按「谁产生更多真实中文
  *      （常用字占比≥30%）」选取；-water/tenova 的 GBK 文本正确还原，
  *      -巴布亚/水雾的 UTF-8 文本不受少量非法字节影响。
- *   B) 【出图口径】保留 parseAllSections()/printedTextOf()，仅在密度>3000 时
- *      采用，与桌面 ezdxf-printed 触发条件一致。
+ *
+ * v1.5.38 编码再修正：
+ *   真机 v1.5.36 反馈 Tenova 成 2011/0/2011、给排水_t3 成 5140/0/5140（中文全
+ *   丢），而本地同版本 LibreDWG 0.14 验证完全对齐桌面。说明逐值双解码在真机
+ *   ARM 输出上仍把整篇误判为 UTF-8。改为全局编码判定：先扫描整份 DXF 分别统计
+ *   UTF-8/GB18030 产生的 CJK 数，gb_cjk > u8_cjk*2 则全局用 GB18030，否则 UTF-8；
+ *   然后每个值按全局编码解码。本地四文件均已验证对齐桌面。
  *
  *   本地用同版本 LibreDWG 0.14 转出的 DXF 逐文件核对（桌面基准 / 本实现）：
  *      巴布亚桩基 23960 / 23927(-0.1%)   给排水_t3 14874 / 14570(-2.0%)
@@ -122,39 +127,52 @@ object DwgDxfParser {
     }
 
     /** 最近一次解析的编码判定摘要（仅供日志） */
-    @Volatile private var lastDecodeMode: String = "per-value-dual"
+    @Volatile private var lastDecodeMode: String = "global-dual"
 
     /**
-     * v1.5.35 逐值双解码选优。
-     * DXF 可能同时包含 UTF-8（水雾/Tenova/巴布亚大部分）与 GB18030（给排水_t3）
-     * 编码的文本值，且 LibreDWG 会把 GBK 字节与 UTF-8 字节混在同一文件里。
-     * 整文件一次性解码必然顾此失彼，故按值独立判断：
-     *   1) 把 Latin-1 字符串还原为原始字节；
-     *   2) 同时尝试 UTF-8 与 GB18030 解码；
-     *   3) 若某解码结果含 CJK 且常用字占比≥30%，认为它是真实中文，优先采用；
-     *   4) 否则回退到无替换符的 UTF-8，最后回退 GB18030。
-     * 这样 UTF-8 文件里的个别非法字节只影响所在值，不会把整篇拖成 GBK 乱码。
+     * v1.5.38 全局编码判定 + 按全局编码逐值解码。
+     * 真机反馈（v1.5.36）Tenova/给排水_t3 出现 0 中文，而本地同版本 LibreDWG 0.14
+     * 验证完全对齐桌面。v1.5.35 的逐值双解码在真机 ARM 输出上疑似把整篇误判为
+     * UTF-8，导致 GBK 中文全部变成 U+FFFD 并被过滤。
+     * 改为：先扫描整份 DXF 的文本值，分别按 UTF-8 / GB18030 统计产生的 CJK 数量，
+     * 若 gb_cjk > u8_cjk * 2 则判定全局编码为 GB18030，否则 UTF-8；之后每个值都
+     * 按该编码解码（并保留一次反向解码作为非法字节兜底）。该策略在本地四个真实
+     * 测试文件上均与桌面基准一致，且对整篇编码统一的文件更稳定。
      */
-    private fun decodeValue(s: String): String {
+    private data class EncodingDecision(val enc: String, val u8Cjk: Int, val gbCjk: Int)
+
+    private fun detectEncoding(lines: List<String>): EncodingDecision {
+        var u8Cjk = 0
+        var gbCjk = 0
+        var i = 0
+        val n = lines.size
+        while (i < n - 1) {
+            val code = lines[i].trim().toIntOrNull() ?: run { i += 2; continue }
+            if (code in listOf(1, 3, 302, 304)) {
+                val v = lines[i + 1]
+                try {
+                    val b = v.toByteArray(Charsets.ISO_8859_1)
+                    u8Cjk += cjkCountOf(String(b, StandardCharsets.UTF_8))
+                    gbCjk += cjkCountOf(String(b, charset("GB18030")))
+                } catch (_: Exception) {}
+            }
+            i += 2
+        }
+        return EncodingDecision(if (gbCjk > u8Cjk * 2) "GB18030" else "UTF-8", u8Cjk, gbCjk)
+    }
+
+    private fun decodeValue(s: String, enc: String): String {
         if (s.isEmpty()) return s
         val b = try { s.toByteArray(Charsets.ISO_8859_1) } catch (_: Exception) { return s }
-        val u = try { String(b, StandardCharsets.UTF_8) } catch (_: Exception) { null }
-        val g = try { String(b, charset("GB18030")) } catch (_: Exception) { null }
-
-        fun cjkCount(t: String): Int = t.count { it.code in 0x4E00..0x9FFF }
-        fun commonCount(t: String): Int = t.count { it.code in DwgRawCjkScanner.COMMON_CJK_CHARS }
-
-        if (u != null) {
-            val uc = cjkCount(u)
-            if (uc >= 1 && commonCount(u).toDouble() / uc >= 0.30) return u
-        }
-        if (g != null) {
-            val gc = cjkCount(g)
-            if (gc >= 1 && commonCount(g).toDouble() / gc >= 0.30) return g
-        }
-        if (u != null && "\uFFFD" !in u) return u
-        if (g != null) return g
-        return u ?: s
+        val primary = try {
+            String(b, if (enc == "GB18030") charset("GB18030") else StandardCharsets.UTF_8)
+        } catch (_: Exception) { null }
+        val fallback = try {
+            String(b, if (enc == "GB18030") StandardCharsets.UTF_8 else charset("GB18030"))
+        } catch (_: Exception) { null }
+        if (primary != null && "\uFFFD" !in primary) return primary
+        if (fallback != null && "\uFFFD" !in fallback) return fallback
+        return primary ?: fallback ?: s
     }
 
     /** 读取 DXF 文本行（ISO-8859-1 无损读入，每个字节保留为一个 char）。 */
@@ -205,23 +223,23 @@ object DwgDxfParser {
     // ───────────────────────────── 文字抽取（extract_text_custom） ─────────────────────────────
 
     /** 从单个实体里取文字（端口桌面 extract_text_from_dxf 的实体分支） */
-    private fun grabText(e: DxfEntity, out: MutableList<String>) {
+    private fun grabText(e: DxfEntity, out: MutableList<String>, enc: String) {
         when (e.type) {
             "TEXT", "ATTDEF" -> {
                 val vs = e.values(1)
                 if (vs.isNotEmpty() && vs[0].isNotBlank()) {
-                    val r = decodeDxfEscapes(decodeValue(vs[0].trim()))
+                    val r = decodeDxfEscapes(decodeValue(vs[0].trim(), enc))
                     if (r.isNotBlank()) out.add(r.trim())
                 }
             }
             "MTEXT" -> {
                 val s = (e.values(1) + e.values(3)).joinToString("")
-                val c = cleanMtext(decodeDxfEscapes(decodeValue(s)))
+                val c = cleanMtext(decodeDxfEscapes(decodeValue(s, enc)))
                 if (c.isNotBlank()) out.add(c.trim())
             }
             "MULTILEADER" -> {
                 val s = (e.values(304) + e.values(302)).joinToString("")
-                val r = decodeDxfEscapes(decodeValue(s))
+                val r = decodeDxfEscapes(decodeValue(s, enc))
                 if (r.isNotBlank()) out.add(r.trim())
             }
         }
@@ -238,9 +256,9 @@ object DwgDxfParser {
     }
 
     /** 全量口径：整个 DXF 文件里所有实体的文字（含未被引用的块定义/图库残留） */
-    private fun extractTextFromEntities(entities: List<DxfEntity>): String {
+    private fun extractTextFromEntities(entities: List<DxfEntity>, enc: String): String {
         val collected = mutableListOf<String>()
-        for (e in entities) grabText(e, collected)
+        for (e in entities) grabText(e, collected, enc)
         return joinUnique(collected)
     }
 
@@ -316,7 +334,7 @@ object DwgDxfParser {
      *
      * 巴布亚桩基实测：全量 59597 字 → 出图 23932 字，桌面基准 23960 字（偏差 -0.1%）。
      */
-    private fun printedTextOf(scopes: DxfScopes): String {
+    private fun printedTextOf(scopes: DxfScopes, enc: String): String {
         val out = mutableListOf<String>()
 
         fun expand(ins: DxfEntity, visited: MutableSet<String>) {
@@ -325,13 +343,13 @@ object DwgDxfParser {
             visited.add(nm)
             val blk = scopes.blocks[nm] ?: return
             for (be in blk) {
-                if (be.type == "INSERT") expand(be, visited) else grabText(be, out)
+                if (be.type == "INSERT") expand(be, visited) else grabText(be, out, enc)
             }
         }
 
         fun walk(ents: List<DxfEntity>) {
             for (e in ents) {
-                if (e.type == "INSERT") expand(e, HashSet()) else grabText(e, out)
+                if (e.type == "INSERT") expand(e, HashSet()) else grabText(e, out, enc)
             }
         }
 
@@ -419,10 +437,12 @@ object DwgDxfParser {
     /** 对外主入口：一次性解析出文字 + 页数 */
     fun analyze(dxfPath: String): AnalysisResult {
         val lines = readDxfLines(dxfPath) ?: return AnalysisResult("", "", null, "DXF 读取失败", "")
+        val encDecision = detectEncoding(lines)
+        lastDecodeMode = "global-${encDecision.enc}(u8=${encDecision.u8Cjk},gb=${encDecision.gbCjk})"
         val entities = parseEntities(lines)
-        val text = extractTextFromEntities(entities)
+        val text = extractTextFromEntities(entities, encDecision.enc)
         // v1.5.33：额外算一份「出图口径」文字，交由 MainActivity 在密度异常时采用
-        val printed = try { printedTextOf(parseAllSections(lines)) } catch (_: Throwable) { "" }
+        val printed = try { printedTextOf(parseAllSections(lines), encDecision.enc) } catch (_: Throwable) { "" }
 
         val sec = splitSections(lines)
         // ENTITIES 段 == 桌面 doc.modelspace()（LibreDWG 不写组码 67）
