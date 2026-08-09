@@ -2419,11 +2419,14 @@ private fun addFiles(
                                 && !recoverySucceeded
                                 && !printedScope
                                 && (finalWords4 < framesVal4 * 1000)
-                        // v1.5.38: 取消 v1.5.36 的 frames>=3 硬守卫，并新增「中文全部丢失」触发：
-                        //   真机 Tenova 1 页 2011/0/2011、给排水_t3 14 页 5140/0/5140 都是 DXF 编码
-                        //   路径把中文弄丢。只要最终中文≤5 且非中文≥100，并且原始 DWG 按 GB18030
-                        //   扫描能找到中文（cjkInRaw>=100），就说明该文件其实有中文、需要文字型
-                        //   PDF 来正确统计。去掉 frames>=3 后 Tenova 也能显示「点选PDF统计」。
+                                // v1.5.38: 仅多页图纸（>=3 页）才按字数/页框比判断栅格化。
+                                //   单/双页 DWG（如 Tenova 1页512字）本就字数少，按 words<frames*1000
+                                //   会误报；全局编码修复后 Tenova 应能直接出 512/295，不应提示转 PDF。
+                                && (framesVal4 >= 3)
+                        // v1.5.38: 中文全部丢失的保险触发——只要最终中文≤5 且非中文≥100，并且
+                        //   原始 DWG 按 GB18030 扫描能找到中文（cjkInRaw>=100），就说明该文件
+                        //   其实有中文、是 DXF 编码路径把中文弄丢了，需要文字型 PDF 重新统计。
+                        //   全局编码修复生效后给排水_t3 会直接出 14879/13698（中文不丢），不会触发。
                         val cjkLostTrigger = framesKnown
                                 && !recoverySucceeded
                                 && (finalStats.second <= 5)

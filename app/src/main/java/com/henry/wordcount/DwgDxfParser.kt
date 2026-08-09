@@ -147,8 +147,10 @@ object DwgDxfParser {
         var i = 0
         val n = lines.size
         while (i < n - 1) {
-            val code = lines[i].trim().toIntOrNull() ?: run { i += 2; continue }
-            if (code in listOf(1, 3, 302, 304)) {
+            val code = lines[i].trim().toIntOrNull()
+            // v1.5.38: 不能用 run{ continue }——Kotlin 内联 lambda 里的 break/continue 是实验特性
+            //   会直接编译失败（"break continue in inline lambdas"）。改为显式 if 判断。
+            if (code != null && code in listOf(1, 3, 302, 304)) {
                 val v = lines[i + 1]
                 try {
                     val b = v.toByteArray(Charsets.ISO_8859_1)
