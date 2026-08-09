@@ -1027,7 +1027,7 @@ private suspend fun recomputeFromPdf(context: android.content.Context, pdfFile: 
             val ktStats = countTextKotlin(ktRes.text)
             var bestWords = ktStats.first; var bestFe = ktStats.second; var bestNc = ktStats.third; var bestChars = ktStats.fourth
             var bestPages: Int? = ktRes.pages
-            var bestDiag = "Kotlin提取($bestChars字)"
+            var bestDiag = "Kotlin提取(${bestChars}字)"
             Log.d("WordCount", "recomputeFromPdf L1 $dName: chars=$bestChars words=$bestWords pages=$bestPages")
             // ── Level 2: Python pdfminer（文字型 PDF 主力）──
             try {
@@ -1047,7 +1047,7 @@ private suspend fun recomputeFromPdf(context: android.content.Context, pdfFile: 
                         if (pyChars > bestChars) {
                             bestWords = pyWords; bestFe = pyFe; bestNc = pyNc; bestChars = pyChars
                             bestPages = pyPages ?: bestPages
-                            bestDiag = "Python提取($bestChars字)"
+                            bestDiag = "Python提取(${bestChars}字)"
                         }
                         Log.d("WordCount", "recomputeFromPdf L2 $dName: chars=$pyChars pages=$pyPages")
                     } else {
