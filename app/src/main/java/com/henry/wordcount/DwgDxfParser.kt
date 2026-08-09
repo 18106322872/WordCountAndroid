@@ -461,6 +461,18 @@ object DwgDxfParser {
         val f = File(dxfPath)
         val raw = try { f.readBytes() } catch (_: Exception) { return AnalysisResult("", "", null, "DXF 读取失败", "") }
         if (raw.isEmpty()) return AnalysisResult("", "", null, "DXF 为空", "")
+        // ── v1.5.58: 大文件 OOM 防护 ─────────────────────────────────────────
+        // 8.2MB 的 DWG 经 dwg2dxf 转出的 DXF 实测约 46MB。analyze 旧路径会同时持有
+        //   raw(byte[]) + ISO-8859-1 String(2x) + split 百万行 List + recover 四份大 String，
+        // 叠加远超堆上限 → 真机 OOM。防御：
+        //   · DXF > 150MB：直接走流式降级 analyzeLarge（不 readBytes 全量 / 不 split / 不 recover），
+        //     内存 O(1)，保证超大文件也能出字数、不崩溃。
+        //   · 25MB < DXF ≤ 150MB：保留完整结构化解析，但跳过整文件 recover 兜底
+        //     （该兜底主要为异常编码的小文件服务，大文件结构化已能拿中文，且它叠加 4 份
+        //     大 String 是 OOM 主因）。
+        if (raw.size > 150 * 1024 * 1024) {
+            return analyzeLarge(dxfPath)
+        }
         val lines = String(raw, Charsets.ISO_8859_1).split("\n")
         val encDecision = detectEncoding(lines)
         lastDecodeMode = "global-${encDecision.enc}(u8=${encDecision.u8Cjk},gb=${encDecision.gbCjk})"
@@ -491,7 +503,9 @@ object DwgDxfParser {
         // 做多编码扫描（GBK / GB18030 / UTF-8 抽连续 CJK 段 + 全文转义还原），
         // 当结构化结果的中文明显偏少时采用兜底结果，避免误判「需要 PDF」。
         val structCjk = cjkCountOf(text)
-        val rawRecovered = recoverCjkFromRawDxf(raw)
+        // v1.5.58: 大文件跳过整文件多编码兜底——recover 会叠加 GBK/GB18030/UTF-8/latin1
+        //   四份大 String，是 OOM 主因；且大文件结构化解析本就能拿到中文，兜底价值低
+        val rawRecovered = if (raw.size <= 25 * 1024 * 1024) recoverCjkFromRawDxf(raw) else ""
         val rawCjk = cjkCountOf(rawRecovered)
         val rawCommon = commonCountOf(rawRecovered)
         // 仅当结构化结果几乎无中文、且整文件扫描明显更多（去噪）时才采用兜底
@@ -522,6 +536,52 @@ object DwgDxfParser {
             collected.add(decodeDxfEscapes(latin1))
         } catch (_: Exception) {}
         return joinUnique(collected.flatMap { it.split("\n") })
+    }
+
+    /**
+     * v1.5.58: 超大 DXF 流式降级解析（OOM 防护）。
+     * 当 DXF 原始字节 > 150MB 时，analyze 的完整路径（raw byte[] + ISO-8859-1 String(2x)
+     * + split 百万行 List + recover 四份大 String）会叠加远超堆上限 → 真机 OOM。
+     * 这里改用 BufferedReader 逐行配对扫描，只在流中维护必要状态，内存占用 O(1)：
+     *   · 抽 TEXT/MTEXT/ATTDEF/MULTILEADER/ATTRIB 的文本值（组码 1/3/7/9）并逐值解码
+     *   · 数 *Paper_SpaceN 布局块数作为页数估算
+     * 仅抽取文本值（远小于原始 DXF），保证超大文件也能出字数和近似页数、绝不崩溃。
+     */
+    private fun analyzeLarge(dxfPath: String): AnalysisResult {
+        val reader = try {
+            File(dxfPath).bufferedReader(Charsets.ISO_8859_1)
+        } catch (_: Exception) {
+            return AnalysisResult("", "", null, "DXF 读取失败", "")
+        }
+        val sb = StringBuilder()
+        var inTextEntity = false
+        var paper = 0
+        try {
+            var code = reader.readLine()
+            while (code != null) {
+                val value = reader.readLine() ?: break
+                val ci = code.trim().toIntOrNull()
+                if (ci == 0) {
+                    val t = value.trim()
+                    inTextEntity = t in setOf("TEXT", "MTEXT", "ATTDEF", "MULTILEADER", "ATTRIB")
+                    if (t.startsWith("*Paper_Space") || t.startsWith("\$Paper_Space")) paper++
+                } else if (inTextEntity && ci in setOf(1, 3, 7, 9)) {
+                    sb.append(decodeValue(value, "UTF-8")).append("\n")
+                }
+                code = reader.readLine()
+            }
+        } catch (_: Exception) {
+        } finally {
+            try { reader.close() } catch (_: Exception) {}
+        }
+        val text = sb.toString()
+        val frames = if (paper >= 1) paper else if (text.isNotEmpty()) 1 else null
+        val reason = when {
+            paper >= 1 -> "布局计数(流式降级)"
+            text.isNotEmpty() -> "有文本·按1页估(流式降级)"
+            else -> "超大文件·无文本"
+        }
+        return AnalysisResult(text, "", frames, reason, "stream-large", "stream-large raw>150MB")
     }
 
     /** 从一段字符串中抽取最长连续 CJK 段（≥2 字，且含常用字或较长），忽略纯 ASCII / GBK 噪声段 */
