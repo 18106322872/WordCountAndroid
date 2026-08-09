@@ -657,12 +657,19 @@ fun FileCard(
                     //   旧版 LibreDWG 自渲染的 PDF 文字层是栅格化图像，抽不到字、没用）。
                     //   用 entry.result?.needsPdf 判断（不依赖 cachePath 后缀）。
                     if (entry.result?.needsPdf == true) {
-                        Text("点选PDF统计",
+                        Text("选PDF统计",
                             style = MaterialTheme.typography.labelSmall,
                             color = Color(0xFFB00020),
                             modifier = Modifier
                                 .padding(top = 4.dp)
                                 .clickable { onPickPdf(entry) })
+                        // v1.5.40: 调试诊断（临时）——把 DXF 编码探测结果打在卡片上，便于定位真机仍 0 中文的原因
+                        entry.result?.diag?.let { d ->
+                            Text(d,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.Gray,
+                                modifier = Modifier.padding(top = 2.dp))
+                        }
                     }
                 }
             }
@@ -2257,6 +2264,8 @@ private fun addFiles(
                         var dxfPagesReason: String? = null
                         var dxfMojibake = false
                         var dxfText = ""
+                        // v1.5.40: 捕获 DXF 编码诊断，供结果透传
+                        var dxfDiag = ""
                         // v1.5.33: 是否已按「出图口径」统计（对齐桌面 meta["printed_scope"]）
                         var printedScope = false
                         val dxfPath = "${f.parent}/${f.nameWithoutExtension}.dxf"
@@ -2266,6 +2275,7 @@ private fun addFiles(
                             if (dxfFile.exists() && dxfFile.length() > 0) {
                                 val analysis = DwgDxfParser.analyze(dxfPath)
                                 dxfText = analysis.text
+                                dxfDiag = analysis.diag
                                 var dxfStats = countTextKotlin(dxfText)
                                 dxfPages = analysis.frames
                                 dxfPagesReason = analysis.framesReason
@@ -2453,7 +2463,9 @@ private fun addFiles(
                             "name" to dName, "ext" to ".dwg",
                             "stats" to mapOf("words" to finalStats.first, "fe" to finalStats.second, "nc" to finalStats.third, "chars" to finalStats.fourth),
                             "meta" to mapOf<String, Any?>("pages_reason" to (dxfPagesReason ?: ""), "needs_pdf" to needsPdf),
-                            "pages" to pages
+                            "pages" to pages,
+                            // v1.5.40: 把 DXF 编码诊断透传出去，便于定位真机仍 0 中文的原因
+                            "diag" to dxfDiag
                         )
                         val fr = toFileResult(resMap, f.absolutePath)
                         entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))

@@ -81,7 +81,9 @@ object DwgDxfParser {
         val frames: Int?,
         val framesReason: String?,
         /** 整文件编码判定结果，仅供日志 */
-        val decodeMode: String
+        val decodeMode: String,
+        /** v1.5.40: 诊断摘要——结构化逐值解码 vs 整文件 GBK/UTF-8 扫描各能拿到的 CJK 数，用于定位真机编码问题 */
+        val diag: String = ""
     )
 
     /** DXF 作用域：模型空间实体 + 块定义表（块名 → 块内实体） */
@@ -177,6 +179,7 @@ object DwgDxfParser {
         val b = try { s.toByteArray(Charsets.ISO_8859_1) } catch (_: Exception) { return s }
         val u8 = try { String(b, StandardCharsets.UTF_8) } catch (_: Exception) { null }
         val gb = try { String(b, charset("GB18030")) } catch (_: Exception) { null }
+        val gbk = try { String(b, charset("GBK")) } catch (_: Exception) { null }
         fun score(t: String?): Pair<Int, Double> {
             if (t == null) return 0 to 0.0
             val cjk = cjkCountOf(t)
@@ -184,16 +187,14 @@ object DwgDxfParser {
             val common = commonCountOf(t)
             return common to (common.toDouble() / cjk)
         }
-        val su = score(u8); val sg = score(gb)
-        val winner = when {
-            sg.first > 0 && su.first == 0 -> gb
-            su.first > 0 && sg.first == 0 -> u8
-            sg.first > 0 && su.first > 0 -> if (sg.second >= su.second) gb else u8
-            u8 != null && "\uFFFD" !in u8 -> u8
-            gb != null && "\uFFFD" !in gb -> gb
-            else -> u8 ?: gb ?: s
-        }
-        return winner ?: s
+        val su = score(u8); val sg = score(gb); val sgk = score(gbk)
+        // 取「常用汉字最多」的一方（常用字占比相近时以更多中文为准）
+        val candidates = listOf(u8 to su, gb to sg, gbk to sgk).filter { it.second.first > 0 }
+        val best = candidates.maxWithOrNull(compareBy({ it.second.first }, { it.second.second }))
+        if (best != null) return best.first ?: s
+        // 都抽不到中文：取无替换符的一方，否则回退原串
+        val noffd = listOf(u8, gb, gbk).filterNotNull().firstOrNull { "\uFFFD" !in it }
+        return noffd ?: u8 ?: gb ?: gbk ?: s
     }
 
     /** 读取 DXF 文本行（ISO-8859-1 无损读入，每个字节保留为一个 char）。 */
@@ -457,7 +458,10 @@ object DwgDxfParser {
 
     /** 对外主入口：一次性解析出文字 + 页数 */
     fun analyze(dxfPath: String): AnalysisResult {
-        val lines = readDxfLines(dxfPath) ?: return AnalysisResult("", "", null, "DXF 读取失败", "")
+        val f = File(dxfPath)
+        val raw = try { f.readBytes() } catch (_: Exception) { return AnalysisResult("", "", null, "DXF 读取失败", "") }
+        if (raw.isEmpty()) return AnalysisResult("", "", null, "DXF 为空", "")
+        val lines = String(raw, Charsets.ISO_8859_1).split("\n")
         val encDecision = detectEncoding(lines)
         lastDecodeMode = "global-${encDecision.enc}(u8=${encDecision.u8Cjk},gb=${encDecision.gbCjk})"
         val entities = parseEntities(lines)
@@ -480,8 +484,74 @@ object DwgDxfParser {
         val sheets = distinctSheetNumbers(entities)
         val det = countDetailSheets(entities, msLines)
         val (frames, reason) = pickFrames(geo, paper, sheets, det, entities.isNotEmpty(), msEnts, paperTotalEnts)
-        return AnalysisResult(text, printed, frames, reason, lastDecodeMode)
+
+        // ── v1.5.40: 整文件 CJK 兜底恢复 ─────────────────────────────────────
+        // 真机上交叉编译的 libdwg2dxf.so 可能把中文写成 GBK 字节 / \U+XXXX 转义 /
+        // 其它混合形态，导致逐值双解码拿到的中文极少。这里直接对整份 DXF 原始字节
+        // 做多编码扫描（GBK / GB18030 / UTF-8 抽连续 CJK 段 + 全文转义还原），
+        // 当结构化结果的中文明显偏少时采用兜底结果，避免误判「需要 PDF」。
+        val structCjk = cjkCountOf(text)
+        val rawRecovered = recoverCjkFromRawDxf(raw)
+        val rawCjk = cjkCountOf(rawRecovered)
+        val rawCommon = commonCountOf(rawRecovered)
+        // 仅当结构化结果几乎无中文、且整文件扫描明显更多（去噪）时才采用兜底
+        val finalText = if (structCjk < 50 && rawCjk >= maxOf(structCjk + 30, 50) && rawCommon >= 2) rawRecovered else text
+        val diag = "enc=${encDecision.enc}(u8=${encDecision.u8Cjk},gb=${encDecision.gbCjk}) " +
+                "structCjk=$structCjk rawCjk=$rawCjk rawCommon=$rawCommon"
+        return AnalysisResult(finalText, printed, frames, reason, lastDecodeMode, diag)
     }
+
+    /**
+     * v1.5.40: 整文件 CJK 兜底恢复。
+     * 当结构化逐值解码拿到的中文极少时调用。直接对 DXF 原始字节做多编码扫描，
+     * 覆盖 ARM 上 LibreDWG 把中文写成 GBK 字节 / 转义 / 其它形态而逐值解码漏掉的情况。
+     * 返回去重后的中文文本（每行一段）。
+     */
+    private fun recoverCjkFromRawDxf(rawBytes: ByteArray): String {
+        val collected = mutableListOf<String>()
+        // 1) 整文件按不同编码解码后抽连续 CJK 段（带「常用字」过滤抑制 GBK 噪声）
+        for (csName in listOf("GBK", "GB18030", "UTF-8")) {
+            try {
+                val decoded = String(rawBytes, charset(csName))
+                collected.add(extractCjkRuns(decoded))
+            } catch (_: Exception) {}
+        }
+        // 2) 全文转义还原（\U+XXXX / \M+nXXXX 可能散落在任意位置，包括结构化解析漏掉的值）
+        try {
+            val latin1 = String(rawBytes, Charsets.ISO_8859_1)
+            collected.add(decodeDxfEscapes(latin1))
+        } catch (_: Exception) {}
+        return joinUnique(collected.flatMap { it.split("\n") })
+    }
+
+    /** 从一段字符串中抽取最长连续 CJK 段（≥2 字，且含常用字或较长），忽略纯 ASCII / GBK 噪声段 */
+    private fun extractCjkRuns(s: String): String {
+        val sb = StringBuilder()
+        var i = 0
+        val n = s.length
+        while (i < n) {
+            val cp = s[i].code
+            if (cp in 0x4E00..0x9FFF) {
+                var j = i
+                var cjk = 0
+                var common = 0
+                while (j < n) {
+                    val c = s[j].code
+                    if (c in 0x4E00..0x9FFF) {
+                        cjk++
+                        if (c in DwgRawCjkScanner.COMMON_CJK_CHARS) common++
+                        j++
+                    } else if (c in 0x3000..0x303F || c in 0xFF00..0xFFEF || c == 0x20) {
+                        j++
+                    } else break
+                }
+                if (cjk >= 2 && (common >= 1 || cjk >= 6)) sb.append(s.substring(i, j)).append("\n")
+                i = j
+            } else i++
+        }
+        return sb.toString()
+    }
+
 
     /** 端口桌面 count_cad_frames 的判定优先级（逐行对齐 wordcount.py:2461-2498） */
     private fun pickFrames(geo: Int, paper: Int, sheets: Int, det: Int, hasEntities: Boolean,
