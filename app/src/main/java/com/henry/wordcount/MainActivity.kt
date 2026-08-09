@@ -157,6 +157,8 @@ data class FileResult(
     val hasUnreliable: Boolean,
     // v1.3.64: PDF 诊断信息（Python 是否工作、错误、决策过程），显示到界面便于排查
     val diag: String? = null,
+    // v1.5.36: DWG 统计不准、需用户选文字型 PDF 来重新统计时置 true（驱动 UI 提示与弹窗选 PDF）
+    val needsPdf: Boolean = false,
 )
 
 data class FileEntry(
@@ -252,13 +254,58 @@ fun WordCountApp(initialUris: List<Uri>) {
 
     val entries = remember { mutableStateListOf<FileEntry>() }
     var busy by remember { mutableStateOf(false) }
-    var exportingPdfId by remember { mutableStateOf<String?>(null) }
+    // v1.5.36: 用户为「统计不准」的 DWG 点选文字型 PDF 时，记录当前正在选 PDF 的条目 id
+    var pdfPickEntryId by remember { mutableStateOf<String?>(null) }
     // v1.1.1: 文档比较模式开关
     var compareMode by remember { mutableStateOf(false) }
 
     // SAF 文件选择器（不需要任何存储权限——OpenMultipleDocuments 在所有 Android 版本上均无需授权即可使用）
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) addFiles(context, scope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris)
+    }
+
+    // v1.5.36: 文字型 PDF 选择器（仅 PDF）。用于 DWG 统计不准时，让用户手动选一份同图文字型 PDF 重新统计。
+    //   注：Android 走 SAF 读文件，原 document URI 已丢失、缓存目录无法像桌面那样 find_sibling_pdf，
+    //   故不能自动找同目录 PDF，必须由用户在手机上手动选。
+    val pdfPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val entryId = pdfPickEntryId
+        if (uri != null && entryId != null) {
+            scope.launch(Dispatchers.IO) {
+                try {
+                    val cf = copyUriToCache(context, uri)
+                    val rec = recomputeFromPdf(context, cf.file, cf.displayName)
+                    withContext(Dispatchers.Main) {
+                        val idx = entries.indexOfFirst { it.id == entryId }
+                        if (idx < 0) return@withContext
+                        val entry = entries[idx]
+                        val old = entry.result
+                        if (rec == null || old == null) {
+                            Toast.makeText(context, "该 PDF 未提取到文字，请选「文字型」PDF（非扫描件）", Toast.LENGTH_LONG).show()
+                            return@withContext
+                        }
+                        // 用 PDF 统计结果覆盖 DWG 的字数/页数，关闭 needsPdf 提示
+                        val newResult = old.copy(
+                            words = rec.words,
+                            fe = rec.fe,
+                            nc = rec.nc,
+                            chars = rec.chars,
+                            pages = rec.pages ?: old.pages,
+                            pagesReason = "来自文字型PDF",
+                            diag = rec.diag,
+                            needsPdf = false
+                        )
+                        entries[idx] = entry.copy(result = newResult)
+                        Toast.makeText(context, "已用文字型PDF重新统计：${rec.chars}字", Toast.LENGTH_SHORT).show()
+                    }
+                } catch (e: Throwable) {
+                    Log.w("WordCount", "选PDF重统计异常 ${e.message}")
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "选PDF重统计失败：${e.message?.take(120)}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+        pdfPickEntryId = null
     }
 
     /** 选文件入口：直接启动 SAF 选择器（无需任何运行时权限申请） */
@@ -429,8 +476,11 @@ fun WordCountApp(initialUris: List<Uri>) {
                             onOpen = { e -> openWithOtherApp(context, e) },
                             onOpenWord = { e -> openWithWord(context, e) },
                             onOpenWps = { e -> openWithWps(context, e) },
-                            onExportPdf = { e -> exportDwgToPdf(context, e, scope, snackbar, onStateChange = { exportingPdfId = it }) },
-                            exportingPdfId = exportingPdfId,
+                            // v1.5.36: 点红色提示 → 记录条目 id 并启动 PDF 选择器（仅限文字型 PDF）
+                            onPickPdf = { e ->
+                                pdfPickEntryId = e.id
+                                pdfPicker.launch(arrayOf("application/pdf"))
+                            },
                             hiddenSelected = hiddenSelected,
                             onToggleHidden = { id, name ->
                                 val k = "$id::$name"
@@ -469,8 +519,8 @@ fun FileCard(
     onOpen: (FileEntry) -> Unit,
     onOpenWord: (FileEntry) -> Unit,
     onOpenWps: (FileEntry) -> Unit,
-    onExportPdf: (FileEntry) -> Unit,
-    exportingPdfId: String?,
+    // v1.5.36: DWG 统计不准时，点击红色提示 → 弹窗选文字型 PDF 重新统计
+    onPickPdf: (FileEntry) -> Unit,
     hiddenSelected: Map<String, Boolean>,
     onToggleHidden: (String, String) -> Unit
 ) {
@@ -582,24 +632,17 @@ fun FileCard(
                                 .padding(top = 4.dp)
                                 .clickable { onOpenWps(entry) })
                     }
-                    // v1.5.9: DWG 文件显示「PDF」导出按钮（灰色运行中，点击导出后用 WPS 打开）
-                    //   用 cachePath 扩展名判断（不依赖 entry.result，处理失败时 result 为 null 会导致按钮不显示）
-                    val isDwg = entry.cachePath.endsWith(".dwg", ignoreCase = true)
-                    if (isDwg) {
-                        val isExportingPdf = exportingPdfId == entry.id
-                        if (isExportingPdf) {
-                            Text("导出中…",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color.Gray,
-                                modifier = Modifier.padding(top = 4.dp))
-                        } else {
-                            Text("PDF",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFFB00020),
-                                modifier = Modifier
-                                    .padding(top = 4.dp)
-                                    .clickable { onExportPdf(entry) })
-                        }
+                    // v1.5.36: DWG 统计不准（needsPdf）时，在右下角显示可点击红色提示，
+                    //   点此弹窗选一份文字型 PDF 来重新统计该 DWG（取代旧版「导出 PDF」按钮——
+                    //   旧版 LibreDWG 自渲染的 PDF 文字层是栅格化图像，抽不到字、没用）。
+                    //   用 entry.result?.needsPdf 判断（不依赖 cachePath 后缀）。
+                    if (entry.result?.needsPdf == true) {
+                        Text("统计可能不准 · 点此选文字型PDF重新统计",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFB00020),
+                            modifier = Modifier
+                                .padding(top = 4.dp)
+                                .clickable { onPickPdf(entry) })
                     }
                 }
             }
@@ -968,75 +1011,61 @@ private fun openWithWps(context: android.content.Context, entry: FileEntry) {
 }
 
 /**
- * v1.5.10: 导出 DWG -> PDF（实验性，LibreDWG 矢量导出仅支持基础实体）。
- *   1) 调 DwgIsolatedRunner.convertToPdf()（在 :dwgisolated 进程跑 LibreDWG dwg2pdf，native 崩溃不闪退）
- *   2) 成功：用 WPS 打开（未装 WPS 则弹系统选择器）
- *   3) 失败：toast 提示错误码
- * ⚠️ 已知限制：复杂图纸（天正自定义对象、动态块、代理图形）可能丢失或错乱。
- * onStateChange(id) 用于按钮灰色/恢复（导出中传 entry.id，结束传 null）
+ * v1.5.36: 用户为「统计不准」的 DWG 选定一份文字型 PDF 后，用该 PDF 重新统计该文件。
+ *   复用 PDF 提取 Level1(Kotlin PdfExtractor)+Level2(Python pdfminer)，取 chars 较多者，
+ *   返回新的字数/页数；若都提取不到文字则返回 null（调用方保留原 DWG 结果并提示）。
+ *   仅用于「文字型」PDF（非扫描件）；扫描件/图片型 PDF 抽不到字，会返回 null。
+ *   取代旧版 exportDwgToPdf（LibreDWG 自渲染的 PDF 文字层是栅格化图像，抽不到字、没用）。
  */
-private fun exportDwgToPdf(
-    context: android.content.Context,
-    entry: FileEntry,
-    scope: kotlinx.coroutines.CoroutineScope,
-    snackbar: SnackbarHostState,
-    onStateChange: (String?) -> Unit
-) {
-    // 构造 PDF 输出路径：基于缓存文件的父目录 + 原文件名(去扩展名) + .pdf
-    // 不依赖 cachePath 以 .dwg 结尾（SAF 路径可能大小写不同或无标准后缀）
-    val srcFile = File(entry.cachePath)
-    val parentDir = srcFile.parent ?: srcFile.absolutePath.substringBeforeLast('/')
-    val rawName = srcFile.nameWithoutExtension  // Kotlin 标准库自动处理各种后缀
-    val pdfPath = "$parentDir/${rawName}.pdf"
-    Log.d("WordCount", "DWG→PDF: input=${entry.cachePath} (${srcFile.name}) → output=$pdfPath")
-    onStateChange(entry.id)
-    scope.launch(Dispatchers.IO) {
+private data class RecomputedPdf(val words: Int, val fe: Int, val nc: Int, val chars: Int, val pages: Int?, val diag: String?)
+
+private suspend fun recomputeFromPdf(context: android.content.Context, pdfFile: File, dName: String): RecomputedPdf? {
+    return withContext(Dispatchers.IO) {
         try {
-            // v1.5.13: 改用隔离进程运行 dwg2pdf（native 崩溃只杀隔离进程，不闪退主 app）
-            val res = DwgIsolatedRunner.convertToPdf(context, entry.cachePath, pdfPath)
-            withContext(Dispatchers.Main) {
-                onStateChange(null)
-                if (res.path == null) {
-                    val msg = "DWG转PDF失败 [${res.errorCode}] ${res.diagText}"
-                    Log.w("WordCount", msg)
-                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-                    return@withContext
-                }
-                // 验证 PDF 文件确实生成了且不是空文件
-                val pdfFile = File(pdfPath)
-                if (!pdfFile.exists() || pdfFile.length() == 0L) {
-                    Toast.makeText(context, "PDF 文件未生成（转换可能失败）", Toast.LENGTH_LONG).show()
-                    Log.e("WordCount", "PDF 不存在或为空: $pdfPath exists=${pdfFile.exists()} size=${pdfFile.length()}")
-                    return@withContext
-                }
-                Log.d("WordCount", "PDF 已生成: $pdfPath (${pdfFile.length()} bytes)")
-                // 质量警告（LibreDWG 矢量导出的已知限制）
-                Toast.makeText(context, "⚠️ PDF 为实验性导出，复杂图纸可能不完整", Toast.LENGTH_SHORT).show()
-                // 打开 PDF：优先 WPS，未装则系统选择器
-                val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", pdfFile)
-                val intent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(uri, "application/pdf")
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                try {
-                    intent.setPackage("cn.wps.moffice_eng")
-                    context.startActivity(intent)
-                } catch (e: android.content.ActivityNotFoundException) {
-                    // 未安装 WPS -> 系统选择器
-                    try {
-                        context.startActivity(Intent.createChooser(intent, "打开导出的 PDF"))
-                    } catch (e2: Throwable) {
-                        Toast.makeText(context, "未找到可打开 PDF 的应用", Toast.LENGTH_SHORT).show()
+            // ── Level 1: Kotlin PdfExtractor（快速预筛）──
+            val ktRes = PdfExtractor.extract(pdfFile)
+            val ktStats = countTextKotlin(ktRes.text)
+            var bestWords = ktStats.first; var bestFe = ktStats.second; var bestNc = ktStats.third; var bestChars = ktStats.fourth
+            var bestPages: Int? = ktRes.pages
+            var bestDiag = "Kotlin提取($bestChars字)"
+            Log.d("WordCount", "recomputeFromPdf L1 $dName: chars=$bestChars words=$bestWords pages=$bestPages")
+            // ── Level 2: Python pdfminer（文字型 PDF 主力）──
+            try {
+                val pyResults = PythonEngine.countFiles(context, listOf(pdfFile.absolutePath))
+                @Suppress("UNCHECKED_CAST")
+                val pyList = pyResults as? List<Map<String, Any?>>
+                if (!pyList.isNullOrEmpty()) {
+                    val py0 = pyList[0]
+                    if (py0["ok"] == true) {
+                        val pyData = py0["result"] as? Map<String, Any?>
+                        val pyS = pyData?.get("stats") as? Map<String, Any?>
+                        val pyWords = (pyS?.get("words") as? Number)?.toInt() ?: 0
+                        val pyFe = (pyS?.get("fe") as? Number)?.toInt() ?: 0
+                        val pyNc = (pyS?.get("nc") as? Number)?.toInt() ?: 0
+                        val pyChars = (pyS?.get("chars") as? Number)?.toInt() ?: 0
+                        val pyPages = (pyData?.get("pages") as? Number)?.toInt()
+                        if (pyChars > bestChars) {
+                            bestWords = pyWords; bestFe = pyFe; bestNc = pyNc; bestChars = pyChars
+                            bestPages = pyPages ?: bestPages
+                            bestDiag = "Python提取($bestChars字)"
+                        }
+                        Log.d("WordCount", "recomputeFromPdf L2 $dName: chars=$pyChars pages=$pyPages")
+                    } else {
+                        Log.w("WordCount", "recomputeFromPdf L2 ok=false $dName: ${py0["error"]}")
                     }
                 }
+            } catch (e: Throwable) {
+                Log.w("WordCount", "recomputeFromPdf Python异常 $dName: ${e.javaClass.simpleName}: ${e.message}")
+            }
+            if (bestChars <= 0) {
+                Log.w("WordCount", "recomputeFromPdf 未提取到文字 $dName")
+                null
+            } else {
+                RecomputedPdf(bestWords, bestFe, bestNc, bestChars, bestPages, bestDiag)
             }
         } catch (e: Throwable) {
-            withContext(Dispatchers.Main) {
-                onStateChange(null)
-                Log.w("WordCount", "DWG转PDF异常 ${entry.displayName}: ${e.message}")
-                Toast.makeText(context, "DWG转PDF失败：${e.message}", Toast.LENGTH_LONG).show()
-            }
+            Log.w("WordCount", "recomputeFromPdf 异常 $dName: ${e.message}")
+            null
         }
     }
 }
@@ -2370,34 +2399,17 @@ private fun addFiles(
                                 && !recoverySucceeded
                                 && !printedScope
                                 && (finalWords4 < framesVal4 * 1000)
-                        // 保留"几乎无内容"兜底 + 桌面式栅格化/稀疏触发
-                        val invalid = (charsNow < 50) || rasterizedTrigger
-                        if (invalid) {
-                            // v1.5.13: 隔离进程运行 dwg2pdf（native 崩溃只杀隔离进程，不闪退主 app）
-                            val pdfPath = "${f.parent}/${f.nameWithoutExtension}.pdf"
-                            val res = DwgIsolatedRunner.convertToPdf(context, f.absolutePath, pdfPath)
-                            if (res.path != null) {
-                                val pdfFile = File(pdfPath)
-                                if (pdfFile.exists() && pdfFile.length() > 0) {
-                                    val ktRes = PdfExtractor.extract(pdfFile)
-                                    val pdfStats = countTextKotlin(ktRes.text)
-                                    val pdfFeRatio = if (pdfStats.fourth > 0) pdfStats.second.toDouble() / pdfStats.fourth else 0.0
-                                    // 采用 PDF 结果的条件：PDF 中文占比明显更高，或当前是极端垃圾而 PDF 在合理范围
-                                    val pdfBetter = pdfStats.fourth > 0 &&
-                                            (pdfFeRatio > feRatioNow + 0.1 ||
-                                             (pdfStats.fourth in 50..50000 && charsNow > 50000) ||
-                                             (cjkNow <= 10 && pdfStats.second > 50))
-                                    if (pdfBetter) {
-                                        finalStats = pdfStats
-                                        if (ktRes.pages != null && ktRes.pages > 0) {
-                                            dxfPages = ktRes.pages
-                                            dxfPagesReason = "PDF页数兜底"
-                                        }
-                                        Log.d("WordCount", "DWG PDF回退 $dName: now=$charsNow → pdf=${pdfStats.fourth}")
-                                    }
-                                }
-                            }
-                        }
+                                // v1.5.36: 仅当图框数≥3 时才认为「统计不准需文字型PDF」——
+                                //   单/双页 DWG（如 Tenova 1页512字）本就字少，按桌面 words<frames*1000
+                                //   会误报，而它其实已统计正确；3页以上的图纸若字数远低于页框×1000，
+                                //   才说明文字被栅格化/抽空（如水雾电气图 32页仅8880字）。
+                                && (framesVal4 >= 3)
+                        // v1.5.36: 取消自动 dwg2pdf 自渲染兜底——
+                        //   LibreDWG 渲染出的 PDF 文字层是栅格化图像，PdfExtractor 抽不到多少字，
+                        //   对统计无益且用户反馈"取不全完全没有用"。改为：当 DWG 统计明显偏少
+                        //   （栅格化/稀疏）时置 needsPdf，由 UI 提示用户在手机上选一份文字型 PDF
+                        //   来重新统计（见 onPickPdf / pdfPicker），不再自动渲染无用的 PDF。
+                        val needsPdf = rasterizedTrigger || (charsNow < 50)
                         // ── v1.5.31: 栅格化检测仍然记录日志（PDF 兜底已按桌面条件触发）──
                         val rasterized4 = framesKnown && (finalWords4 < framesVal4 * 1000)
                         if (rasterized4) {
@@ -2408,7 +2420,7 @@ private fun addFiles(
                         val resMap = mapOf(
                             "name" to dName, "ext" to ".dwg",
                             "stats" to mapOf("words" to finalStats.first, "fe" to finalStats.second, "nc" to finalStats.third, "chars" to finalStats.fourth),
-                            "meta" to mapOf<String, Any?>("pages_reason" to (dxfPagesReason ?: "")),
+                            "meta" to mapOf<String, Any?>("pages_reason" to (dxfPagesReason ?: ""), "needs_pdf" to needsPdf),
                             "pages" to pages
                         )
                         val fr = toFileResult(resMap, f.absolutePath)
@@ -2550,7 +2562,9 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
         // 图片型 PDF 不再触发导出按钮（PDF 无法像 OOXML 那样解压提取内嵌图片）
         hasUnreliable = imageCount > 0,
         // v1.3.64: PDF 诊断信息（来自 resMap["diag"]）
-        diag = m?.get("diag") as? String
+        diag = m?.get("diag") as? String,
+        // v1.5.36: DWG 统计不准、需文字型 PDF 重新统计时由扫描分支置 true
+        needsPdf = (meta["needs_pdf"] as? Boolean) ?: false
     )
 }
 
