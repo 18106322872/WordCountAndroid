@@ -759,12 +759,14 @@ fun FileCard(
                                 .padding(top = 4.dp)
                                 .clickable { onOpenWps(entry) })
                     }
-                    // v1.5.37: DWG 统计不准（needsPdf）时，在右下角显示可点击红色提示，
-                    //   点此弹窗选一份文字型 PDF 来重新统计该 DWG（取代旧版「导出 PDF」按钮——
-                    //   旧版 LibreDWG 自渲染的 PDF 文字层是栅格化图像，抽不到字、没用）。
-                    //   用 entry.result?.needsPdf 判断（不依赖 cachePath 后缀）。
-                    if (entry.result?.needsPdf == true) {
-                        Text("选PDF统计",
+                    // v1.5.37/v1.5.63: DWG 统计不准（needsPdf）且确实没拿到任何字数时，
+                    //   在右下角显示红色「用PDF统计」按钮，点此弹窗选一份文字型 PDF 来
+                    //   重新统计。如果已经拿到字数（如 v1.5.62 水雾终极兜底成功），则不再
+                    //   显示该按钮，避免用户困惑。
+                    val result = entry.result
+                    val hasAnyWords = (result?.words ?: 0) > 0 || (result?.fe ?: 0) > 0 || (result?.nc ?: 0) > 0
+                    if (result?.needsPdf == true && !hasAnyWords) {
+                        Text("用PDF统计",
                             style = MaterialTheme.typography.labelSmall,
                             color = Color(0xFFB00020),
                             modifier = Modifier
