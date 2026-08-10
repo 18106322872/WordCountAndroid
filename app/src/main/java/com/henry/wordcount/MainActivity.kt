@@ -165,6 +165,13 @@ data class SheetStat(
     val words: Int, val fe: Int, val nc: Int, val chars: Int
 )
 
+/** v1.5.61: CAD 文字拆分（文字部分 / 纯编号部分），供展开后分别勾选汇总 */
+data class CadPartStats(
+    val textWords: Int, val textFe: Int, val textNc: Int, val textChars: Int,
+    val codeWords: Int, val codeFe: Int, val codeNc: Int, val codeChars: Int,
+    val textItems: Int, val codeItems: Int
+)
+
 data class FileResult(
     val name: String,
     val ext: String,
@@ -187,6 +194,8 @@ data class FileResult(
     val diag: String? = null,
     // v1.5.36: DWG 统计不准、需用户选文字型 PDF 来重新统计时置 true（驱动 UI 提示与弹窗选 PDF）
     val needsPdf: Boolean = false,
+    // v1.5.61: CAD 文字/纯编号拆分（仅 DWG 文件可能非空）
+    val cadParts: CadPartStats? = null,
 )
 
 data class FileEntry(
@@ -378,7 +387,19 @@ fun WordCountApp(initialUris: List<Uri>) {
                 pg += r.result!!.pages ?: estimatePages(r.result!!.chars)
                 pendingPdf += 1
             } else {
-                w += r.result!!.words; fe += r.result!!.fe; nc += r.result!!.nc; ch += r.result!!.chars
+                // v1.5.61: DWG 有文字/纯编号拆分时，按展开勾选状态计入合计
+                val cp = r.result!!.cadParts
+                if (cp != null) {
+                    val textChecked = hiddenSelected["${r.id}::cad::text"] != false
+                    val codeChecked = hiddenSelected["${r.id}::cad::code"] != false
+                    when {
+                        textChecked && codeChecked -> { w += r.result!!.words; fe += r.result!!.fe; nc += r.result!!.nc; ch += r.result!!.chars }
+                        textChecked -> { w += cp.textWords; fe += cp.textFe; nc += cp.textNc; ch += cp.textChars }
+                        codeChecked -> { w += cp.codeWords; fe += cp.codeFe; nc += cp.codeNc; ch += cp.codeChars }
+                    }
+                } else {
+                    w += r.result!!.words; fe += r.result!!.fe; nc += r.result!!.nc; ch += r.result!!.chars
+                }
                 pg += r.result!!.pages ?: estimatePages(r.result!!.chars)
             }
             // 勾选的隐藏工作表计入合计（页数不另计，沿用文件级页数）
@@ -673,6 +694,7 @@ fun FileCard(
                         val detailCount = (r.inner?.size ?: 0) + (r.sheets?.size ?: 0) +
                             (r.hiddenSheets?.size ?: 0) +
                             (if (r.notesSlides?.isNotEmpty() == true) 1 else 0) +
+                            (if (r.cadParts != null) 2 else 0) +
                             if (r.imageCount > 0) 1 else 0
                         if (detailCount > 0) {
                             Text(
@@ -784,6 +806,26 @@ fun FileCard(
                     Text("字 $totalNotesWords 中 $totalNotesFe 非 $totalNotesNc", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
             }
+            // v1.5.61: CAD 文字/纯编号拆分（默认都勾选，与父行总数一致；可取消勾选以汇总指定部分）
+            val cadParts = entry.result?.cadParts
+            if (cadParts != null) {
+                val textKey = "${entry.id}::cad::text"
+                val codeKey = "${entry.id}::cad::code"
+                val textChecked = hiddenSelected[textKey] ?: true
+                val codeChecked = hiddenSelected[codeKey] ?: true
+                Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("文", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2B579A))
+                    Checkbox(checked = textChecked, onCheckedChange = { hiddenSelected[textKey] = !(hiddenSelected[textKey] ?: true) }, modifier = Modifier.size(24.dp))
+                    Text("文字部分（${cadParts.textItems}）", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    Text("字 ${cadParts.textWords} 中 ${cadParts.textFe} 非 ${cadParts.textNc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                }
+                Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("编", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2B579A))
+                    Checkbox(checked = codeChecked, onCheckedChange = { hiddenSelected[codeKey] = !(hiddenSelected[codeKey] ?: true) }, modifier = Modifier.size(24.dp))
+                    Text("纯编号部分（${cadParts.codeItems}）", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    Text("字 ${cadParts.codeWords} 中 ${cadParts.codeFe} 非 ${cadParts.codeNc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                }
+            }
             // v1.3.32/v1.3.34: PPT 嵌入图片（红"图" + 张数），页数列显示张数，字数列显示"—"
             if ((entry.result?.imageCount ?: 0) > 0) {
                 Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -858,6 +900,47 @@ fun countTextKotlin(text: String): Quadruple<Int, Int, Int, Int> {
 
     val words = totalFe + totalNc
     return Quadruple(words, totalFe, totalNc, totalChars)
+}
+
+/**
+ * v1.5.61: 判断一条 CAD 文字条目是否属于『纯编号』（不需要翻译）。
+ * 端口桌面版 wordcount.py is_cad_code_item，保守判定：
+ *   - 含任何 CJK/假名/韩文          → 文字部分
+ *   - 含任何长度 ≥2 的连续字母串    → 文字部分（DN100 / PE / Pump / Room）
+ *   - 其余（纯数字、数字+下划线、单字母+数字、纯符号、空串）→ 纯编号部分
+ */
+private val CAD_CJK_RE = Regex("[\\u3400-\\u4dbf\\u4e00-\\u9fff\\uf900-\\ufaff\\u3040-\\u30ff\\uac00-\\ud7af]")
+private val CAD_WORD_RE = Regex("[A-Za-z\\u00c0-\\u024f]{2,}")
+fun isCadCodeItem(s: String): Boolean {
+    val t = s.trim()
+    if (t.isEmpty()) return true
+    if (CAD_CJK_RE.containsMatchIn(t)) return false
+    if (CAD_WORD_RE.containsMatchIn(t)) return false
+    return true
+}
+
+/**
+ * v1.5.61: 把 CAD 提取文本拆成文字部分 / 纯编号部分，并分别统计。
+ * 父行总数不变；展开后两个子项可加选框控制是否并入底部合计。
+ * 没有编号条目时返回 null（不必展开）。
+ */
+fun computeCadParts(text: String): CadPartStats? {
+    if (text.isBlank()) return null
+    val textLines = mutableListOf<String>()
+    val codeLines = mutableListOf<String>()
+    for (line in text.split("\n")) {
+        val s = line.trim()
+        if (s.isEmpty()) continue
+        if (isCadCodeItem(s)) codeLines.add(s) else textLines.add(s)
+    }
+    if (codeLines.isEmpty()) return null
+    val textStats = countTextKotlin(textLines.joinToString("\n"))
+    val codeStats = countTextKotlin(codeLines.joinToString("\n"))
+    return CadPartStats(
+        textWords = textStats.first, textFe = textStats.second, textNc = textStats.third, textChars = textStats.fourth,
+        codeWords = codeStats.first, codeFe = codeStats.second, codeNc = codeStats.third, codeChars = codeStats.fourth,
+        textItems = textLines.size, codeItems = codeLines.size
+    )
 }
 
 /**
@@ -2429,6 +2512,7 @@ private fun addFiles(
                         // ── 兜底层：原始二进制扫描（保留为回退） ──
                         val rawText = scanDwgRaw(f.absolutePath)
                         var finalStats = countTextKotlin(rawText)
+                        var finalText = rawText
                         val rawChars = finalStats.fourth
                         val rawFeRatio = if (rawChars > 0) finalStats.second.toDouble() / rawChars else 0.0
 
@@ -2520,6 +2604,7 @@ private fun addFiles(
                                 val dxfQualityGood = (dxfCjkCount >= 50) && (dxfCommonRatio >= 0.30) && (dxfCommonRatio < 0.98)
                                 if (printedScope || (!dxfMojibake && (dxfStats.fourth >= rawChars || dxfQualityGood))) {
                                     finalStats = dxfStats
+                                    finalText = dxfText
                                 }
                                 Log.d("WordCount", "DWG dxf $dName: enc=${analysis.decodeMode} raw=$rawChars dxf=${dxfStats.fourth} cjk=$dxfCjkCount cr=${"%.3f".format(dxfCommonRatio)} den=${"%.0f".format(dxfDensity)} moji=$dxfMojibake pages=$dxfPages($dxfPagesReason)")
                             }
@@ -2577,6 +2662,7 @@ private fun addFiles(
                                 val limit = (base * effectiveMaxRatio).toInt().coerceAtLeast(100)
                                 if (recStats.fourth <= limit) {
                                     finalStats = recStats
+                                    finalText = recovered.text
                                     dxfPagesReason = "${recovered.method}字节扫描恢复"
                                     recoverySucceeded = true
                                     // v1.5.26: 恢复成功后更新 curTotal 用于后续 invalid 判定
@@ -2587,6 +2673,26 @@ private fun addFiles(
                                 }
                             } else {
                                 Log.d("WordCount", "DWG CJK recovery SKIPPED (safety gate) $dName")
+                            }
+                        }
+
+                        // v1.5.61: 终极兜底——直接对原始 DWG 字节做 GBK/UTF-16LE 扫描。
+                        // 水雾电气图-7区在真机上出现「DXF 编码丢失 + 常规 recovery 未触发」
+                        // 导致字数显示为 0 的情况；但原始 DWG 字节里 UTF-16LE 中文完整存在。
+                        // 当现有结果中文极少（<=5）时直接尝试 DwgRawCjkScanner，质量可信就采用。
+                        if (!recoverySucceeded && finalStats.second <= 5) {
+                            val rawScanner = DwgRawCjkScanner.scanRawDwg(f.absolutePath)
+                            if (rawScanner.cjkTotal >= 200 && rawScanner.commonRatio >= 0.10 &&
+                                rawScanner.cjkDiversity < 0.6 && rawScanner.text.isNotEmpty()) {
+                                val rs = countTextKotlin(rawScanner.text)
+                                finalStats = rs
+                                finalText = rawScanner.text
+                                dxfPagesReason = "${rawScanner.method}原始字节扫描"
+                                recoverySucceeded = true
+                                curTotal = finalStats.second + finalStats.third
+                                Log.d("WordCount", "DWG raw scanner APPLIED $dName: method=${rawScanner.method} cjk=${rawScanner.cjkTotal} common=${"%.2f".format(rawScanner.commonRatio)} words=${rs.first}")
+                            } else {
+                                Log.d("WordCount", "DWG raw scanner SKIPPED/REJECTED $dName: cjk=${rawScanner.cjkTotal} common=${"%.2f".format(rawScanner.commonRatio)} div=${"%.2f".format(rawScanner.cjkDiversity)}")
                             }
                         }
 
@@ -2643,10 +2749,18 @@ private fun addFiles(
                         }
 
                         val pages = dxfPages ?: estimatePages(finalStats.fourth)
+                        // v1.5.61: 对 DWG 最终文字拆分文字部分 / 纯编号部分，供展开后勾选汇总
+                        val cadParts = if (!needsPdf && finalText.isNotBlank()) computeCadParts(finalText) else null
+                        val cadPartsMeta = cadParts?.let { mapOf(
+                            "text_words" to it.textWords, "text_fe" to it.textFe, "text_nc" to it.textNc, "text_chars" to it.textChars,
+                            "code_words" to it.codeWords, "code_fe" to it.codeFe, "code_nc" to it.codeNc, "code_chars" to it.codeChars,
+                            "text_items" to it.textItems, "code_items" to it.codeItems
+                        ) }
                         val resMap = mapOf(
                             "name" to dName, "ext" to ".dwg",
                             "stats" to mapOf("words" to finalStats.first, "fe" to finalStats.second, "nc" to finalStats.third, "chars" to finalStats.fourth),
-                            "meta" to mapOf<String, Any?>("pages_reason" to (dxfPagesReason ?: ""), "needs_pdf" to needsPdf),
+                            "meta" to mapOf<String, Any?>("pages_reason" to (dxfPagesReason ?: ""), "needs_pdf" to needsPdf,
+                                "cad_parts" to cadPartsMeta),
                             "pages" to pages,
                             // v1.5.40: 把 DXF 编码诊断透传出去，便于定位真机仍 0 中文的原因
                             "diag" to dxfDiag
@@ -2767,6 +2881,22 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
     val ext = (m?.get("ext") as? String) ?: ""
     // v1.3.33: OOXML 嵌入图片数量（来自 meta["image_count"]），供 hasUnreliable 判断
     val imageCount = (meta["image_count"] as? Number)?.toInt() ?: 0
+    // v1.5.61: CAD 文字/纯编号拆分
+    val cadPartsMap = meta["cad_parts"] as? Map<*, *>
+    val cadParts = cadPartsMap?.let {
+        CadPartStats(
+            textWords = (it["text_words"] as? Number)?.toInt() ?: 0,
+            textFe = (it["text_fe"] as? Number)?.toInt() ?: 0,
+            textNc = (it["text_nc"] as? Number)?.toInt() ?: 0,
+            textChars = (it["text_chars"] as? Number)?.toInt() ?: 0,
+            codeWords = (it["code_words"] as? Number)?.toInt() ?: 0,
+            codeFe = (it["code_fe"] as? Number)?.toInt() ?: 0,
+            codeNc = (it["code_nc"] as? Number)?.toInt() ?: 0,
+            codeChars = (it["code_chars"] as? Number)?.toInt() ?: 0,
+            textItems = (it["text_items"] as? Number)?.toInt() ?: 0,
+            codeItems = (it["code_items"] as? Number)?.toInt() ?: 0
+        )
+    }
     return FileResult(
         name = (m?.get("name") as? String) ?: "",
         ext = ext,
@@ -2792,7 +2922,9 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
         // v1.3.64: PDF 诊断信息（来自 resMap["diag"]）
         diag = m?.get("diag") as? String,
         // v1.5.36: DWG 统计不准、需文字型 PDF 重新统计时由扫描分支置 true
-        needsPdf = (meta["needs_pdf"] as? Boolean) ?: false
+        needsPdf = (meta["needs_pdf"] as? Boolean) ?: false,
+        // v1.5.61: CAD 文字/纯编号拆分
+        cadParts = cadParts
     )
 }
 
