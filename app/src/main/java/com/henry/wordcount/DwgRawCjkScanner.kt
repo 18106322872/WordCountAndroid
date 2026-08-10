@@ -213,7 +213,7 @@ object DwgRawCjkScanner {
      *   - 段内严格 CJK 占比 >= 60% 才保留
      *   - 段长 >= minRun
      */
-    fun extractUtf16Cjk(rawBytes: ByteArray, minRun: Int = 4, maxPerCall: Int = 2000): ScanResult {
+    fun extractUtf16Cjk(rawBytes: ByteArray, minRun: Int = 4, maxPerCall: Int = 4000): ScanResult {
         val text = try {
             String(rawBytes, charset("UTF-16LE"))
         } catch (_: Exception) {
@@ -299,8 +299,10 @@ object DwgRawCjkScanner {
 
         // GBK 不达标 → 试 UTF-16LE
         val utf16 = extractUtf16Cjk(raw)
-        if (utf16.cjkTotal >= 200 && utf16.cjkDiversity < 0.6 && utf16.commonRatio >= 0.10 &&
-            utf16.text.isNotEmpty()) {
+        // v1.5.62: 对齐桌面版 _extract_dwg_utf16_cjk，只要求 cjk_total 够大且 diversity
+        // 不像乱码即可；不再卡 commonRatio（水雾类 CAD 图纸专业术语多，常用字占比
+        // 可能低于 0.10 但仍是真中文）。
+        if (utf16.cjkTotal >= 200 && utf16.cjkDiversity < 0.6 && utf16.text.isNotEmpty()) {
             return utf16
         }
 

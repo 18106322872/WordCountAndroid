@@ -382,12 +382,14 @@ fun WordCountApp(initialUris: List<Uri>) {
         val sel = entries.filter { it.selected && it.result != null }
         var w = 0; var fe = 0; var nc = 0; var ch = 0; var pg = 0; var pendingPdf = 0
         sel.forEach { r ->
-            // v1.5.37: 需要 PDF 来统计的 DWG 不计入字数合计，只计页数
-            if (r.result!!.needsPdf) {
+            // v1.5.37/v1.5.62: 需要 PDF 来统计的 DWG 仍把已拿到的字数计入合计（与电脑版一致）。
+            // 只有完全没拿到字数时才只计页数。
+            val hasStats = r.result!!.words > 0 || r.result!!.fe > 0 || r.result!!.nc > 0
+            if (r.result!!.needsPdf && !hasStats) {
                 pg += r.result!!.pages ?: estimatePages(r.result!!.chars)
                 pendingPdf += 1
             } else {
-                // v1.5.61: DWG 有文字/纯编号拆分时，按展开勾选状态计入合计
+                // v1.5.61/62: DWG 有文字/纯编号拆分时，按展开勾选状态计入合计
                 val cp = r.result!!.cadParts
                 if (cp != null) {
                     val textChecked = hiddenSelected["${r.id}::cad::text"] != false
@@ -678,8 +680,10 @@ fun FileCard(
                             r.pagesReason?.contains("layout") == true
                         val pageLabel = if (isEstimated) "页 ${r.pages ?: estimatePages(r.chars)}(估)"
                             else "页 ${r.pages ?: estimatePages(r.chars)}"
-                        // v1.5.37: 需要 PDF 统计的 DWG 与电脑 APP 一致：字数/中文/非中文显示"-"，只保留页数
-                        val statsText = if (r.needsPdf) {
+                        // v1.5.37/v1.5.62: 需要 PDF 统计的 DWG 仍显示当前已拿到的字数（与电脑版
+                        // 一致），方便用户知道“已有统计”是多少；只有完全没拿到字数时才显示"-"。
+                        val hasStats = r.words > 0 || r.fe > 0 || r.nc > 0
+                        val statsText = if (r.needsPdf && !hasStats) {
                             "字数 - ｜ 中文 - ｜ 非中文 - ｜ $pageLabel" +
                                     (if (r.pagesReason != null && !isEstimated) " ｜ ${r.pagesReason}" else "")
                         } else {
@@ -2681,10 +2685,11 @@ private fun addFiles(
                         // 水雾电气图-7区在真机上出现「DXF 编码丢失 + 常规 recovery 未触发」
                         // 导致字数显示为 0 的情况；但原始 DWG 字节里 UTF-16LE 中文完整存在。
                         // 当现有结果中文极少（<=5）时直接尝试 DwgRawCjkScanner，质量可信就采用。
+                        // v1.5.62: 放宽采用门槛，不再要求 commonRatio（CAD 专业图常用字占比低）。
                         if (!recoverySucceeded && finalStats.second <= 5) {
                             val rawScanner = DwgRawCjkScanner.scanRawDwg(f.absolutePath)
-                            if (rawScanner.cjkTotal >= 200 && rawScanner.commonRatio >= 0.10 &&
-                                rawScanner.cjkDiversity < 0.6 && rawScanner.text.isNotEmpty()) {
+                            if (rawScanner.cjkTotal >= 200 && rawScanner.cjkDiversity < 0.6 &&
+                                rawScanner.text.isNotEmpty()) {
                                 val rs = countTextKotlin(rawScanner.text)
                                 finalStats = rs
                                 finalText = rawScanner.text
@@ -2750,8 +2755,9 @@ private fun addFiles(
                         }
 
                         val pages = dxfPages ?: estimatePages(finalStats.fourth)
-                        // v1.5.61: 对 DWG 最终文字拆分文字部分 / 纯编号部分，供展开后勾选汇总
-                        val cadParts = if (!needsPdf && finalText.isNotBlank()) computeCadParts(finalText) else null
+                        // v1.5.61/62: 对 DWG 最终文字拆分文字部分 / 纯编号部分，供展开后勾选汇总。
+                        // 即使 needsPdf=true，只要已经拿到文字也拆分，方便用户查看“已有统计”。
+                        val cadParts = if (finalText.isNotBlank()) computeCadParts(finalText) else null
                         val cadPartsMeta = cadParts?.let { mapOf(
                             "text_words" to it.textWords, "text_fe" to it.textFe, "text_nc" to it.textNc, "text_chars" to it.textChars,
                             "code_words" to it.codeWords, "code_fe" to it.codeFe, "code_nc" to it.codeNc, "code_chars" to it.codeChars,
