@@ -627,7 +627,8 @@ fun FileCard(
     onPickPdf: (FileEntry) -> Unit,
     // v1.5.56: 长按文件名或点编辑图标可手动重命名
     onRename: (FileEntry) -> Unit,
-    hiddenSelected: Map<String, Boolean>,
+    // v1.5.61: 改为 MutableMap, CAD 文字/纯编号勾选需要直接写入状态
+    hiddenSelected: MutableMap<String, Boolean>,
     onToggleHidden: (String, String) -> Unit
 ) {
     val expanded = remember { mutableStateOf(false) }
