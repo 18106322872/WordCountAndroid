@@ -2307,7 +2307,7 @@ private fun addFiles(
                         Log.d("WordCount", "PDF决策 $dName: pyOk=$pyOk pyChars=$pyChars ktChars=${ktStats.fourth} usePython=$usePython cidGarbage=$ktLooksLikeCidGarbage pyError=$pyError")
 
                         // v1.3.66: 拼出可直接显示到界面的诊断信息（含 PdfExtractor 内部诊断）
-                        val pdfDiag = buildString {
+                        var pdfDiag = buildString {
                             appendLine("【PDF诊断】")
                             appendLine("Python测试: ${pyDiag ?: "(未执行)"}")
                             appendLine("Kotlin提取: ${ktStats.fourth}字(fe=${ktStats.second},可靠=${ktRes.reliable})")
@@ -2331,7 +2331,16 @@ private fun addFiles(
                         // v1.3.92: 有字符但零中文 → CID/ToUnicode 解码失败的中文 PDF（如 Word 导出 PDF）
                         // 此类 PDF 的中文以 CID 编码存储，Kotlin 无法解码成 PUA/乱码被过滤后只剩英文碎片
                         val isFailedChinesePdf = bestChars > 20 && bestFe == 0 && bestChars < 500
-                        val needOcr = bestChars < 10 || (!bestTextReliable && bestChars < 50) || looksLikeGarbage || isFailedChinesePdf
+                        // v1.5.65: 对齐桌面 extract_pdf 的 whole_poisoned 逻辑 —— 低字数密度（图片型/扫描件 PDF）
+                        //   即使 pdfminer 已抽到少量文字，也必须强制全页 OCR。桌面判定 avg_chars < 800 即 whole_poisoned。
+                        //   例：AH+.pdf 为纯图片型，pdfminer 仅抽到 489 字分布在 17 页（avg≈29 < 800），
+                        //   桌面强制全页 OCR 得 2960 字；旧手机逻辑因"已抽到文字"而永不 OCR，只拿 489 字。
+                        //   阈值对齐桌面 800（每页平均字符数远低于此值的 PDF 几乎不可能是纯文本型）。
+                        val avgCharsPerPage = bestChars.toDouble() / maxOf(1, bestPages)
+                        val lowDensity = avgCharsPerPage < 800.0
+                        val needOcr = bestChars < 10 || (!bestTextReliable && bestChars < 50) || looksLikeGarbage || isFailedChinesePdf || lowDensity
+                        Log.d("WordCount", "PDF OCR决策 $dName: bestChars=$bestChars bestFe=$bestFe bestPages=$bestPages avg/p=$avgCharsPerPage lowDensity=$lowDensity needOcr=$needOcr (garbage=$looksLikeGarbage failedCn=$isFailedChinesePdf)")
+                        if (lowDensity) pdfDiag += "\nOCR触发: 低字数密度(avg ${"%.0f".format(avgCharsPerPage)}字/页<800)→按桌面口径强制全页OCR"
 
                         if (!needOcr) {
                             // ★ 文本提取足够好 → 直接使用
@@ -2349,7 +2358,9 @@ private fun addFiles(
                             // v1.3.81: 对"glyph-ID编码垃圾"(ktLooksLikeCidGarbage)使用PRINT模式+2x分辨率渲染
                             // 提升中文 PDF 的 OCR 识别率（普通 DISPLAY 模式对文字偏小的 PDF 渲染质量不足）
                             // v1.3.93: isFailedChinesePdf（Word 导出中文 PDF，CID 解码失败）也用 PRINT 高分辨率
-                            val ocrForPrintMode = looksLikeGarbage || isFailedChinesePdf
+                            // v1.5.65: lowDensity（纯图片/扫描件 PDF）同样用 PRINT 高分辨率，源已是栅格图，
+                            //   提高渲染 DPI 可显著改善 ML Kit OCR 识别率
+                            val ocrForPrintMode = looksLikeGarbage || isFailedChinesePdf || lowDensity
                             val ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = ocrForPrintMode)
 
                             if (ocrRes != null) {
