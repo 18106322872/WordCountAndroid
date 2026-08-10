@@ -472,6 +472,28 @@ object DwgDxfParser {
     }
 
     private fun cjkCountOf(t: String): Int = t.count { it.code in 0x4E00..0x9FFF }
+
+    /**
+     * 出图口径「去重」：按行保序去重（同桌面 ezdxf 出图口径的 seen-set 去重）。
+     * 桌面 v1.6.53 的 _extract_dwg_via_ezdxf_printed 在展开 INSERT 后仍对最终
+     * 文本做全局去重，避免同一串文字（如桩号/轴号表）被逐次插入重复计数导致字数虚高
+     * （巴布亚桩基：不去重 202558 字 → 去重 23980 字，对齐桌面 23960）。
+     * 仅用于 printedText（出图口径分支），不影响标准口径 text（水雾等按翻译计费需逐次计数）。
+     */
+    private fun dedupeText(t: String): String {
+        val seen = LinkedHashSet<String>()
+        val out = StringBuilder()
+        for (line in t.split("\n")) {
+            val s = line.trim()
+            if (s.isEmpty()) continue
+            if (s !in seen) {
+                seen.add(s)
+                if (out.isNotEmpty()) out.append("\n")
+                out.append(s)
+            }
+        }
+        return out.toString()
+    }
     private fun commonCountOf(t: String): Int = t.count { it.code in DwgRawCjkScanner.COMMON_CJK_CHARS }
 
     /**
@@ -517,8 +539,10 @@ object DwgDxfParser {
         // v1.5.59: 文字提取改用 collectDxfTexts（按 INSERT 引用展开 + ATTRIB 实例值 + 取消全局去重）
         val scopes = parseAllSections(lines)
         val text = collectDxfTexts(scopes, encDecision.enc).joinToString("\n")
-        // printedText 与 text 口径一致（桌面 v1.6.53 已统一）
-        val printed = text
+        // v1.5.60: printedText 改为出图口径「去重」版本（对齐桌面 ezdxf 出图口径）。
+        // 仅在高密度触发时才被采用（见 MainActivity 出图口径分支），水雾等常规密度文件
+        // 仍走标准口径 text（逐次计数），不受影响。
+        val printed = dedupeText(text)
 
         val sec = splitSections(lines)
         // ENTITIES 段 == 桌面 doc.modelspace()（LibreDWG 不写组码 67）
@@ -554,8 +578,11 @@ object DwgDxfParser {
         val rawRecovered = if (raw.size <= 25 * 1024 * 1024) recoverCjkFromRawDxf(raw) else ""
         val rawCjk = cjkCountOf(rawRecovered)
         val rawCommon = commonCountOf(rawRecovered)
-        // 仅当结构化结果几乎无中文、且整文件扫描明显更多（去噪）时才采用兜底
-        val finalText = if (structCjk < 50 && rawCjk >= maxOf(structCjk + 30, 50) && rawCommon >= 2) rawRecovered else text
+        // 仅当结构化结果中文偏少、且整文件扫描明显更多（去噪）时才采用兜底。
+        // v1.5.60: 放宽门槛（50→200 / commonRatio 2→5），覆盖「结构化解析几乎抽不到中文、
+        // 但 DXF 原始字节（含 \U+XXXX 转义）能还原出真实中文」的真机场景（水雾电气图-7区
+        // 在部分真机上 collectDxfTexts 仅得极少 CJK，靠整文件转义还原可拿回约 25071 字）。
+        val finalText = if (structCjk < 200 && rawCjk >= maxOf(structCjk + 100, 200) && rawCommon >= 5) rawRecovered else text
         val diag = "enc=${encDecision.enc}(u8=${encDecision.u8Cjk},gb=${encDecision.gbCjk}) " +
                 "structCjk=$structCjk rawCjk=$rawCjk rawCommon=$rawCommon"
         return AnalysisResult(finalText, printed, frames, reason, lastDecodeMode, diag)
