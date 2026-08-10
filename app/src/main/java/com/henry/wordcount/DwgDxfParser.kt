@@ -882,7 +882,7 @@ object DwgDxfParser {
                 for ((c, v) in e.items) {
                     if (c == 70) {
                         try {
-                            if ((v.toDoubleOrNull()?.toInt() ?: 0) and 1) == 1) closed = true
+                            if (((v.toDoubleOrNull()?.toInt() ?: 0) and 1) == 1) closed = true
                         } catch (_: Exception) {}
                     }
                 }
