@@ -2,6 +2,7 @@ package com.henry.wordcount
 
 import java.io.File
 import java.nio.charset.StandardCharsets
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.round
@@ -242,32 +243,101 @@ object DwgDxfParser {
         return DxfSections(entities, blocks)
     }
 
-    // ───────────────────────────── 文字抽取（extract_text_custom） ─────────────────────────────
+    // ───────────────────────────── 文字抽取（端口桌面 v1.6.51 _collect_dxf_texts） ─────────────────────────────
 
-    /** 从单个实体里取文字（端口桌面 extract_text_from_dxf 的实体分支） */
-    private fun grabText(e: DxfEntity, out: MutableList<String>, enc: String) {
-        when (e.type) {
-            "TEXT", "ATTDEF" -> {
+    /**
+     * v1.5.59: 对齐桌面 v1.6.53 `_collect_dxf_texts` 的文字收集策略。
+     *
+     * 历史问题（水雾电气图-7区实测）：
+     *   1) 旧逻辑对全文件文字做全局去重，CAD 中同一串文字在 32 张图上重复出现
+     *      是合法的（标题栏、图例、材料表表头…），全局去重会吃掉 ~72% 中文。
+     *   2) 旧逻辑不按 INSERT 引用次数展开块定义；且只取 ATTDEF 模板、没抓 INSERT
+     *      携带的 ATTRIB 实例值（水雾图 2050 个中文丢失）。
+     *
+     * 新策略：
+     *   · 遍历模型空间 + 各 *Paper_SpaceN 图纸空间布局
+     *   · 每个 INSERT 递归展开其块定义内文字（按引用次数重复计入）
+     *   · 同时收集 INSERT 自带的 ATTRIB 实例值
+     *   · 不再全局去重，按翻译计费口径逐次计数
+     *   · cache 仅用于避免块循环引用死递归，不用于去重
+     */
+
+    /** 从单个实体取一段文字（TEXT/ATTDEF/ATTRIB/MTEXT/MULTILEADER），空或无文字返回空串 */
+    private fun textOf(e: DxfEntity, enc: String): String {
+        return when (e.type) {
+            "TEXT", "ATTDEF", "ATTRIB" -> {
                 val vs = e.values(1)
                 if (vs.isNotEmpty() && vs[0].isNotBlank()) {
-                    val r = decodeDxfEscapes(decodeValue(vs[0].trim(), enc))
-                    if (r.isNotBlank()) out.add(r.trim())
-                }
+                    decodeDxfEscapes(decodeValue(vs[0].trim(), enc)).trim()
+                } else ""
             }
             "MTEXT" -> {
                 val s = (e.values(1) + e.values(3)).joinToString("")
-                val c = cleanMtext(decodeDxfEscapes(decodeValue(s, enc)))
-                if (c.isNotBlank()) out.add(c.trim())
+                cleanMtext(decodeDxfEscapes(decodeValue(s, enc))).trim()
             }
             "MULTILEADER" -> {
                 val s = (e.values(304) + e.values(302)).joinToString("")
-                val r = decodeDxfEscapes(decodeValue(s, enc))
-                if (r.isNotBlank()) out.add(r.trim())
+                decodeDxfEscapes(decodeValue(s, enc)).trim()
             }
+            else -> ""
         }
     }
 
-    /** 去重（保序）后拼成整段文本 */
+    /**
+     * 按『图纸渲染所见』收集 DXF 全部文字段落。
+     * 返回列表（已 trim，非空），调用方用 "\n" join 后计数。
+     */
+    private fun collectDxfTexts(scopes: DxfScopes, enc: String): List<String> {
+        val out = mutableListOf<String>()
+        val blockCache = mutableMapOf<String, List<String>>()
+
+        fun blockTexts(name: String, depth: Int): List<String> {
+            if (depth > 6) return emptyList()
+            blockCache[name]?.let { return it }
+            val res = mutableListOf<String>()
+            blockCache[name] = res // 先占位，防块循环引用死递归
+            val blk = scopes.blocks[name] ?: return res
+            for (be in blk) {
+                if (be.type == "INSERT") {
+                    res.addAll(blockTexts(be.values(2).firstOrNull()?.trim() ?: "", depth + 1))
+                    for (a in be.attribs) {
+                        val s = textOf(a, enc)
+                        if (s.isNotBlank()) res.add(s)
+                    }
+                } else {
+                    val s = textOf(be, enc)
+                    if (s.isNotBlank()) res.add(s)
+                }
+            }
+            blockCache[name] = res
+            return res
+        }
+
+        val spaces = mutableListOf<List<DxfEntity>>()
+        spaces.add(scopes.ms)
+        for ((name, ents) in scopes.blocks) {
+            if (PAPER_BLOCK_NAME.containsMatchIn(name)) spaces.add(ents)
+        }
+
+        for (space in spaces) {
+            for (e in space) {
+                if (e.type == "INSERT") {
+                    val bname = e.values(2).firstOrNull()?.trim() ?: ""
+                    out.addAll(blockTexts(bname, 0))
+                    for (a in e.attribs) {
+                        val s = textOf(a, enc)
+                        if (s.isNotBlank()) out.add(s)
+                    }
+                } else {
+                    val s = textOf(e, enc)
+                    if (s.isNotBlank()) out.add(s)
+                }
+            }
+        }
+        return out
+    }
+
+    /** 去重（保序）后拼成整段文本 —— 仅用于 raw 字节兜底恢复，不再用于主路径 */
     private fun joinUnique(items: List<String>): String {
         val seen = LinkedHashSet<String>()
         val out = mutableListOf<String>()
@@ -277,14 +347,7 @@ object DwgDxfParser {
         return globalRecoverCjk(out.joinToString("\n"))
     }
 
-    /** 全量口径：整个 DXF 文件里所有实体的文字（含未被引用的块定义/图库残留） */
-    private fun extractTextFromEntities(entities: List<DxfEntity>, enc: String): String {
-        val collected = mutableListOf<String>()
-        for (e in entities) grabText(e, collected, enc)
-        return joinUnique(collected)
-    }
-
-    // ─────────────────────── 出图口径（端口桌面 _extract_dwg_via_ezdxf_printed） ───────────────────────
+    // ─────────────────────── 出图口径（现在与 collectDxfTexts 一致） ───────────────────────
 
     /**
      * 一次遍历同时拿到「模型空间实体」与「块定义表」。
@@ -349,37 +412,11 @@ object DwgDxfParser {
     }
 
     /**
-     * 出图口径文字：遍历模型空间 + 各 *Paper_SpaceN 布局，
-     *   INSERT   → 递归展开其块定义（visited 防环）后取里面的文字
-     *   其他实体 → 直接取文字
-     * 未被任何 INSERT 引用的块定义（图库残留 / 不出图的说明模板）不计入。
-     *
-     * 巴布亚桩基实测：全量 59597 字 → 出图 23932 字，桌面基准 23960 字（偏差 -0.1%）。
+     * 出图口径文字：现在复用 collectDxfTexts，与桌面 v1.6.53 `_collect_dxf_texts`
+     * 口径一致（模型空间 + 各 *Paper_SpaceN 布局 + INSERT 递归展开 + ATTRIB 实例值）。
      */
     private fun printedTextOf(scopes: DxfScopes, enc: String): String {
-        val out = mutableListOf<String>()
-
-        fun expand(ins: DxfEntity, visited: MutableSet<String>) {
-            val nm = ins.values(2).firstOrNull()?.trim() ?: ""
-            if (nm.isEmpty() || nm in visited) return
-            visited.add(nm)
-            val blk = scopes.blocks[nm] ?: return
-            for (be in blk) {
-                if (be.type == "INSERT") expand(be, visited) else grabText(be, out, enc)
-            }
-        }
-
-        fun walk(ents: List<DxfEntity>) {
-            for (e in ents) {
-                if (e.type == "INSERT") expand(e, HashSet()) else grabText(e, out, enc)
-            }
-        }
-
-        walk(scopes.ms)
-        for ((name, ents) in scopes.blocks) {
-            if (PAPER_BLOCK_NAME.containsMatchIn(name)) walk(ents)
-        }
-        return joinUnique(out)
+        return collectDxfTexts(scopes, enc).joinToString("\n")
     }
 
     /** 端口桌面 clean_mtext()：去掉 MTEXT 格式码 */
@@ -477,9 +514,11 @@ object DwgDxfParser {
         val encDecision = detectEncoding(lines)
         lastDecodeMode = "global-${encDecision.enc}(u8=${encDecision.u8Cjk},gb=${encDecision.gbCjk})"
         val entities = parseEntities(lines)
-        val text = extractTextFromEntities(entities, encDecision.enc)
-        // v1.5.33：额外算一份「出图口径」文字，交由 MainActivity 在密度异常时采用
-        val printed = try { printedTextOf(parseAllSections(lines), encDecision.enc) } catch (_: Throwable) { "" }
+        // v1.5.59: 文字提取改用 collectDxfTexts（按 INSERT 引用展开 + ATTRIB 实例值 + 取消全局去重）
+        val scopes = parseAllSections(lines)
+        val text = collectDxfTexts(scopes, encDecision.enc).joinToString("\n")
+        // printedText 与 text 口径一致（桌面 v1.6.53 已统一）
+        val printed = text
 
         val sec = splitSections(lines)
         // ENTITIES 段 == 桌面 doc.modelspace()（LibreDWG 不写组码 67）
@@ -491,11 +530,18 @@ object DwgDxfParser {
         val paper = paperCounts.values.count { it > 0 }
         val paperTotalEnts = paperCounts.values.sum()
 
+        // v1.5.59: 优先采用 LWPOLYLINE 闭合图框（CAD 图纸图框通常用 LWPOLYLINE 绘制）
+        //   并补上 INSERT 块引用还原的图框（对齐桌面 _detect_lwpolyline_sheets：
+        //   模型空间 LWPOLYLINE 矩形 + 块恢复矩形 合并后喂给 _count_geom_frames）。
+        //   水雾电气图-7区 仅靠 lwRects 得 17 页，合并 blockFrameRects 后达 32 页。
+        val lwRects = lwpolylineRects(msLines)
+        val bfRects = blockFrameRects(scopes.ms, scopes.blocks)
+        val geoLw = countGeomFrames(lwRects + bfRects)
         val rects = rawClosedPolylines(msLines)
         val geo = countGeomFrames(rects)
         val sheets = distinctSheetNumbers(entities)
         val det = countDetailSheets(entities, msLines)
-        val (frames, reason) = pickFrames(geo, paper, sheets, det, entities.isNotEmpty(), msEnts, paperTotalEnts)
+        val (frames, reason) = pickFrames(geoLw, geo, paper, sheets, det, entities.isNotEmpty(), msEnts, paperTotalEnts)
 
         // ── v1.5.40: 整文件 CJK 兜底恢复 ─────────────────────────────────────
         // 真机上交叉编译的 libdwg2dxf.so 可能把中文写成 GBK 字节 / \U+XXXX 转义 /
@@ -613,16 +659,19 @@ object DwgDxfParser {
     }
 
 
-    /** 端口桌面 count_cad_frames 的判定优先级（逐行对齐 wordcount.py:2461-2498） */
-    private fun pickFrames(geo: Int, paper: Int, sheets: Int, det: Int, hasEntities: Boolean,
-                          msEnts: Int, paperTotalEnts: Int): Pair<Int?, String?> {
+    /** 端口桌面 count_cad_frames 的判定优先级 */
+    private fun pickFrames(geoLw: Int, geo: Int, paper: Int, sheets: Int, det: Int,
+                          hasEntities: Boolean, msEnts: Int, paperTotalEnts: Int): Pair<Int?, String?> {
         // 布局稀疏 → 改用几何图框（dwg2dxf 常把所有图挤进 Model 空间）
-        if (geo >= 3 && geo > paper + 1 && msEnts > 1000 && paperTotalEnts <= paper * 8) {
-            return Pair(geo, "布局稀疏·改用几何图框估算")
+        val geoBest = if (geoLw >= 1) geoLw else geo
+        if (geoBest >= 3 && geoBest > paper + 1 && msEnts > 1000 && paperTotalEnts <= paper * 8) {
+            val reason = if (geoLw >= 1) "布局稀疏·改用LWPOLYLINE图框估算" else "布局稀疏·改用几何图框估算"
+            return Pair(geoBest, reason)
         }
         if (paper >= 1) return Pair(paper, "布局计数")
         if (det >= 1 && det >= sheets) return Pair(det, "详图聚类估算")
         if (sheets >= 1) return Pair(sheets, "标题块图号")
+        if (geoLw >= 1) return Pair(geoLw, "LWPOLYLINE图框估算")
         if (geo >= 1) return Pair(geo, "几何图框估算")
         if (det >= 1) return Pair(det, "详图聚类估算")
         if (hasEntities) return Pair(1, "有图元·按1页估")
@@ -685,6 +734,63 @@ object DwgDxfParser {
     }
 
     // ── 几何图框：LWPOLYLINE/POLYLINE 闭合多段线外接框（端口 _raw_closed_polylines） ──
+
+    /**
+     * v1.5.59: 单独统计 LWPOLYLINE 闭合矩形（端口桌面 _detect_lwpolyline_sheets）。
+     * CAD 中图纸图框通常绘制为闭合 LWPOLYLINE；优先于 LINE 重建图框。
+     */
+    private fun lwpolylineRects(lines: List<String>): List<Rect> {
+        val rects = mutableListOf<Rect>()
+        val n = lines.size
+        var i = 0
+        while (i < n - 1) {
+            val code = lines[i].trim()
+            val `val` = if (i + 1 < n) lines[i + 1].trim() else ""
+            if (code == "0" && `val` == "LWPOLYLINE") {
+                val pts = mutableListOf<Pair<Double, Double>>()
+                var closed = false
+                var j = i + 2
+                // v1.5.59 修复：实体体内必须按「组码行+值行」成对步进（每次 j+=2）。
+                // 旧代码在 10 分支内 j+=2、末尾又 j+=1，导致读完顶点后错位，
+                // 把 layer "0"（组码8 的值"0"）误判为新实体而提前 break，
+                // 闭合标志/顶点全丢 → 漏掉大图框（水雾图仅 17 页而非 32）。
+                while (j < n - 1) {
+                    val c2 = lines[j].trim()
+                    val v2 = if (j + 1 < n) lines[j + 1].trim() else ""
+                    if (c2 == "0") break
+                    if (c2 == "70") {
+                        if (((v2.toDoubleOrNull()?.toInt() ?: 0) and 1) == 1) closed = true
+                        j += 2
+                    } else if (c2 == "10") {
+                        val x = v2.toDoubleOrNull()
+                        if (x != null && j + 3 < n && lines[j + 2].trim() == "20") {
+                            val y = lines[j + 3].trim().toDoubleOrNull()
+                            if (y != null) pts.add(x to y)
+                        }
+                        j += 2
+                    } else {
+                        j += 2
+                    }
+                }
+                if (closed && pts.size >= 4) {
+                    var minx = Double.MAX_VALUE; var miny = Double.MAX_VALUE
+                    var maxx = -Double.MAX_VALUE; var maxy = -Double.MAX_VALUE
+                    for (p in pts) {
+                        if (p.first < minx) minx = p.first
+                        if (p.second < miny) miny = p.second
+                        if (p.first > maxx) maxx = p.first
+                        if (p.second > maxy) maxy = p.second
+                    }
+                    rects.add(Rect(minx, miny, maxx, maxy))
+                }
+                i = j
+            } else {
+                i += 1
+            }
+        }
+        return rects
+    }
+
     private fun rawClosedPolylines(lines: List<String>): List<Rect> {
         val n = lines.size
         val rects = mutableListOf<Rect>()
@@ -698,6 +804,8 @@ object DwgDxfParser {
                 var closed = false
                 var inVertex = false
                 var j = i + 2
+                // v1.5.59 修复：实体体内同样按「组码行+值行」成对步进（每次 j+=2），
+                // 与 lwpolylineRects 一致，避免错位丢顶点。
                 while (j < n - 1) {
                     val c2 = lines[j].trim()
                     val v2 = if (j + 1 < n) lines[j + 1].trim() else ""
@@ -721,7 +829,7 @@ object DwgDxfParser {
                             val x = v2.toDoubleOrNull()
                             if (x != null && j + 3 < n && lines[j + 2].trim() == "20") {
                                 val y = lines[j + 3].trim().toDoubleOrNull()
-                                if (y != null) { pts.add(x to y); j += 2 }
+                                if (y != null) pts.add(x to y)
                             }
                         }
                     } else { // POLYLINE
@@ -732,12 +840,12 @@ object DwgDxfParser {
                                 val x = v2.toDoubleOrNull()
                                 if (x != null && j + 3 < n && lines[j + 2].trim() == "20") {
                                     val y = lines[j + 3].trim().toDoubleOrNull()
-                                    if (y != null) { pts.add(x to y); j += 2 }
+                                    if (y != null) pts.add(x to y)
                                 }
                             }
                         }
                     }
-                    j += 1
+                    j += 2
                 }
                 if (closed && pts.size >= 4) {
                     var minx = Double.MAX_VALUE; var miny = Double.MAX_VALUE
@@ -758,7 +866,120 @@ object DwgDxfParser {
         return rects
     }
 
-    /** 端口桌面 _count_geom_frames：过滤过小/过扁、去整体外框、取互不包含最大矩形 */
+    /**
+     * v1.5.59: 图框块引用还原（端口桌面 _block_frame_rects / 已验证 Python 端口）。
+     * 遍历模型空间 INSERT，递归取块内最大闭合 LWPOLYLINE 外框（须符合 √2 图纸比例），
+     * 按 INSERT 缩放/插入点变换到世界坐标，补回『图框以块引用存放』时漏计的图纸页数。
+     * 水雾电气图-7区 仅靠 lwpolylineRects 得 17 页，补上本函数后达 32 页，与桌面对齐。
+     */
+    private fun blockFrameRects(ms: List<DxfEntity>, blocks: LinkedHashMap<String, MutableList<DxfEntity>>): List<Rect> {
+        val cache = LinkedHashMap<String, Rect?>()
+        /** 从已解析的 DxfEntity（须为 LWPOLYLINE）求轴对齐外框 */
+        fun lwRectOfEntity(e: DxfEntity): Rect? {
+            if (e.type != "LWPOLYLINE") return null
+            try {
+                var closed = false
+                for ((c, v) in e.items) {
+                    if (c == 70) {
+                        try {
+                            if ((v.toDoubleOrNull()?.toInt() ?: 0) and 1) == 1) closed = true
+                        } catch (_: Exception) {}
+                    }
+                }
+                if (!closed) return null
+                val pts = mutableListOf<Pair<Double, Double>>()
+                var i = 0
+                while (i < e.items.size - 1) {
+                    val c = e.items[i].first
+                    val v = e.items[i].second
+                    if (c == 10) {
+                        val x = v.toDoubleOrNull()
+                        if (x != null && i + 1 < e.items.size && e.items[i + 1].first == 20) {
+                            val y = e.items[i + 1].second.toDoubleOrNull()
+                            if (y != null) pts.add(x to y)
+                        }
+                    }
+                    i += 1
+                }
+                if (pts.size < 4) return null
+                var minx = Double.MAX_VALUE; var miny = Double.MAX_VALUE
+                var maxx = -Double.MAX_VALUE; var maxy = -Double.MAX_VALUE
+                for (p in pts) {
+                    if (p.first < minx) minx = p.first
+                    if (p.second < miny) miny = p.second
+                    if (p.first > maxx) maxx = p.first
+                    if (p.second > maxy) maxy = p.second
+                }
+                return Rect(minx, miny, maxx, maxy)
+            } catch (_: Exception) {
+                return null
+            }
+        }
+        /** 按 INSERT 的 xscale/yscale/insert 把块内矩形变换到世界坐标 */
+        fun xform(r: Rect, ins: DxfEntity): Rect? {
+            try {
+                val sx = ins.values(41).firstOrNull()?.toDoubleOrNull() ?: 1.0
+                val sy = ins.values(42).firstOrNull()?.toDoubleOrNull() ?: 1.0
+                val ix = ins.values(10).firstOrNull()?.toDoubleOrNull() ?: 0.0
+                val iy = ins.values(20).firstOrNull()?.toDoubleOrNull() ?: 0.0
+                val x1 = r.minx * sx + ix; val x2 = r.maxx * sx + ix
+                val y1 = r.miny * sy + iy; val y2 = r.maxy * sy + iy
+                return Rect(min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+            } catch (_: Exception) {
+                return null
+            }
+        }
+        fun blockMaxRect(name: String, depth: Int): Rect? {
+            if (depth > 4) return null
+            if (cache.containsKey(name)) return cache[name]
+            cache[name] = null  // 占位：防止块互相引用造成的无限递归
+            val blk = blocks[name] ?: emptyList()
+            var best: Rect? = null
+            var bestArea = 0.0
+            for (e in blk) {
+                var r = lwRectOfEntity(e)
+                if (r == null && e.type == "INSERT") {
+                    val subName = e.values(2).firstOrNull()?.trim() ?: ""
+                    val sub = blockMaxRect(subName, depth + 1)
+                    r = if (sub != null) xform(sub, e) else null
+                }
+                if (r != null) {
+                    val a = (r.maxx - r.minx) * (r.maxy - r.miny)
+                    if (a > bestArea) { bestArea = a; best = r }
+                }
+            }
+            cache[name] = best
+            return best
+        }
+        val out = mutableListOf<Rect>()
+        for (e in ms) {
+            if (e.type != "INSERT") continue
+            val rot = try { e.values(50).firstOrNull()?.toDoubleOrNull() ?: 0.0 } catch (_: Exception) { 0.0 }
+            // 跳过旋转块（旋转后轴对齐外框失真，且 Python 端口验证旋转块不是图框）
+            if (abs(rot) > 1e-6 && abs(abs(rot) - 360) > 1e-6) continue
+            val name = e.values(2).firstOrNull()?.trim() ?: ""
+            val baseR = blockMaxRect(name, 0) ?: continue
+            val r = xform(baseR, e) ?: continue
+            val w = r.maxx - r.minx
+            val h = r.maxy - r.miny
+            if (w <= 0 || h <= 0) continue
+            val ar = max(w, h) / min(w, h)
+            if (ar < 1.30 || ar > 1.55) continue  // 仅保留 √2 图纸比例
+            out.add(r)
+        }
+        return out
+    }
+
+    /**
+     * 端口桌面 v1.6.50 _count_geom_frames：过滤过小/过扁、去整体外框、
+     * 取互不包含最大矩形，并支持『拼板外框展开』。
+     *
+     * v1.5.59 关键修复（水雾电气图-7区 17→32）：
+     *   1) 折叠几乎重合的重复矩形；
+     *   2) 若某框直接包含 >=2 个尺寸相近且互不重叠的子框，判定为拼板容器，
+     *      用子框替代它；
+     *   3) 发生容器展开时跳过面积断层裁剪 + 1% 阈值，避免混合比例尺拼板被误杀。
+     */
     private fun countGeomFrames(rects: List<Rect>, minSide: Int = 150, minArea: Int = 40000, maxAr: Int = 10): Int {
         val cand = mutableListOf<RectArea>()
         for (r in rects) {
@@ -776,26 +997,85 @@ object DwgDxfParser {
         // 去掉单一整体外框（最大者明显大于次大者）
         if (cand.size >= 2 && cand[0].area > cand[1].area * 4) cand.removeAt(0)
         if (cand.isEmpty()) return 0
-        // 取互不包含的最大矩形（过滤框内小框）
-        val maximal = mutableListOf<RectArea>()
+
+        // 折叠几乎重合的重复矩形
+        val dedup = mutableListOf<RectArea>()
         for (r in cand) {
+            if (dedup.any { contains(it.rect, r.rect) && contains(r.rect, it.rect) }) continue
+            dedup.add(r)
+        }
+        val cand2 = dedup.toMutableList()
+        cand2.sortByDescending { it.area }
+
+        // 取互不包含的最大矩形
+        val maximal = mutableListOf<RectArea>()
+        for (r in cand2) {
             if (maximal.any { contains(it.rect, r.rect) }) continue
             maximal.add(r)
         }
         if (maximal.isEmpty()) return 0
-        maximal.sortByDescending { it.area }
-        // 按面积自然聚类：最大断层以上视为真正图框
-        if (maximal.size >= 2) {
-            val ratios = (0 until maximal.size - 1).map { maximal[it].area / max(maximal[it + 1].area, 1.0) }
-            val maxGapIdx = ratios.indices.maxByOrNull { ratios[it] } ?: 0
-            if (ratios[maxGapIdx] >= 5) {
-                for (k in maximal.size - 1 downTo maxGapIdx + 1) maximal.removeAt(k)
+
+        // 容器展开：拼板外框 → 内部并排真实图框
+        fun strictIn(inner: Rect, outer: Rect): Boolean =
+            contains(outer, inner) && !contains(inner, outer)
+        fun overlap(p: Rect, q: Rect): Boolean =
+            !(p.maxx <= q.minx || q.maxx <= p.minx || p.maxy <= q.miny || q.maxy <= p.miny)
+
+        val expanded = mutableListOf<RectArea>()
+        var didExpand = false
+        for (r in maximal) {
+            val kids = cand2.filter { strictIn(it.rect, r.rect) }
+            val direct = kids.filter { k -> kids.none { m -> m !== k && strictIn(k.rect, m.rect) } }
+            var ok = direct.size >= 2
+            if (ok) {
+                val areas = direct.map { it.area }
+                if (areas.maxOrNull()!! > 1.5 * areas.minOrNull()!!) ok = false
+            }
+            if (ok) {
+                for (i in direct.indices) {
+                    for (j in i + 1 until direct.size) {
+                        if (overlap(direct[i].rect, direct[j].rect)) {
+                            ok = false
+                            break
+                        }
+                    }
+                    if (!ok) break
+                }
+            }
+            if (ok) {
+                expanded.addAll(direct)
+                didExpand = true
+            } else {
+                expanded.add(r)
             }
         }
-        val maxArea = maximal.maxByOrNull { it.area }?.area ?: 0.0
-        val thr = max(minArea.toDouble(), maxArea * 0.01)
-        val filtered = maximal.filter { it.area >= thr }
-        return filtered.size
+
+        // 去重（坐标精度 3 位）
+        val seen = LinkedHashSet<String>()
+        val maximal2 = mutableListOf<RectArea>()
+        for (r in expanded) {
+            val key = "%.3f,%.3f,%.3f,%.3f".format(r.rect.minx, r.rect.miny, r.rect.maxx, r.rect.maxy)
+            if (key in seen) continue
+            seen.add(key)
+            maximal2.add(r)
+        }
+        if (maximal2.isEmpty()) return 0
+        maximal2.sortByDescending { it.area }
+
+        if (!didExpand) {
+            // 未展开时沿用旧逻辑：面积断层裁剪 + 1% 阈值
+            if (maximal2.size >= 2) {
+                val ratios = (0 until maximal2.size - 1).map { maximal2[it].area / max(maximal2[it + 1].area, 1.0) }
+                val maxGapIdx = ratios.indices.maxByOrNull { ratios[it] } ?: 0
+                if (ratios[maxGapIdx] >= 5) {
+                    for (k in maximal2.size - 1 downTo maxGapIdx + 1) maximal2.removeAt(k)
+                }
+            }
+            val maxArea = maximal2.maxByOrNull { it.area }?.area ?: 0.0
+            val thr = max(minArea.toDouble(), maxArea * 0.01)
+            return maximal2.count { it.area >= thr }
+        }
+        return maximal2.size
     }
 
     private fun contains(big: Rect, o: Rect): Boolean {
