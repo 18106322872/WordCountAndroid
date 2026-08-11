@@ -993,7 +993,7 @@ private fun isCjkChar(cp: Int): Boolean {
 }
 
 /** 归一化行键：去空白、去标点、小写，用于软去重 */
-private fun normKey(s: String): String =
+internal fun normKey(s: String): String =
     s.lowercase().replace(Regex("[\\s\\p{P}]+"), "")
 
 /** 判断字符串是否像真实文字（非 CAD 元数据/坐标/二进制垃圾）*/

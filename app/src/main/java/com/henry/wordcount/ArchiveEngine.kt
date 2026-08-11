@@ -2,27 +2,23 @@ package com.henry.wordcount
 
 import android.content.Context
 import android.util.Log
+import be.stef.rar.Unrar5j
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
 import org.apache.commons.compress.archivers.sevenz.SevenZFile
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
-import com.github.junrar.Junrar
 import java.io.ByteArrayInputStream
 import java.io.File
-import java.io.FileOutputStream
+import java.io.InputStream
 import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * 压缩包统计层（ZIP/7Z/TAR/GZ 基于 Apache Commons Compress；RAR4 基于 junrar）。
+ * 压缩包统计层（ZIP/7Z/TAR/GZ 基于 Apache Commons Compress；RAR 基于 unrar5j，支持 RAR4/RAR5）。
  *
- * 支持：ZIP / RAR4 / 7Z / TAR / GZ / TGZ
- * 对每个内层受支持文件，复用既有引擎抽取文本并统计字数。
+ * 支持：ZIP / RAR(4/5) / 7Z / TAR / GZ / TGZ
+ * 对每个内层受支持文件，复用既有引擎抽取文本并统计字数，统计口径与单独打开文件保持一致。
  */
 object ArchiveEngine {
-
-    /** v1.3.95：压缩包内层图片 OCR 全局配额（每次 extract 重置），防止大压缩包触发大量 OCR 卡死。 */
-    private val ocrBudget = AtomicInteger(0)
 
     data class ArchiveResult(
         val inner: List<InnerResult>,
@@ -35,7 +31,7 @@ object ArchiveEngine {
      */
     fun isArchive(file: File): Boolean {
         return try {
-            val header = file.inputStream().use { it.readNBytes(8) }
+            val header = file.inputStream().use { readNBytesCompat(it, 8) }
             when {
                 header.size >= 4 && header[0] == 0x50.toByte() && header[1] == 0x4B.toByte()
                         && header[2] == 0x03.toByte() && header[3] == 0x04.toByte() -> true // PK\x03\x04 = ZIP
@@ -43,7 +39,7 @@ object ArchiveEngine {
                         && header[2] == 0x72.toByte() && header[3] == 0x21.toByte()
                         && header[4] == 0x1A.toByte() && header[5] == 0x07.toByte() -> true // Rar! = RAR
                 header.size >= 2 && (header[0].toInt() and 0xFF) == 0x1F && (header[1].toInt() and 0xFF) == 0x8B -> true // GZ
-                header.size >= 262 && String(header.copyOfRange(257, 262), StandardCharsets.ISO_8859_1) == "ustar" -> true // TAR ustar
+                isTarMagic(file) -> true // TAR ustar
                 header.size >= 6 && header[0] == 0x37.toByte() && header[1] == 0x7A.toByte()
                         && header[2] == 0xBC.toByte() && header[3] == 0xAF.toByte()
                         && header[4] == 0x27.toByte() && header[5] == 0x1C.toByte() -> true // 7z
@@ -53,10 +49,8 @@ object ArchiveEngine {
     }
 
     /** cacheDir 用于解包内层文件到临时文件。返回 null 表示不支持或解析失败。
-     *  v1.3.95: 新增 context 参数——用于内层图片的 OCR 统计（用户清单要求计入压缩包内扫描图文字）。 */
+     *  context 参数用于内层图片/PDF 的 OCR 统计。 */
     fun extract(file: File, cacheDir: File, context: Context? = null): ArchiveResult? {
-        // 内层图片 OCR 全局配额（防止大压缩包触发大量 OCR 导致卡死/OOM）
-        ocrBudget.set(5)
         return try {
             val ext = file.extension.lowercase()
             when {
@@ -74,6 +68,7 @@ object ArchiveEngine {
                 }
             }
         } catch (e: Throwable) {
+            Log.w("WordCount", "ArchiveEngine.extract 异常 ${file.name}: ${e.message}")
             null
         }
     }
@@ -87,18 +82,18 @@ object ArchiveEngine {
     // ──────────────────── Magic bytes helpers ────────────────────
 
     private fun isZipMagic(f: File): Boolean = try {
-        val h = f.inputStream().use { it.readNBytes(4) }
+        val h = f.inputStream().use { readNBytesCompat(it, 4) }
         h.size >= 4 && h[0] == 0x50.toByte() && h[1] == 0x4B.toByte() && h[2] == 0x03.toByte() && h[3] == 0x04.toByte()
     } catch (_: Throwable) { false }
 
     private fun isRarMagic(f: File): Boolean = try {
-        val h = f.inputStream().use { it.readNBytes(6) }
+        val h = f.inputStream().use { readNBytesCompat(it, 6) }
         h.size >= 6 && h[0] == 0x52.toByte() && h[1] == 0x61.toByte() && h[2] == 0x72.toByte()
                 && h[3] == 0x21.toByte() && h[4] == 0x1A.toByte() && h[5] == 0x07.toByte()
     } catch (_: Throwable) { false }
 
     private fun isGzipMagic(f: File): Boolean = try {
-        val h = f.inputStream().use { it.readNBytes(2) }
+        val h = f.inputStream().use { readNBytesCompat(it, 2) }
         h.size >= 2 && (h[0].toInt() and 0xFF) == 0x1F && (h[1].toInt() and 0xFF) == 0x8B
     } catch (_: Throwable) { false }
 
@@ -107,59 +102,65 @@ object ArchiveEngine {
         bytes.size > 262 && String(bytes.copyOfRange(257, 262), StandardCharsets.ISO_8859_1) == "ustar"
     } catch (_: Throwable) { false }
 
+    // ──────────────────── readNBytes 兼容层 ────────────────────
+    /** Android 低版本(API<33) InputStream 没有 readNBytes，用循环读取兜底。 */
+    private fun readNBytesCompat(input: InputStream, n: Int): ByteArray {
+        val result = ByteArray(n)
+        var read = 0
+        while (read < n) {
+            val r = input.read(result, read, n - read)
+            if (r < 0) break
+            read += r
+        }
+        return result.copyOf(read)
+    }
+
     // ──────────────────── ZIP (commons-compress) ────────────────────
     private fun fromZipCommonsCompress(file: File, cacheDir: File, context: Context?): ArchiveResult {
         val inner = mutableListOf<InnerResult>()
-        file.inputStream().use { fis ->
-            val zis = org.apache.commons.compress.archivers.zip.ZipFile(file)
-            try {
-                val entries = zis.entries
-                while (entries.hasMoreElements()) {
-                    val entry = entries.nextElement() as ZipArchiveEntry
-                    if (entry.isDirectory) continue
-                    val bytes = zis.getInputStream(entry)?.readBytes() ?: continue
-                    processEntry(entry.name, bytes, cacheDir, inner, context)
-                    // 嵌套 zip
-                    if (entry.name.lowercase().endsWith(".zip")) {
-                        val nestedTmp = writeTemp(bytes, entry.name, cacheDir)
-                        if (nestedTmp != null) {
-                            val nestedRes = extract(nestedTmp, cacheDir, context)
-                            if (nestedRes != null) inner.addAll(nestedRes.inner)
-                            nestedTmp.delete()
-                        }
+        org.apache.commons.compress.archivers.zip.ZipFile(file).use { zis ->
+            val entries = zis.entries
+            while (entries.hasMoreElements()) {
+                val entry = entries.nextElement() as ZipArchiveEntry
+                if (entry.isDirectory) continue
+                val bytes = zis.getInputStream(entry)?.readBytes() ?: continue
+                processEntry(entry.name, bytes, cacheDir, inner, context)
+                // 嵌套 zip
+                if (entry.name.lowercase().endsWith(".zip")) {
+                    val nestedTmp = writeTemp(bytes, entry.name, cacheDir)
+                    if (nestedTmp != null) {
+                        val nestedRes = extract(nestedTmp, cacheDir, context)
+                        if (nestedRes != null) inner.addAll(nestedRes.inner)
+                        nestedTmp.delete()
                     }
                 }
-            } finally { runCatching { zis.close() } }
+            }
         }
         return aggregate(inner)
     }
 
-    // ──────────────────── RAR4 (junrar，纯 Java RAR 解压库) ────────────────────
+    // ──────────────────── RAR (unrar5j，支持 RAR4/RAR5) ────────────────────
     private fun fromRar(file: File, cacheDir: File, context: Context?): ArchiveResult? {
         val inner = mutableListOf<InnerResult>()
         val dest = File(cacheDir, "rar_${System.currentTimeMillis()}")
         dest.mkdirs()
-        try {
-            // v1.0.20: 检测 RAR5（junrar 仅支持 RAR4）
-            val header = file.inputStream().use { it.readNBytes(8) }
-            if (header.size >= 8 && header[0] == 0x52.toByte() && header[1] == 0x61.toByte()
-                && header[2] == 0x72.toByte() && header[3] == 0x21.toByte()
-                && header[4] == 0x1A.toByte() && header[5] == 0x07.toByte()
-                && (header[6].toInt() and 0x01) == 0x01) {
-                // 第 7 字节的 bit 0 = 1 表示 RAR5
-                return null // 让调用方显示"RAR5 不支持"提示
+        return try {
+            val result = Unrar5j.extract(file.absolutePath, dest.absolutePath, null)
+            if (result == null || (!result.isSuccess && result.successCount == 0)) {
+                Log.w("WordCount", "RAR 解压无成功文件: ${file.name} total=${result?.totalFiles ?: -1} success=${result?.successCount ?: -1}")
+                null
+            } else {
+                dest.walkTopDown().filter { it.isFile }.forEach { f ->
+                    try { processEntry(f.name, f.readBytes(), cacheDir, inner, context) } catch (_: Throwable) {}
+                }
+                aggregate(inner)
             }
-
-            Junrar.extract(file.absolutePath, dest.absolutePath)
-            dest.walkTopDown().filter { it.isFile }.forEach { f ->
-                try { processEntry(f.name, f.readBytes(), cacheDir, inner, context) } catch (_: Throwable) {}
-            }
-        } catch (_: Throwable) {
-            // RAR5 / 加密 / 损坏等情况会抛异常
+        } catch (e: Throwable) {
+            Log.w("WordCount", "RAR 解析异常 ${file.name}: ${e.javaClass.simpleName}: ${e.message}")
+            null
         } finally {
             runCatching { dest.deleteRecursively() }
         }
-        return aggregate(inner)
     }
 
     // ──────────────────── GZ / TGZ ────────────────────
@@ -265,22 +266,21 @@ object ArchiveEngine {
 
     private fun processEntry(name: String, bytes: ByteArray, cacheDir: File, inner: MutableList<InnerResult>, context: Context? = null) {
         val ext = name.substringAfterLast('.', "").lowercase()
-        // 图片：v1.3.95 改为尝试 OCR 统计（用户清单要求计入压缩包内扫描图文字）。
-        // 仅在仍有 OCR 配额且图片字节较小（<2MB）时才 OCR，避免大压缩包卡死/OOM。
+
+        // 图片：与单独打开图片使用同一 OCR 引擎，不再设 5 张全局配额（保证结果一致）。
+        // 仅过滤过大图片（>5MB）防止 OOM。
         val imageExts = setOf("png", "jpg", "jpeg", "bmp", "gif", "webp", "tif", "tiff")
         if (ext in imageExts) {
-            if (context != null && ocrBudget.get() > 0 && bytes.size <= 2 * 1024 * 1024) {
-                ocrBudget.decrementAndGet()
+            if (context != null && bytes.size <= 5 * 1024 * 1024) {
                 val tmp = writeTemp(bytes, name, cacheDir) ?: return
                 try {
                     val ocrText = runCatching { OcrEngine.recognize(context, tmp) }.getOrNull()
                     if (!ocrText.isNullOrBlank()) {
                         val stats = countTextKotlin(ocrText)
-                        val pages = 1
                         inner.add(InnerResult(
                             name = name.substringAfterLast('/'),
                             words = stats.first, fe = stats.second, nc = stats.third,
-                            chars = stats.fourth, pages = pages
+                            chars = stats.fourth, pages = 1
                         ))
                         Log.d("WordCount", "压缩包内层图片 OCR: $name → ${stats.first} 词")
                     }
@@ -290,59 +290,140 @@ object ArchiveEngine {
             }
             return
         }
+
         // 跳过其他已知不可处理的二进制类型
         if (ext in SKIP_EXTS) return
+
         val tmp = writeTemp(bytes, name, cacheDir) ?: return
         try {
-            val ooxml = if (ext in SUPPORTED_OOXML) OoXmlEngine.extract(tmp) else null
-            val pdf = if (ext == "pdf") PdfExtractor.extract(tmp) else null
-            val text: String? = ooxml?.text ?: pdf?.text ?: when {
-                ext in SUPPORTED_OLD_OFFICE -> runCatching { OldOfficeEngine.extractText(tmp) }.getOrNull()
-                ext == "dwg" -> runCatching { DwgEngine.extractTextSafe(tmp) }.getOrNull()
-                // 已知文本类：UTF-8 优先，不可读则尝试 GBK；均不可读（实为二进制）则跳过
-                // v1.0.20: 归档内层文件用更宽松的可读性判定（归档上下文下假阳性比假阴性危害小）
-                ext in SUPPORTED_TEXT || ext.isBlank() -> runCatching {
-                    val t = String(bytes, StandardCharsets.UTF_8)
-                    when {
-                        isReadableText(t, lenient = true) -> t
-                        else -> {
-                            val g = String(bytes, Charset.forName("GBK"))
-                            if (isReadableText(g, lenient = true)) g else null
-                        }
-                    }
-                }.getOrNull()
-                // 未知扩展名：依次尝试 UTF-8 / GBK，不再先用 ISO-8859-1 判二进制
-                // （ISO-8859-1 模式会把含少量非 ASCII 字节的文本误判为二进制）
-                else -> runCatching {
-                    val t = String(bytes, StandardCharsets.UTF_8)
-                    when {
-                        isReadableText(t, lenient = true) -> t
-                        else -> {
-                            val g = String(bytes, Charset.forName("GBK"))
-                            if (isReadableText(g, lenient = true)) g else null
-                        }
-                    }
-                }.getOrNull()
+            when {
+                ext in SUPPORTED_OOXML -> processOoXmlEntry(name, tmp, inner)
+                ext == "pdf" -> processPdfEntry(name, tmp, cacheDir, inner, context)
+                ext in SUPPORTED_OLD_OFFICE -> {
+                    val text = runCatching { OldOfficeEngine.extractText(tmp) }.getOrNull()
+                    addTextResult(name, text, inner)
+                }
+                ext == "dwg" -> {
+                    val text = runCatching { DwgEngine.extractTextSafe(tmp) }.getOrNull()
+                    addTextResult(name, text, inner, pages = 1)
+                }
+                ext in SUPPORTED_TEXT || ext.isBlank() -> {
+                    val text = decodeTextLenient(bytes)
+                    addTextResult(name, text, inner)
+                }
+                else -> {
+                    val text = decodeTextLenient(bytes)
+                    addTextResult(name, text, inner)
+                }
             }
-            if (text.isNullOrBlank()) return
-            val stats = countTextKotlin(text)
-            // DWG 是一张图纸，固定 1 页；其余按类型取页数，文本类兜底按字符量估算
-            val pages = when {
-                ooxml != null -> ooxml.pages
-                pdf != null -> pdf.pages
-                ext == "dwg" -> 1
-                else -> estimatePages(stats.fourth)
-            }
-            inner.add(
-                InnerResult(
-                    name = name.substringAfterLast('/'),
-                    words = stats.first, fe = stats.second, nc = stats.third,
-                    chars = stats.fourth, pages = pages
-                )
-            )
         } finally {
             runCatching { tmp.delete() }
         }
+    }
+
+    /** 统计文本并加入 inner，统一兜底处理空/空白。 */
+    private fun addTextResult(name: String, text: String?, inner: MutableList<InnerResult>, pages: Int? = null) {
+        if (text.isNullOrBlank()) return
+        val stats = countTextKotlin(text)
+        inner.add(InnerResult(
+            name = name.substringAfterLast('/'),
+            words = stats.first, fe = stats.second, nc = stats.third,
+            chars = stats.fourth, pages = pages ?: estimatePages(stats.fourth)
+        ))
+    }
+
+    /** OOXML：与 MainActivity 同样使用 metaWords 安全网，保证和单独打开结果一致。 */
+    private fun processOoXmlEntry(name: String, tmp: File, inner: MutableList<InnerResult>) {
+        val res = OoXmlEngine.extract(tmp) ?: return
+        val stats = countTextKotlin(res.text)
+        val rawWords = stats.first
+        val rawFe = stats.second
+        val rawNc = stats.third
+        val rawChars = stats.fourth
+
+        val outWords: Int
+        val outFe: Int
+        val outNc: Int
+        val outChars: Int
+        if (res.metaWords > 0 && !res.hasVml) {
+            outWords = res.metaWords
+            val ratio = if (rawWords > 0) rawWords.toDouble() / res.metaWords else 1.0
+            outFe = (rawFe / ratio).toInt().coerceAtLeast(0)
+            outNc = (rawNc / ratio).toInt().coerceAtLeast(0)
+            outChars = (rawChars / ratio).toInt().coerceAtLeast(0)
+        } else if (res.metaWords > 0 && rawWords > (res.metaWords * 1.5).toInt()) {
+            outWords = res.metaWords
+            val ratio = rawWords.toDouble() / res.metaWords
+            outFe = (rawFe / ratio).toInt().coerceAtLeast(0)
+            outNc = (rawNc / ratio).toInt().coerceAtLeast(0)
+            outChars = (rawChars / ratio).toInt().coerceAtLeast(0)
+        } else {
+            outWords = rawWords
+            outFe = rawFe
+            outNc = rawNc
+            outChars = rawChars
+        }
+        val outPages = if (res.metaPages > 0) res.metaPages else res.pages
+        inner.add(InnerResult(
+            name = name.substringAfterLast('/'),
+            words = outWords, fe = outFe, nc = outNc,
+            chars = outChars, pages = outPages
+        ))
+    }
+
+    /** PDF：与 MainActivity 同样的 OCR fallback，扫描/PDF 在压缩包内也能被识别。 */
+    private fun processPdfEntry(name: String, tmp: File, cacheDir: File, inner: MutableList<InnerResult>, context: Context?) {
+        val ktRes = PdfExtractor.extract(tmp)
+        val ktStats = if (ktRes != null) countTextKotlin(ktRes.text) else Quadruple(0, 0, 0, 0)
+
+        val bestChars = ktStats.fourth
+        val bestWords = ktStats.first
+        val bestFe = ktStats.second
+        val realPages = ktRes?.pages ?: 1
+        val avgCharsPerPage = bestChars.toDouble() / maxOf(1, realPages)
+        val avgWordsPerPage = bestWords.toDouble() / maxOf(1, realPages)
+        val lowDensity = avgCharsPerPage < 800.0 || avgWordsPerPage < 200.0
+        val isFailedChinesePdf = bestChars > 20 && bestFe == 0 && bestChars < 500
+        val needOcr = bestChars < 10 || lowDensity || isFailedChinesePdf
+
+        var finalText: String? = ktRes?.text
+        var finalPages = if (realPages > 1) realPages else (ktRes?.pages ?: 1)
+
+        if (needOcr && context != null) {
+            val ocrRes = PdfOcrEngine.extractText(context, tmp, forPrintMode = isFailedChinesePdf)
+            if (ocrRes != null) {
+                finalText = if (ktRes?.reliable == true && ktStats.second > 0 && ktRes.text.isNotBlank()) {
+                    val ocrKeys = ocrRes.text.lines().map { normKey(it) }.filter { it.isNotEmpty() }.toSet()
+                    val sb = StringBuilder(ocrRes.text)
+                    for (ln in ktRes.text.lines().map { it.trim() }.filter { it.length >= 3 }) {
+                        if (normKey(ln) !in ocrKeys) sb.append('\n').append(ln)
+                    }
+                    sb.toString()
+                } else ocrRes.text
+                finalPages = ocrRes.pages
+                Log.d("WordCount", "压缩包内层 PDF OCR: $name → pages=${ocrRes.pages}")
+            }
+        }
+
+        if (finalText.isNullOrBlank()) return
+        val stats = countTextKotlin(finalText)
+        inner.add(InnerResult(
+            name = name.substringAfterLast('/'),
+            words = stats.first, fe = stats.second, nc = stats.third,
+            chars = stats.fourth, pages = finalPages
+        ))
+    }
+
+    /** 文本解码：UTF-8 优先，失败则 GBK，与单独打开文本/未知文件策略一致。 */
+    private fun decodeTextLenient(bytes: ByteArray): String? {
+        return runCatching {
+            val t = String(bytes, StandardCharsets.UTF_8)
+            if (isReadableText(t, lenient = true)) t
+            else {
+                val g = String(bytes, Charset.forName("GBK"))
+                if (isReadableText(g, lenient = true)) g else null
+            }
+        }.getOrNull()
     }
 
     /**
@@ -370,24 +451,12 @@ object ArchiveEngine {
                 code < 0x20 && c != '\n' && c != '\r' && c != '\t' -> control++
             }
         }
-        // v1.0.20: 放宽阈值，修复 ZIP/RAR 全 0 问题
         val maxControl = if (lenient) 0.20 else 0.15
         val maxReplacement = if (lenient) 0.05 else 0.03
         val minPrintable = if (lenient) 0.60 else 0.75
         if (control > s.length * maxControl) return false
         if (replacement > s.length * maxReplacement) return false
         return printable > s.length * minPrintable
-    }
-
-    /** 判断 ISO-8859-1 字符串是否像二进制（控制字符太多） */
-    private fun isBinaryLike(s: String): Boolean {
-        if (s.length < 8) return true
-        var control = 0
-        for (i in s.indices) {
-            val c = s[i]
-            if (c.code < 0x20 && c != '\n' && c != '\r' && c != '\t') control++
-        }
-        return control > s.length * 0.10
     }
 
     /** 写临时文件供引擎使用。 */
@@ -400,15 +469,11 @@ object ArchiveEngine {
         } catch (_: Throwable) { null }
     }
 
-    private fun sanitize(name: String): String =
-        name.replace(Regex("[^\\w.\\-/]"), "_").takeLast(80)
-
     // ──────────────────── gzip 工具函数 ────────────────────
     internal fun gunzipCompat(bytes: ByteArray): ByteArray {
         return try {
             GzipCompressorInputStream(ByteArrayInputStream(bytes)).use { it.readBytes() }
         } catch (_: Throwable) {
-            // fallback: use the original gunzip implementation
             gunzip(bytes)
         }
     }
