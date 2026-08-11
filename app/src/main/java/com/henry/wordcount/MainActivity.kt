@@ -2346,16 +2346,18 @@ private fun addFiles(
                         // v1.3.92: 有字符但零中文 → CID/ToUnicode 解码失败的中文 PDF（如 Word 导出 PDF）
                         // 此类 PDF 的中文以 CID 编码存储，Kotlin 无法解码成 PUA/乱码被过滤后只剩英文碎片
                         val isFailedChinesePdf = bestChars > 20 && bestFe == 0 && bestChars < 500
-                        // v1.5.65: 对齐桌面 extract_pdf 的 whole_poisoned 逻辑 —— 低字数密度（图片型/扫描件 PDF）
-                        //   即使 pdfminer 已抽到少量文字，也必须强制全页 OCR。桌面判定 avg_chars < 800 即 whole_poisoned。
-                        //   例：AH+.pdf 为纯图片型，pdfminer 仅抽到 489 字分布在 17 页（avg≈29 < 800），
-                        //   桌面强制全页 OCR 得 2960 字；旧手机逻辑因"已抽到文字"而永不 OCR，只拿 489 字。
-                        //   阈值对齐桌面 800（每页平均字符数远低于此值的 PDF 几乎不可能是纯文本型）。
-                        val avgCharsPerPage = bestChars.toDouble() / maxOf(1, bestPages)
-                        val lowDensity = avgCharsPerPage < 800.0
+                        // v1.5.68: 对齐桌面 extract_pdf 的 whole_poisoned 逻辑 —— 低字数密度（图片型/扫描件 PDF）
+                        //   即使 pdfminer/PdfExtractor 已抽到少量文字，也必须强制全页 OCR。
+                        //   桌面判定 avg_chars < 800 即 whole_poisoned。
+                        //   注意：PdfExtractor 可能抽出大量 PDF 结构/CID 垃圾字符，导致 bestChars 虚高而
+                        //   有效字数(bestWords) 极少，因此密度判断必须同时看有效字数，并使用可靠页数 realPages。
+                        //   例：AH+.pdf 纯图片型 avg≈29 < 800；正确 27 页文件有效字数 315/27≈12 < 200。
+                        val avgCharsPerPage = bestChars.toDouble() / maxOf(1, realPages)
+                        val avgWordsPerPage = bestWords.toDouble() / maxOf(1, realPages)
+                        val lowDensity = avgCharsPerPage < 800.0 || avgWordsPerPage < 200.0
                         val needOcr = bestChars < 10 || (!bestTextReliable && bestChars < 50) || looksLikeGarbage || isFailedChinesePdf || lowDensity
-                        Log.d("WordCount", "PDF OCR决策 $dName: bestChars=$bestChars bestFe=$bestFe bestPages=$bestPages avg/p=$avgCharsPerPage lowDensity=$lowDensity needOcr=$needOcr (garbage=$looksLikeGarbage failedCn=$isFailedChinesePdf)")
-                        if (lowDensity) pdfDiag += "\nOCR触发: 低字数密度(avg ${"%.0f".format(avgCharsPerPage)}字/页<800)→按桌面口径强制全页OCR"
+                        Log.d("WordCount", "PDF OCR决策 $dName: bestChars=$bestChars bestFe=$bestFe bestPages=$bestPages realPages=$realPages avgChars/p=$avgCharsPerPage avgWords/p=$avgWordsPerPage lowDensity=$lowDensity needOcr=$needOcr (garbage=$looksLikeGarbage failedCn=$isFailedChinesePdf)")
+                        if (lowDensity) pdfDiag += "\nOCR触发: 低字数密度(avg ${"%.0f".format(avgWordsPerPage)}字/页<200)→按桌面口径强制全页OCR"
 
                         if (!needOcr) {
                             // ★ 文本提取足够好 → 直接使用
