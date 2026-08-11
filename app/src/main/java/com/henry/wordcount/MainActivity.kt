@@ -192,6 +192,9 @@ data class FileResult(
     val hasUnreliable: Boolean,
     // v1.3.64: PDF 诊断信息（Python 是否工作、错误、决策过程），显示到界面便于排查
     val diag: String? = null,
+    // v1.5.66: PDF 的 OCR 状态摘要（直接显示在主界面，无需展开诊断），便于真机排查
+    //   - "文本充分，未触发OCR" | "已OCR扫描X页" | "⚠️ OCR未成功，已用文本层降级"
+    val ocrNote: String? = null,
     // v1.5.36: DWG 统计不准、需用户选文字型 PDF 来重新统计时置 true（驱动 UI 提示与弹窗选 PDF）
     val needsPdf: Boolean = false,
     // v1.5.61: CAD 文字/纯编号拆分（仅 DWG 文件可能非空）
@@ -694,6 +697,15 @@ fun FileCard(
                             statsText,
                             style = MaterialTheme.typography.bodySmall, color = Color.Gray
                         )
+                        // v1.5.66: PDF 的 OCR 状态摘要（直接显示，无需展开诊断）
+                        if (r.ocrNote != null) {
+                            val isWarn = r.ocrNote!!.startsWith("⚠️")
+                            Text(
+                                r.ocrNote!!,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (isWarn) Color(0xFFB00020) else Color(0xFF2E7D32)
+                            )
+                        }
                         // v1.3.6: 明细折叠/展开切换（点击统计行展开）
                         // v1.3.34: 备注合并为一条汇总，所以 notesSlides 只算 1
                         val detailCount = (r.inner?.size ?: 0) + (r.sheets?.size ?: 0) +
@@ -2242,6 +2254,9 @@ private fun addFiles(
                         val ktRes = PdfExtractor.extract(f)
                         val ktStats = countTextKotlin(ktRes.text)
                         Log.d("WordCount", "PDF Level1(Kotlin) $dName: chars=${ktStats.fourth} words=${ktStats.first} reliable=${ktRes.reliable} pages=${ktRes.pages}")
+                        // v1.5.66: 用系统 PdfRenderer 取可靠页数（Kotlin 的 countPagesSafe 对压缩流 PDF 会误判成 1 页）
+                        val realPages = reliablePdfPageCount(f)
+                        Log.d("WordCount", "PDF 可靠页数 $dName: realPages=$realPages (ktPages=${ktRes.pages})")
 
                         // ── Level 2: Python pdfminer（文字型 PDF 的主力）──
                         var pyWords = 0; var pyFe = 0; var pyNc = 0; var pyChars = 0; var pyPages = 0
@@ -2348,8 +2363,9 @@ private fun addFiles(
                                 "name" to dName, "ext" to ".pdf",
                                 "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars),
                                 "meta" to emptyMap<String, Any?>(),
-                                "pages" to bestPages,
-                                "diag" to pdfDiag
+                                "pages" to (if (realPages > 1) realPages else bestPages),
+                                "diag" to pdfDiag,
+                                "ocrNote" to "文本提取充分，未触发OCR"
                             )
                             val fr = toFileResult(resMap, f.absolutePath)
                             entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_ok", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
@@ -2358,9 +2374,12 @@ private fun addFiles(
                             // v1.3.81: 对"glyph-ID编码垃圾"(ktLooksLikeCidGarbage)使用PRINT模式+2x分辨率渲染
                             // 提升中文 PDF 的 OCR 识别率（普通 DISPLAY 模式对文字偏小的 PDF 渲染质量不足）
                             // v1.3.93: isFailedChinesePdf（Word 导出中文 PDF，CID 解码失败）也用 PRINT 高分辨率
-                            // v1.5.65: lowDensity（纯图片/扫描件 PDF）同样用 PRINT 高分辨率，源已是栅格图，
-                            //   提高渲染 DPI 可显著改善 ML Kit OCR 识别率
-                            val ocrForPrintMode = looksLikeGarbage || isFailedChinesePdf || lowDensity
+                            // v1.5.66: lowDensity(图片/扫描型PDF) 不再强制 PRINT 模式——
+                            //   部分 PDF 在 RENDER_MODE_FOR_PRINT 下会渲染成空白(isBlankBitmap 把整页
+                            //   跳过→OCR返回空→降级到 Kotlin 的错结果/错误页数)。改用 DISPLAY 模式
+                            //   (更兼容, 文本/图片 PDF 均可靠渲染)，仅保留 looksLikeGarbage/isFailedChinesePdf
+                            //   的 PRINT 高分辨率(这两类确需更清晰渲染)。
+                            val ocrForPrintMode = looksLikeGarbage || isFailedChinesePdf
                             val ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = ocrForPrintMode)
 
                             if (ocrRes != null) {
@@ -2371,7 +2390,8 @@ private fun addFiles(
                                     "stats" to mapOf("words" to ocrStats.first, "fe" to ocrStats.second, "nc" to ocrStats.third, "chars" to ocrStats.fourth),
                                     "meta" to emptyMap<String, Any?>(),
                                     "pages" to ocrRes.pages,
-                                    "diag" to "$pdfDiag\n(OCR补充)"
+                                    "diag" to "$pdfDiag\n(OCR补充)",
+                                    "ocrNote" to "已OCR扫描${ocrRes.pages}页"
                                 )
                                 val fr = toFileResult(resMap, f.absolutePath)
                                 entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_ocr", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
@@ -2385,8 +2405,9 @@ private fun addFiles(
                                         "name" to dName, "ext" to ".pdf",
                                         "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars),
                                         "meta" to emptyMap<String, Any?>(),
-                                        "pages" to bestPages,
-                                        "diag" to "$pdfDiag\n(降级:文本少+OCR失败)\nOCR详情: ${if (ocrDiag.isNotEmpty()) ocrDiag else "无"}"
+                                        "pages" to (if (realPages > 1) realPages else bestPages),
+                                        "diag" to "$pdfDiag\n(降级:文本少+OCR失败)\nOCR详情: ${if (ocrDiag.isNotEmpty()) ocrDiag else "无"}",
+                                        "ocrNote" to "⚠️ OCR未成功，已用文本层降级(详见诊断)"
                                     )
                                     val fr = toFileResult(resMap, f.absolutePath)
                                     entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_fallback", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
@@ -2873,6 +2894,17 @@ private fun addFiles(
  */
 fun estimatePages(chars: Int): Int = maxOf(1, (chars + 749) / 750)
 
+// v1.5.66: 可靠的 PDF 页数（绕过 Kotlin PdfExtractor.countPagesSafe 对 ObjStm 压缩流
+//   PDF 误判成 1 页的 bug）。直接用系统 PdfRenderer.pageCount（与 PdfOcrEngine OCR 分支
+//   同源的可靠页数来源），失败返回 0 由上层回退 bestPages。
+private fun reliablePdfPageCount(file: File): Int {
+    return try {
+        val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+        val r = PdfRenderer(pfd)
+        try { r.pageCount } finally { r.close(); runCatching { pfd.close() } }
+    } catch (_: Throwable) { 0 }
+}
+
 /** 压缩包内层结果 → toFileResult 可回解析的 meta 结构。 */
 private fun innerToMeta(r: InnerResult): Map<String, Any?> {
     return mapOf(
@@ -2941,6 +2973,8 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
         hasUnreliable = imageCount > 0,
         // v1.3.64: PDF 诊断信息（来自 resMap["diag"]）
         diag = m?.get("diag") as? String,
+        // v1.5.66: PDF 的 OCR 状态摘要（来自 resMap["ocrNote"]）
+        ocrNote = m?.get("ocrNote") as? String,
         // v1.5.36: DWG 统计不准、需文字型 PDF 重新统计时由扫描分支置 true
         needsPdf = (meta["needs_pdf"] as? Boolean) ?: false,
         // v1.5.61: CAD 文字/纯编号拆分
