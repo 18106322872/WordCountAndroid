@@ -2385,15 +2385,29 @@ private fun addFiles(
                             val ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = ocrForPrintMode)
 
                             if (ocrRes != null) {
-                                // OCR 成功
-                                val ocrStats = countTextKotlin(ocrRes.text)
+                                // OCR 成功：对齐桌面 text_items+img_items 合并口径，
+                                // 把【可信】文本层(ktRes.text) 中 OCR 没识别到的片段补回，
+                                // 按行去重避免重复计数（Kotlin 抽取偶然抽到的清晰文字层，OCR 可能漏）。
+                                // 仅当文本层可信(非CID乱码)且有中文时才合并，避免引入噪声。
+                                val mergedText = if (ktRes.reliable && ktStats.second > 0 && ktRes.text.isNotBlank()) {
+                                    val lines = ktRes.text.lines().map { it.trim() }.filter { it.length >= 3 }
+                                    val sb = StringBuilder(ocrRes.text)
+                                    var added = 0
+                                    for (ln in lines) {
+                                        if (ocrRes.text.indexOf(ln) < 0) { sb.append('\n').append(ln); added++ }
+                                    }
+                                    Log.d("WordCount", "PDF 合并文本层补回 $added 行 $dName")
+                                    sb.toString()
+                                } else ocrRes.text
+                                val ocrStats = countTextKotlin(mergedText)
+                                val mergedTag = if (mergedText != ocrRes.text) " +文本层" else ""
                                 val resMap = mapOf(
                                     "name" to dName, "ext" to ".pdf",
                                     "stats" to mapOf("words" to ocrStats.first, "fe" to ocrStats.second, "nc" to ocrStats.third, "chars" to ocrStats.fourth),
                                     "meta" to emptyMap<String, Any?>(),
                                     "pages" to ocrRes.pages,
-                                    "diag" to "$pdfDiag\n(OCR补充)",
-                                    "ocrNote" to "已OCR扫描${ocrRes.pages}页"
+                                    "diag" to "$pdfDiag\n(OCR补充$mergedTag)",
+                                    "ocrNote" to "已OCR扫描${ocrRes.pages}页$mergedTag"
                                 )
                                 val fr = toFileResult(resMap, f.absolutePath)
                                 entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_ocr", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))

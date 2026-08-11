@@ -153,8 +153,11 @@ object PdfOcrEngine {
                         if (w <= 0 || h <= 0) continue
                         // v1.3.81: PRINT模式用高分辨率+PRINT渲染，提升中文OCR识别率
                         // v1.3.83: 提升到3x（2x仍可能分辨率不足导致ML Kit空结果）
+                        // v1.5.69: DISPLAY 模式也用 2x（原 1x 对小字识别率不足，导致扫描/图文 PDF 字数略少）；
+                        //   用 MAX_DIM 上限钳制，避免大图 OOM。PRINT 仍 3x（更清晰渲染）。
                         val baseScale = computeScale(w, h)
-                        val scale = if (forPrintMode) baseScale * 3f else baseScale
+                        val rawScale = if (forPrintMode) baseScale * 3f else baseScale * 2f
+                        val scale = min(rawScale, MAX_DIM.toFloat() / max(w, h).toFloat())
                         val bw = max(1, (w * scale).toInt()); val bh = max(1, (h * scale).toInt())
                         val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { pageErrors++; diag.append(" [p${i+1}:创建位图失败]"); continue }
                         try {
@@ -278,7 +281,8 @@ object PdfOcrEngine {
                     val sw = sz.width; val sh = sz.height
                     if (sw <= 0 || sh <= 0) { errors++; continue }
                     val baseSc = computeScale(sw.toInt(), sh.toInt())
-                    val sc = if (forPrintMode) baseSc * 2f else baseSc
+                    // v1.5.69: DISPLAY 模式也 2x（原 1x 识别率不足）；MAX_DIM 钳制防 OOM
+                    val sc = min(if (forPrintMode) baseSc * 2f else baseSc * 2f, MAX_DIM.toFloat() / max(sw, sh).toFloat())
                     val bw = max(1, (sw * sc).toInt()); val bh = max(1, (sh * sc).toInt())
                     val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { errors++; continue }
                     try {
@@ -317,7 +321,8 @@ object PdfOcrEngine {
                     val sw = sz.width; val sh = sz.height
                     if (sw <= 0 || sh <= 0) { errors++; continue }
                     val baseSc = computeScale(sw.toInt(), sh.toInt())
-                    val sc = if (forPrintMode) baseSc * 2f else baseSc
+                    // v1.5.69: DISPLAY 模式也 2x（原 1x 识别率不足）；MAX_DIM 钳制防 OOM
+                    val sc = min(if (forPrintMode) baseSc * 2f else baseSc * 2f, MAX_DIM.toFloat() / max(sw, sh).toFloat())
                     val bw = max(1, (sw * sc).toInt()); val bh = max(1, (sh * sc).toInt())
                     val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { errors++; continue }
                     try {
