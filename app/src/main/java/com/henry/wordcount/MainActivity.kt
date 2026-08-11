@@ -992,6 +992,10 @@ private fun isCjkChar(cp: Int): Boolean {
            (cp in 0x2E80..0x2EFF) || (cp in 0xF900..0xFAFF)
 }
 
+/** 归一化行键：去空白、去标点、小写，用于软去重 */
+private fun normKey(s: String): String =
+    s.lowercase().replace(Regex("[\\s\\p{P}]+"), "")
+
 /** 判断字符串是否像真实文字（非 CAD 元数据/坐标/二进制垃圾）*/
 private fun looksLikeRealText(s: String, minRun: Int): Boolean {
     if (s.length < minRun) return false
@@ -2390,11 +2394,15 @@ private fun addFiles(
                                 // 按行去重避免重复计数（Kotlin 抽取偶然抽到的清晰文字层，OCR 可能漏）。
                                 // 仅当文本层可信(非CID乱码)且有中文时才合并，避免引入噪声。
                                 val mergedText = if (ktRes.reliable && ktStats.second > 0 && ktRes.text.isNotBlank()) {
+                                    // 软去重：OCR 已识别的图片文字与 PDF 文字层常因标点/错字/换行
+                                    // 差异而不完全一致，整行硬匹配会误判为“未重复”导致重复计数。
+                                    // 归一化（去空白、去标点、小写）后逐行比对，只补回 OCR 真漏的片段。
+                                    val ocrKeys = ocrRes.text.lines().map { normKey(it) }.filter { it.isNotEmpty() }.toSet()
                                     val lines = ktRes.text.lines().map { it.trim() }.filter { it.length >= 3 }
                                     val sb = StringBuilder(ocrRes.text)
                                     var added = 0
                                     for (ln in lines) {
-                                        if (ocrRes.text.indexOf(ln) < 0) { sb.append('\n').append(ln); added++ }
+                                        if (normKey(ln) !in ocrKeys) { sb.append('\n').append(ln); added++ }
                                     }
                                     Log.d("WordCount", "PDF 合并文本层补回 $added 行 $dName")
                                     sb.toString()
