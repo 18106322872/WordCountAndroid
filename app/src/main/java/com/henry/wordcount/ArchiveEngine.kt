@@ -268,7 +268,7 @@ object ArchiveEngine {
             val chars = (stats["chars"] as? Number)?.toInt() ?: 0
             val pages = (m["pages"] as? Int) ?: estimatePages(chars)
             // v1.5.86: 内层文件若自身需要"必须用PDF统计"（如栅格化 DWG），标记 needsPdf，
-            // 明细中提示，且聚合时计入（对齐电脑版：无法提取中文的 DWG 走 PDF）。
+            // 明细中提示，且聚合时不计入压缩包合计（对齐电脑版：无法提取中文的 DWG 走 PDF，不虚增字数）。
             val needsPdf = (meta["needs_pdf"] as? Boolean) ?: false
             inner.add(InnerResult(
                 name = name.substringAfterLast('/'),
