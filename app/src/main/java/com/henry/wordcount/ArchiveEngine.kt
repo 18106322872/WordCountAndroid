@@ -243,230 +243,39 @@ object ArchiveEngine {
     }
 
     // ──────────────────── 内层文件路由 ────────────────────
-    private val SUPPORTED_OOXML = setOf("docx", "xlsx", "pptx")
-    private val SUPPORTED_OLD_OFFICE = setOf("doc", "xls", "ppt")
-    private val SUPPORTED_TEXT = setOf(
-        "txt", "csv", "json", "xml", "md", "log", "html", "htm",
-        "ini", "cfg", "conf", "yaml", "yml", "toml", "properties",
-        "sql", "sh", "bat", "cmd", "ps1", "py", "js", "ts", "java",
-        "kt", "c", "cpp", "h", "hpp", "cs", "go", "rs", "rb", "php",
-        "swift", "r", "m", "scala", "clj", "vue", "jsx", "tsx", "svelte"
-    )
+    /** 嵌套压缩包不在此递归展开（外层循环已对 .zip 递归；其余类型与单独打开压缩包一致地跳过）。 */
+    private val NESTED_ARCHIVE_SKIP = setOf("zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz")
 
-    /** 已知二进制/无法统计的扩展名——直接跳过，不尝试当文本读 */
-    private val SKIP_EXTS = setOf(
-        "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "svg",
-        "mp3", "mp4", "avi", "mkv", "mov", "wav", "flac",
-        "exe", "dll", "so", "dylib", "a", "o", "obj", "class",
-        "zip", "rar", "7z", "tar", "gz", "bz2", "xz", // 嵌套压缩包不递归展开
-        "ttf", "otf", "woff", "woff2", "eot",
-        "db", "sqlite", "mdb", "accdb",
-        "bin", "dat", "sys", "drv"
-    )
-
+    /**
+     * 内层文件统一走与「单独打开该文件」完全相同的 FileProcessor。
+     * 这样压缩包内任意格式（PDF/OOXML/老Office/图片/DWG/文本/未知）的统计路径与结果，
+     * 都与单独打开该文件一丝不差（v1.5.82 彻底统一，取代此前重写一遍的独立逻辑）。
+     */
     private suspend fun processEntry(name: String, bytes: ByteArray, cacheDir: File, inner: MutableList<InnerResult>, context: Context? = null) {
         val ext = name.substringAfterLast('.', "").lowercase()
-
-        // 图片：与单独打开图片使用同一 OCR 引擎，不再设 5 张全局配额（保证结果一致）。
-        // 仅过滤过大图片（>5MB）防止 OOM。
-        val imageExts = setOf("png", "jpg", "jpeg", "bmp", "gif", "webp", "tif", "tiff")
-        if (ext in imageExts) {
-            if (context != null && bytes.size <= 5 * 1024 * 1024) {
-                val tmp = writeTemp(bytes, name, cacheDir) ?: return
-                try {
-                    val ocrText = runCatching { OcrEngine.recognize(context, tmp) }.getOrNull()
-                    if (!ocrText.isNullOrBlank()) {
-                        val stats = countTextKotlin(ocrText)
-                        inner.add(InnerResult(
-                            name = name.substringAfterLast('/'),
-                            words = stats.first, fe = stats.second, nc = stats.third,
-                            chars = stats.fourth, pages = 1
-                        ))
-                        Log.d("WordCount", "压缩包内层图片 OCR: $name → ${stats.first} 词")
-                    }
-                } finally {
-                    runCatching { tmp.delete() }
-                }
-            }
-            return
-        }
-
-        // 跳过其他已知不可处理的二进制类型
-        if (ext in SKIP_EXTS) return
-
+        if (ext in NESTED_ARCHIVE_SKIP) return
+        if (context == null) return // 极少数无 context 的情况跳过（OCR/Python 不可用）
         val tmp = writeTemp(bytes, name, cacheDir) ?: return
         try {
-            when {
-                ext in SUPPORTED_OOXML -> processOoXmlEntry(name, tmp, inner)
-                ext == "pdf" -> processPdfEntry(name, tmp, cacheDir, inner, context)
-                ext in SUPPORTED_OLD_OFFICE -> {
-                    val text = runCatching { OldOfficeEngine.extractText(tmp) }.getOrNull()
-                    addTextResult(name, text, inner)
-                }
-                ext == "dwg" -> {
-                    // v1.5.81: 压缩包内 DWG 必须走与单独打开一致的完整引擎（DwgProcessor）
-                    if (context != null) {
-                        val res = runCatching { DwgProcessor.process(context, tmp, name.substringAfterLast('/')) }.getOrNull()
-                        if (res != null) {
-                            inner.add(InnerResult(
-                                name = name.substringAfterLast('/'),
-                                words = res.words, fe = res.fe, nc = res.nc,
-                                chars = res.chars, pages = res.pages
-                            ))
-                        }
-                    }
-                }
-                ext in SUPPORTED_TEXT || ext.isBlank() -> {
-                    val text = decodeTextLenient(bytes)
-                    addTextResult(name, text, inner)
-                }
-                else -> {
-                    val text = decodeTextLenient(bytes)
-                    addTextResult(name, text, inner)
-                }
-            }
+            val out = FileProcessor.process(context, tmp, name.substringAfterLast('/'))
+            val m = out.resMap ?: return // 如图片无文字/PDF 全失败：与单独打开得到"空/错误"一致，不计入
+            val stats = m["stats"] as? Map<*, *> ?: emptyMap<String, Any>()
+            val words = (stats["words"] as? Number)?.toInt() ?: 0
+            val fe = (stats["fe"] as? Number)?.toInt() ?: 0
+            val nc = (stats["nc"] as? Number)?.toInt() ?: 0
+            val chars = (stats["chars"] as? Number)?.toInt() ?: 0
+            val pages = (m["pages"] as? Int) ?: estimatePages(chars)
+            inner.add(InnerResult(
+                name = name.substringAfterLast('/'),
+                words = words, fe = fe, nc = nc, chars = chars, pages = pages
+            ))
         } finally {
             runCatching { tmp.delete() }
         }
     }
 
-    /** 统计文本并加入 inner，统一兜底处理空/空白。 */
-    private fun addTextResult(name: String, text: String?, inner: MutableList<InnerResult>, pages: Int? = null) {
-        if (text.isNullOrBlank()) return
-        val stats = countTextKotlin(text)
-        inner.add(InnerResult(
-            name = name.substringAfterLast('/'),
-            words = stats.first, fe = stats.second, nc = stats.third,
-            chars = stats.fourth, pages = pages ?: estimatePages(stats.fourth)
-        ))
-    }
-
-    /** OOXML：与 MainActivity 同样使用 metaWords 安全网，保证和单独打开结果一致。 */
-    private fun processOoXmlEntry(name: String, tmp: File, inner: MutableList<InnerResult>) {
-        val res = OoXmlEngine.extract(tmp) ?: return
-        val stats = countTextKotlin(res.text)
-        val rawWords = stats.first
-        val rawFe = stats.second
-        val rawNc = stats.third
-        val rawChars = stats.fourth
-
-        val outWords: Int
-        val outFe: Int
-        val outNc: Int
-        val outChars: Int
-        if (res.metaWords > 0 && !res.hasVml) {
-            outWords = res.metaWords
-            val ratio = if (rawWords > 0) rawWords.toDouble() / res.metaWords else 1.0
-            outFe = (rawFe / ratio).toInt().coerceAtLeast(0)
-            outNc = (rawNc / ratio).toInt().coerceAtLeast(0)
-            outChars = (rawChars / ratio).toInt().coerceAtLeast(0)
-        } else if (res.metaWords > 0 && rawWords > (res.metaWords * 1.5).toInt()) {
-            outWords = res.metaWords
-            val ratio = rawWords.toDouble() / res.metaWords
-            outFe = (rawFe / ratio).toInt().coerceAtLeast(0)
-            outNc = (rawNc / ratio).toInt().coerceAtLeast(0)
-            outChars = (rawChars / ratio).toInt().coerceAtLeast(0)
-        } else {
-            outWords = rawWords
-            outFe = rawFe
-            outNc = rawNc
-            outChars = rawChars
-        }
-        val outPages = if (res.metaPages > 0) res.metaPages else res.pages
-        inner.add(InnerResult(
-            name = name.substringAfterLast('/'),
-            words = outWords, fe = outFe, nc = outNc,
-            chars = outChars, pages = outPages
-        ))
-    }
-
-    /** PDF：与 MainActivity 同样的 OCR fallback，扫描/PDF 在压缩包内也能被识别。 */
-    private fun processPdfEntry(name: String, tmp: File, cacheDir: File, inner: MutableList<InnerResult>, context: Context?) {
-        val ktRes = PdfExtractor.extract(tmp)
-        val ktStats = if (ktRes != null) countTextKotlin(ktRes.text) else Quadruple(0, 0, 0, 0)
-
-        val bestChars = ktStats.fourth
-        val bestWords = ktStats.first
-        val bestFe = ktStats.second
-        val realPages = ktRes?.pages ?: 1
-        val avgCharsPerPage = bestChars.toDouble() / maxOf(1, realPages)
-        val avgWordsPerPage = bestWords.toDouble() / maxOf(1, realPages)
-        val lowDensity = avgCharsPerPage < 800.0 || avgWordsPerPage < 200.0
-        val isFailedChinesePdf = bestChars > 20 && bestFe == 0 && bestChars < 500
-        val needOcr = bestChars < 10 || lowDensity || isFailedChinesePdf
-
-        var finalText: String? = ktRes?.text
-        var finalPages = if (realPages > 1) realPages else (ktRes?.pages ?: 1)
-
-        if (needOcr && context != null) {
-            val ocrRes = PdfOcrEngine.extractText(context, tmp, forPrintMode = isFailedChinesePdf)
-            if (ocrRes != null) {
-                finalText = if (ktRes?.reliable == true && ktStats.second > 0 && ktRes.text.isNotBlank()) {
-                    val ocrKeys = ocrRes.text.lines().map { normKey(it) }.filter { it.isNotEmpty() }.toSet()
-                    val sb = StringBuilder(ocrRes.text)
-                    for (ln in ktRes.text.lines().map { it.trim() }.filter { it.length >= 3 }) {
-                        if (normKey(ln) !in ocrKeys) sb.append('\n').append(ln)
-                    }
-                    sb.toString()
-                } else ocrRes.text
-                finalPages = ocrRes.pages
-                Log.d("WordCount", "压缩包内层 PDF OCR: $name → pages=${ocrRes.pages}")
-            }
-        }
-
-        if (finalText.isNullOrBlank()) return
-        val stats = countTextKotlin(finalText)
-        inner.add(InnerResult(
-            name = name.substringAfterLast('/'),
-            words = stats.first, fe = stats.second, nc = stats.third,
-            chars = stats.fourth, pages = finalPages
-        ))
-    }
-
-    /** 文本解码：UTF-8 优先，失败则 GBK，与单独打开文本/未知文件策略一致。 */
-    private fun decodeTextLenient(bytes: ByteArray): String? {
-        return runCatching {
-            val t = String(bytes, StandardCharsets.UTF_8)
-            if (isReadableText(t, lenient = true)) t
-            else {
-                val g = String(bytes, Charset.forName("GBK"))
-                if (isReadableText(g, lenient = true)) g else null
-            }
-        }.getOrNull()
-    }
-
-    /**
-     * 严格判断一段“解码后的文本”是否真的像可读文本（用于挡掉被误当文本的二进制乱码）。
-     * 规则：
-     *   - 长度至少 4
-     *   - 控制字符（<0x20 且非换行/制表）占比不得超过 10%（二进制通常很高）
-     *   - Unicode 替换符(U+FFFD)占比不得超过 2%（解码损坏的标志）
-     *   - 可打印字符（ASCII 可打印 / 字母数字 / CJK）占比必须 > 85%
-     * 满足才认为是文本，否则视为二进制/损坏，不应被统计字数。
-     */
-    private fun isReadableText(s: String, lenient: Boolean = false): Boolean {
-        if (s.length < 4) return false
-        var printable = 0
-        var control = 0
-        var replacement = 0
-        for (c in s) {
-            val code = c.code
-            when {
-                code in 0x20..0x7E -> printable++
-                c.isLetterOrDigit() -> printable++
-                code in 0x4E00..0x9FFF || code in 0x3400..0x4DBF || code in 0x3000..0x303F
-                        || code in 0xFF00..0xFFEF || code in 0x2E80..0x2EFF || code in 0xF900..0xFAFF -> printable++
-                code == 0xFFFD -> replacement++
-                code < 0x20 && c != '\n' && c != '\r' && c != '\t' -> control++
-            }
-        }
-        val maxControl = if (lenient) 0.20 else 0.15
-        val maxReplacement = if (lenient) 0.05 else 0.03
-        val minPrintable = if (lenient) 0.60 else 0.75
-        if (control > s.length * maxControl) return false
-        if (replacement > s.length * maxReplacement) return false
-        return printable > s.length * minPrintable
-    }
+    // 内层文件（PDF/OOXML/老Office/图片/DWG/文本/未知）统一由 FileProcessor 处理，
+    // 与「单独打开该文件」走完全相同的代码路径，统计结果必然一致。
 
     /** 写临时文件供引擎使用。 */
     private fun writeTemp(bytes: ByteArray, name: String, cacheDir: File): File? {
