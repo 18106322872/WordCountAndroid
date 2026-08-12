@@ -75,7 +75,8 @@ object ArchiveEngine {
 
     private fun aggregate(inner: List<InnerResult>): ArchiveResult {
         var w = 0; var fe = 0; var nc = 0; var ch = 0
-        inner.forEach { w += it.words; fe += it.fe; nc += it.nc; ch += it.chars }
+        // v1.5.86: 需用PDF统计(栅格化 DWG 等)的内层文件不计入压缩包合计，与电脑版一致
+        inner.forEach { if (!it.needsPdf) { w += it.words; fe += it.fe; nc += it.nc; ch += it.chars } }
         return ArchiveResult(inner, w, fe, nc, ch)
     }
 
@@ -260,14 +261,19 @@ object ArchiveEngine {
             val out = FileProcessor.process(context, tmp, name.substringAfterLast('/'))
             val m = out.resMap ?: return // 如图片无文字/PDF 全失败：与单独打开得到"空/错误"一致，不计入
             val stats = m["stats"] as? Map<*, *> ?: emptyMap<String, Any>()
+            val meta = m["meta"] as? Map<*, *> ?: emptyMap<String, Any>()
             val words = (stats["words"] as? Number)?.toInt() ?: 0
             val fe = (stats["fe"] as? Number)?.toInt() ?: 0
             val nc = (stats["nc"] as? Number)?.toInt() ?: 0
             val chars = (stats["chars"] as? Number)?.toInt() ?: 0
             val pages = (m["pages"] as? Int) ?: estimatePages(chars)
+            // v1.5.86: 内层文件若自身需要"必须用PDF统计"（如栅格化 DWG），标记 needsPdf，
+            // 明细中提示，且聚合时计入（对齐电脑版：无法提取中文的 DWG 走 PDF）。
+            val needsPdf = (meta["needs_pdf"] as? Boolean) ?: false
             inner.add(InnerResult(
                 name = name.substringAfterLast('/'),
-                words = words, fe = fe, nc = nc, chars = chars, pages = pages
+                words = words, fe = fe, nc = nc, chars = chars, pages = pages,
+                needsPdf = needsPdf
             ))
         } finally {
             runCatching { tmp.delete() }

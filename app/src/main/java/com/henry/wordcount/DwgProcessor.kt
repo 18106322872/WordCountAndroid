@@ -154,10 +154,12 @@ object DwgProcessor {
             }
         }
 
-        // ── v1.5.61: 终极兜底 ──
-        if (!recoverySucceeded && finalStats.second <= 5) {
+        // ── v1.5.61 / v1.5.86: 终极兜底 ──
+        // 仅当源 DWG 二进制中确有中文字符证据时才做原始字节扫描；
+        // 否则对栅格化/英文 DWG 的随机字节扫描会产生虚假 CJK 膨胀。
+        if (!recoverySucceeded && finalStats.second <= 5 && cjkInRaw >= 50) {
             val rawScanner = DwgRawCjkScanner.scanRawDwg(file.absolutePath)
-            if (rawScanner.cjkTotal >= 200 && rawScanner.cjkDiversity < 0.6 && rawScanner.text.isNotEmpty()) {
+            if (rawScanner.cjkTotal >= 200 && rawScanner.cjkDiversity < 0.6 && rawScanner.commonRatio >= 0.10 && rawScanner.text.isNotEmpty()) {
                 val rs = countTextKotlin(rawScanner.text)
                 finalStats = rs
                 finalText = rawScanner.text
@@ -175,17 +177,29 @@ object DwgProcessor {
         val framesVal4 = if (framesKnown) dxfPages!! else 1
         val finalWords4 = finalStats.second + finalStats.third
         val charsNow = finalStats.fourth
+        // v1.5.86: 对齐桌面「栅格化/编码丢失 → 必须用PDF统计」。
+        // 桌面在 pdf_fallback=False 检测模式下：凡无法直接提取中文的 DWG 一律标记 needsPdf，
+        // 不再把字节噪声当中文虚增字数。这里用多重判定覆盖所有栅格化/英文图纸情形：
+        //   1) rasterizedTrigger：结构化抽取字数远低于 CAD 典型密度(<1000字/页)
+        //   2) encodedLostTrigger：源含大量疑似CJK字节但结构化抽取几乎无中文、且恢复未取到可信中文
+        //      （对应桌面 encoder_garbled，同样必须走PDF）
+        //   3) cjkLostTrigger：中文严重丢失但有少量非中文残留
+        // 注意：不再用 !recoverySucceeded 抑制 needsPdf——桌面对"恢复取到噪声也仍按栅格化判 needsPdf"，
+        // 只要最终可统计字数远低于每页密度即判定为必须用PDF。
+        val negligibleCjk = itemsCjk <= 5
         val rasterizedTrigger = framesKnown
-                && !recoverySucceeded
                 && !printedScope
                 && (finalWords4 < framesVal4 * 1000)
-                && (framesVal4 >= 3)
+        val encodedLostTrigger = !printedScope
+                && negligibleCjk
+                && (cjkInRaw > 50000)
+                && !recoverySucceeded
         val cjkLostTrigger = framesKnown
                 && !recoverySucceeded
                 && (finalStats.second <= 5)
                 && (finalStats.third >= 100)
                 && (cjkInRaw >= 100)
-        val needsPdf = rasterizedTrigger || cjkLostTrigger || (charsNow < 50)
+        val needsPdf = rasterizedTrigger || encodedLostTrigger || cjkLostTrigger || (charsNow < 50)
         val rasterized4 = framesKnown && (finalWords4 < framesVal4 * 1000)
         if (rasterized4) {
             Log.d("WordCount", "DWG rasterized $dName: words=$finalWords4 frames=$framesVal4 recovery=$recoverySucceeded")

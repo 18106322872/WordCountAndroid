@@ -156,7 +156,9 @@ class MainActivity : ComponentActivity() {
 data class InnerResult(
     val name: String,
     val words: Int, val fe: Int, val nc: Int, val chars: Int,
-    val pages: Int?
+    val pages: Int?,
+    /** v1.5.86: 内层文件（如栅格化 DWG）无法直接提取中文时置 true，UI 提示"必须用PDF统计"且不计入合计 */
+    val needsPdf: Boolean = false
 )
 
 /** 单个工作表统计（含隐藏表）：名称 + 字数 */
@@ -389,7 +391,8 @@ fun WordCountApp(initialUris: List<Uri>) {
             if (result.isArchive) {
                 // v1.5.81: 压缩包按内层文件勾选状态汇总（默认全选）
                 result.inner.forEachIndexed { index, inner ->
-                    if (hiddenSelected["${r.id}::inner::$index"] != false) {
+                    // v1.5.86: 需用PDF统计（栅格化 DWG 等）的内层文件不计入压缩包勾选合计
+                    if (hiddenSelected["${r.id}::inner::$index"] != false && !inner.needsPdf) {
                         w += inner.words; fe += inner.fe; nc += inner.nc; ch += inner.chars
                         pg += inner.pages ?: estimatePages(inner.chars)
                     }
@@ -2376,6 +2379,11 @@ private fun addFiles(
                         // v1.3.92: 有字符但零中文 → CID/ToUnicode 解码失败的中文 PDF（如 Word 导出 PDF）
                         // 此类 PDF 的中文以 CID 编码存储，Kotlin 无法解码成 PUA/乱码被过滤后只剩英文碎片
                         val isFailedChinesePdf = bestChars > 20 && bestFe == 0 && bestChars < 500
+                        // v1.5.86: 英文/图片型 PDF 的 hex/CID 数据常被误解码为大量 CJK，抬升 bestChars
+                        // 导致跳过 OCR。真中文常用字占比 >=0.20；伪中文常 <0.10，强制 OCR。
+                        val commonCjkCount = ktRes.text.count { it.code in DwgRawCjkScanner.COMMON_CJK_CHARS }
+                        val cjkCommonRatio = if (bestFe > 0) commonCjkCount.toDouble() / bestFe else 1.0
+                        val cjkLooksLikeCidGarbage = !usePython && bestFe > 50 && cjkCommonRatio < 0.10
                         // v1.5.68: 对齐桌面 extract_pdf 的 whole_poisoned 逻辑 —— 低字数密度（图片型/扫描件 PDF）
                         //   即使 pdfminer/PdfExtractor 已抽到少量文字，也必须强制全页 OCR。
                         //   桌面判定 avg_chars < 800 即 whole_poisoned。
@@ -2385,9 +2393,10 @@ private fun addFiles(
                         val avgCharsPerPage = bestChars.toDouble() / maxOf(1, realPages)
                         val avgWordsPerPage = bestWords.toDouble() / maxOf(1, realPages)
                         val lowDensity = avgCharsPerPage < 800.0 || avgWordsPerPage < 200.0
-                        val needOcr = bestChars < 10 || (!bestTextReliable && bestChars < 50) || looksLikeGarbage || isFailedChinesePdf || lowDensity
-                        Log.d("WordCount", "PDF OCR决策 $dName: bestChars=$bestChars bestFe=$bestFe bestPages=$bestPages realPages=$realPages avgChars/p=$avgCharsPerPage avgWords/p=$avgWordsPerPage lowDensity=$lowDensity needOcr=$needOcr (garbage=$looksLikeGarbage failedCn=$isFailedChinesePdf)")
+                        val needOcr = bestChars < 10 || (!bestTextReliable && bestChars < 50) || looksLikeGarbage || isFailedChinesePdf || lowDensity || cjkLooksLikeCidGarbage
+                        Log.d("WordCount", "PDF OCR决策 $dName: bestChars=$bestChars bestFe=$bestFe bestPages=$bestPages realPages=$realPages avgChars/p=$avgCharsPerPage avgWords/p=$avgWordsPerPage lowDensity=$lowDensity needOcr=$needOcr (garbage=$looksLikeGarbage failedCn=$isFailedChinesePdf cidGarbage=$cjkLooksLikeCidGarbage)")
                         if (lowDensity) pdfDiag += "\nOCR触发: 低字数密度(avg ${"%.0f".format(avgWordsPerPage)}字/页<200)→按桌面口径强制全页OCR"
+                        if (cjkLooksLikeCidGarbage) pdfDiag += "\nOCR触发: CJK常用字占比过低(${"%.2f".format(cjkCommonRatio)})，疑似CID/hex伪中文"
 
                         if (!needOcr) {
                             // ★ 文本提取足够好 → 直接使用
@@ -2719,7 +2728,7 @@ private fun innerToMeta(r: InnerResult): Map<String, Any?> {
     return mapOf(
         "name" to r.name,
         "stats" to mapOf("words" to r.words, "fe" to r.fe, "nc" to r.nc, "chars" to r.chars),
-        "meta" to mapOf("pages" to r.pages)
+        "meta" to mapOf("pages" to r.pages, "needs_pdf" to r.needsPdf)
     )
 }
 
@@ -2734,7 +2743,8 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
             fe = (s["fe"] as? Number)?.toInt() ?: 0,
             nc = (s["nc"] as? Number)?.toInt() ?: 0,
             chars = (s["chars"] as? Number)?.toInt() ?: 0,
-            pages = (im["meta"] as? Map<*, *>)?.get("pages") as? Int
+            pages = (im["meta"] as? Map<*, *>)?.get("pages") as? Int,
+            needsPdf = (im["meta"] as? Map<*, *>)?.get("needs_pdf") as? Boolean ?: false
         )
     }
     val imgPages = meta["img_pages"] as? List<*>

@@ -82,12 +82,12 @@ object DwgRawCjkScanner {
 
     /** 判断一段 GBK 解码后的字符串是否为真中文（不是 GBK 范围巧合段）。
      *  严格判据（同时满足）：
-     *    1. 段内 CJK 基础平面(0x4E00-0x9FFF) 占比 >= 70%
-     *    2. 段内 CJK 字符数 >= 8
+     *    1. 段内 CJK 基础平面(0x4E00-0x9FFF) 占比 >= 80%  （v1.5.86 对齐桌面 _gbk_seg_is_real_cjk）
+     *    2. 段内 CJK 字符数 >= 10
      *    3. 段内常用字命中数 >= 2
      */
-    private fun isRealCjkSegment(seg: String, minCjkRatio: Double = 0.7,
-                                  minCommonChars: Int = 2, minTotalCjk: Int = 8): Boolean {
+    private fun isRealCjkSegment(seg: String, minCjkRatio: Double = 0.8,
+                                  minCommonChars: Int = 2, minTotalCjk: Int = 10): Boolean {
         if (seg.isEmpty()) return false
         var cjk = 0
         var common = 0
@@ -109,7 +109,7 @@ object DwgRawCjkScanner {
      * 算法：
      *   1. 用 GBK 双字节正则 [\x81-\xfe][\x40-\xfe] 匹配所有 GBK 字符位置
      *   2. 按"连续 GBK 区域（中间允许 ≤4 字节间隔）"切分
-     *   3. 每段 GBK 解码后用 isRealCjkSegment 过滤（CJK占比>=70%, 常用字>=2）
+     *   3. 每段 GBK 解码后用 isRealCjkSegment 过滤（CJK占比>=80%, 常用字>=2, CJK>=10）
      *   4. 去重后返回
      *
      * @param rawBytes DWG 文件原始字节

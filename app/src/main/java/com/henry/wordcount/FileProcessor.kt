@@ -118,6 +118,13 @@ object FileProcessor {
         val bestPages = if (usePython && pyPages > 0) pyPages else ktRes.pages
         val bestTextReliable = if (usePython) true else ktRes.reliable
 
+        // v1.5.86: 检测 CID/hex 解码产生的“伪中文”——英文/图片型 PDF 的内容流 hex 数据
+        // 被 2-byte CID 模式错误解码后会产生大量 CJK 字符，抬升 bestChars 导致跳过 OCR。
+        // 真中文常用字占比通常 >=0.20；随机/伪中文通常 <0.10。以此为据强制 OCR。
+        val commonCjkCount = ktRes.text.count { it.code in DwgRawCjkScanner.COMMON_CJK_CHARS }
+        val cjkCommonRatio = if (bestFe > 0) commonCjkCount.toDouble() / bestFe else 1.0
+        val cjkLooksLikeCidGarbage = !usePython && bestFe > 50 && cjkCommonRatio < 0.10
+
         val bestCjkRatio = if (bestChars > 0) bestFe.toDouble() / bestChars else 0.0
         val looksLikeGarbage = bestChars > 200 && bestFe < 30 && bestCjkRatio < 0.15
         val isFailedChinesePdf = bestChars > 20 && bestFe == 0 && bestChars < 500
@@ -125,8 +132,9 @@ object FileProcessor {
         val avgCharsPerPage = bestChars.toDouble() / denomPages
         val avgWordsPerPage = bestWords.toDouble() / denomPages
         val lowDensity = avgCharsPerPage < 800.0 || avgWordsPerPage < 200.0
-        val needOcr = bestChars < 10 || (!bestTextReliable && bestChars < 50) || looksLikeGarbage || isFailedChinesePdf || lowDensity
+        val needOcr = bestChars < 10 || (!bestTextReliable && bestChars < 50) || looksLikeGarbage || isFailedChinesePdf || lowDensity || cjkLooksLikeCidGarbage
         if (lowDensity) pdfDiag += "\nOCR触发: 低字数密度(avg ${"%.0f".format(avgWordsPerPage)}字/页<200)→按桌面口径强制全页OCR"
+        if (cjkLooksLikeCidGarbage) pdfDiag += "\nOCR触发: CJK常用字占比过低(${"%.2f".format(cjkCommonRatio)})，疑似CID/hex伪中文"
 
         return if (!needOcr) {
             val resMap = mapOf(
