@@ -811,10 +811,15 @@ fun FileCard(
             entry.result?.inner?.forEachIndexed { index, inner ->
                 val innerKey = "${entry.id}::inner::$index"
                 val innerChecked = hiddenSelected[innerKey] ?: true
-                Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = innerChecked, onCheckedChange = { onToggleInner(entry.id, index) }, modifier = Modifier.size(24.dp))
-                    Text(inner.name, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text("字 ${inner.words} 中 ${inner.fe} 非 ${inner.nc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                Column(Modifier.padding(start = 32.dp, top = 2.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = innerChecked, onCheckedChange = { onToggleInner(entry.id, index) }, modifier = Modifier.size(24.dp))
+                        Text(inner.name, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("字 ${inner.words} 中 ${inner.fe} 非 ${inner.nc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    }
+                    // v1.5.82: 内层文件补充页数显示
+                    val pageStr = inner.pages?.let { "页 $it" } ?: "页 -"
+                    Text(pageStr, Modifier.padding(start = 24.dp), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
             }
             entry.result?.sheets?.forEach { s ->
