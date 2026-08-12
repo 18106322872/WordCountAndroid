@@ -50,7 +50,7 @@ object ArchiveEngine {
 
     /** cacheDir 用于解包内层文件到临时文件。返回 null 表示不支持或解析失败。
      *  context 参数用于内层图片/PDF 的 OCR 统计。 */
-    fun extract(file: File, cacheDir: File, context: Context? = null): ArchiveResult? {
+    suspend fun extract(file: File, cacheDir: File, context: Context? = null): ArchiveResult? {
         return try {
             val ext = file.extension.lowercase()
             when {
@@ -116,7 +116,7 @@ object ArchiveEngine {
     }
 
     // ──────────────────── ZIP (commons-compress) ────────────────────
-    private fun fromZipCommonsCompress(file: File, cacheDir: File, context: Context?): ArchiveResult {
+    private suspend fun fromZipCommonsCompress(file: File, cacheDir: File, context: Context?): ArchiveResult {
         val inner = mutableListOf<InnerResult>()
         org.apache.commons.compress.archivers.zip.ZipFile(file).use { zis ->
             val entries = zis.entries
@@ -140,7 +140,7 @@ object ArchiveEngine {
     }
 
     // ──────────────────── RAR (unrar5j，支持 RAR4/RAR5) ────────────────────
-    private fun fromRar(file: File, cacheDir: File, context: Context?): ArchiveResult? {
+    private suspend fun fromRar(file: File, cacheDir: File, context: Context?): ArchiveResult? {
         val inner = mutableListOf<InnerResult>()
         val dest = File(cacheDir, "rar_${System.currentTimeMillis()}")
         dest.mkdirs()
@@ -164,7 +164,7 @@ object ArchiveEngine {
     }
 
     // ──────────────────── GZ / TGZ ────────────────────
-    private fun fromGzip(file: File, cacheDir: File, context: Context?): ArchiveResult {
+    private suspend fun fromGzip(file: File, cacheDir: File, context: Context?): ArchiveResult {
         val bytes = file.readBytes()
         val decompressed = gunzipCompat(bytes)
         val inner = mutableListOf<InnerResult>()
@@ -180,7 +180,7 @@ object ArchiveEngine {
     }
 
     // ──────────────────── TAR ────────────────────
-    private fun fromTarDirect(file: File, cacheDir: File, context: Context?): ArchiveResult {
+    private suspend fun fromTarDirect(file: File, cacheDir: File, context: Context?): ArchiveResult {
         val bytes = file.readBytes()
         val inner = mutableListOf<InnerResult>()
         processTar(bytes, cacheDir, inner, context)
@@ -188,7 +188,7 @@ object ArchiveEngine {
     }
 
     /** 7Z（commons-compress SevenZFile） */
-    private fun fromSevenZip(file: File, cacheDir: File, context: Context?): ArchiveResult {
+    private suspend fun fromSevenZip(file: File, cacheDir: File, context: Context?): ArchiveResult {
         val inner = mutableListOf<InnerResult>()
         SevenZFile(file).use { sevenz ->
             while (true) {
@@ -203,7 +203,7 @@ object ArchiveEngine {
     }
 
     // ──────────────────── TAR 解析器（复用原有逻辑） ────────────────────
-    private fun processTar(bytes: ByteArray, cacheDir: File, inner: MutableList<InnerResult>, context: Context? = null) {
+    private suspend fun processTar(bytes: ByteArray, cacheDir: File, inner: MutableList<InnerResult>, context: Context? = null) {
         var pos = 0
         var pendingLongName: String? = null
         while (pos + 512 <= bytes.size) {
@@ -264,7 +264,7 @@ object ArchiveEngine {
         "bin", "dat", "sys", "drv"
     )
 
-    private fun processEntry(name: String, bytes: ByteArray, cacheDir: File, inner: MutableList<InnerResult>, context: Context? = null) {
+    private suspend fun processEntry(name: String, bytes: ByteArray, cacheDir: File, inner: MutableList<InnerResult>, context: Context? = null) {
         val ext = name.substringAfterLast('.', "").lowercase()
 
         // 图片：与单独打开图片使用同一 OCR 引擎，不再设 5 张全局配额（保证结果一致）。

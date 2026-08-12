@@ -3,7 +3,6 @@ package com.henry.wordcount
 import android.content.Context
 import android.util.Log
 import java.io.File
-import kotlin.math.maxOf
 
 /**
  * DWG 文件完整统计处理器。
@@ -32,7 +31,7 @@ object DwgProcessor {
         val finalText: String
     )
 
-    fun process(context: Context, file: File, dName: String = file.name): DwgProcessResult {
+    suspend fun process(context: Context, file: File, dName: String = file.name): DwgProcessResult {
         // ── 兜底层：原始二进制扫描（保留为回退） ──
         val rawText = scanDwgRaw(file.absolutePath)
         var finalStats = countTextKotlin(rawText)
