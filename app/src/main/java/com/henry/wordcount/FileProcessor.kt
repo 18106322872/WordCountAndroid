@@ -5,7 +5,6 @@ import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import java.io.File
-import kotlin.math.maxOf
 
 /**
  * 单一文件统计处理器（统一口径）。
@@ -122,8 +121,9 @@ object FileProcessor {
         val bestCjkRatio = if (bestChars > 0) bestFe.toDouble() / bestChars else 0.0
         val looksLikeGarbage = bestChars > 200 && bestFe < 30 && bestCjkRatio < 0.15
         val isFailedChinesePdf = bestChars > 20 && bestFe == 0 && bestChars < 500
-        val avgCharsPerPage = bestChars.toDouble() / maxOf(1, realPages)
-        val avgWordsPerPage = bestWords.toDouble() / maxOf(1, realPages)
+        val denomPages = if (realPages > 1) realPages else 1
+        val avgCharsPerPage = bestChars.toDouble() / denomPages
+        val avgWordsPerPage = bestWords.toDouble() / denomPages
         val lowDensity = avgCharsPerPage < 800.0 || avgWordsPerPage < 200.0
         val needOcr = bestChars < 10 || (!bestTextReliable && bestChars < 50) || looksLikeGarbage || isFailedChinesePdf || lowDensity
         if (lowDensity) pdfDiag += "\nOCR触发: 低字数密度(avg ${"%.0f".format(avgWordsPerPage)}字/页<200)→按桌面口径强制全页OCR"
@@ -258,7 +258,7 @@ object FileProcessor {
             "pages" to outPages,
             "pages_reason" to outReason
         )
-        ProcessOutput(resMap, null)
+        return ProcessOutput(resMap, null)
     }
 
     // ───────────────────────── 老格式(.doc/.xls/.ppt) ─────────────────────────
@@ -302,7 +302,7 @@ object FileProcessor {
         val outChars: Int
         if (docWords > 0) {
             outNc = stats.third
-            outFe = maxOf(0, docWords - outNc)
+            outFe = if (docWords - outNc > 0) docWords - outNc else 0
             outWords = docWords
             outChars = if (docChars > 0) docChars else stats.fourth
         } else {
