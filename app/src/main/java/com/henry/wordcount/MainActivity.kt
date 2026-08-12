@@ -385,27 +385,38 @@ fun WordCountApp(initialUris: List<Uri>) {
         val sel = entries.filter { it.selected && it.result != null }
         var w = 0; var fe = 0; var nc = 0; var ch = 0; var pg = 0; var pendingPdf = 0
         sel.forEach { r ->
-            // v1.5.37/v1.5.62: 需要 PDF 来统计的 DWG 仍把已拿到的字数计入合计（与电脑版一致）。
-            // 只有完全没拿到字数时才只计页数。
-            val hasStats = r.result!!.words > 0 || r.result!!.fe > 0 || r.result!!.nc > 0
-            if (r.result!!.needsPdf && !hasStats) {
-                pg += r.result!!.pages ?: estimatePages(r.result!!.chars)
-                pendingPdf += 1
-            } else {
-                // v1.5.61/62: DWG 有文字/纯编号拆分时，按展开勾选状态计入合计
-                val cp = r.result!!.cadParts
-                if (cp != null) {
-                    val textChecked = hiddenSelected["${r.id}::cad::text"] != false
-                    val codeChecked = hiddenSelected["${r.id}::cad::code"] != false
-                    when {
-                        textChecked && codeChecked -> { w += r.result!!.words; fe += r.result!!.fe; nc += r.result!!.nc; ch += r.result!!.chars }
-                        textChecked -> { w += cp.textWords; fe += cp.textFe; nc += cp.textNc; ch += cp.textChars }
-                        codeChecked -> { w += cp.codeWords; fe += cp.codeFe; nc += cp.codeNc; ch += cp.codeChars }
+            val result = r.result!!
+            if (result.isArchive) {
+                // v1.5.81: 压缩包按内层文件勾选状态汇总（默认全选）
+                result.inner.forEachIndexed { index, inner ->
+                    if (hiddenSelected["${r.id}::inner::$index"] != false) {
+                        w += inner.words; fe += inner.fe; nc += inner.nc; ch += inner.chars
+                        pg += inner.pages ?: estimatePages(inner.chars)
                     }
-                } else {
-                    w += r.result!!.words; fe += r.result!!.fe; nc += r.result!!.nc; ch += r.result!!.chars
                 }
-                pg += r.result!!.pages ?: estimatePages(r.result!!.chars)
+            } else {
+                // v1.5.37/v1.5.62: 需要 PDF 来统计的 DWG 仍把已拿到的字数计入合计（与电脑版一致）。
+                // 只有完全没拿到字数时才只计页数。
+                val hasStats = result.words > 0 || result.fe > 0 || result.nc > 0
+                if (result.needsPdf && !hasStats) {
+                    pg += result.pages ?: estimatePages(result.chars)
+                    pendingPdf += 1
+                } else {
+                    // v1.5.61/62: DWG 有文字/纯编号拆分时，按展开勾选状态计入合计
+                    val cp = result.cadParts
+                    if (cp != null) {
+                        val textChecked = hiddenSelected["${r.id}::cad::text"] != false
+                        val codeChecked = hiddenSelected["${r.id}::cad::code"] != false
+                        when {
+                            textChecked && codeChecked -> { w += result.words; fe += result.fe; nc += result.nc; ch += result.chars }
+                            textChecked -> { w += cp.textWords; fe += cp.textFe; nc += cp.textNc; ch += cp.textChars }
+                            codeChecked -> { w += cp.codeWords; fe += cp.codeFe; nc += cp.codeNc; ch += cp.codeChars }
+                        }
+                    } else {
+                        w += result.words; fe += result.fe; nc += result.nc; ch += result.chars
+                    }
+                    pg += result.pages ?: estimatePages(result.chars)
+                }
             }
             // 勾选的隐藏工作表计入合计（页数不另计，沿用文件级页数）
             r.result!!.hiddenSheets.forEach { hs ->
@@ -562,6 +573,11 @@ fun WordCountApp(initialUris: List<Uri>) {
                             onToggleHidden = { id, name ->
                                 val k = "$id::$name"
                                 hiddenSelected[k] = !(hiddenSelected[k] ?: false)
+                            },
+                            // v1.5.81: 压缩包内层文件单独勾选
+                            onToggleInner = { id, index ->
+                                val k = "$id::inner::$index"
+                                hiddenSelected[k] = !(hiddenSelected[k] ?: true)
                             }
                         )
                     }
@@ -634,7 +650,9 @@ fun FileCard(
     onRename: (FileEntry) -> Unit,
     // v1.5.61: 改为 MutableMap, CAD 文字/纯编号勾选需要直接写入状态
     hiddenSelected: MutableMap<String, Boolean>,
-    onToggleHidden: (String, String) -> Unit
+    onToggleHidden: (String, String) -> Unit,
+    // v1.5.81: 压缩包内层文件勾选
+    onToggleInner: (String, Int) -> Unit
 ) {
     val expanded = remember { mutableStateOf(false) }
 
@@ -789,9 +807,13 @@ fun FileCard(
             }
             // v1.3.6: 明细区默认折叠，点击"展开N项明细"才显示
             if (expanded.value) {
-            entry.result?.inner?.forEach { inner ->
-                Row(Modifier.padding(start = 40.dp, top = 2.dp)) {
-                    Text("└ ${inner.name}", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            // v1.5.81: 压缩包内层文件带勾选框，可控制是否计入底部合计
+            entry.result?.inner?.forEachIndexed { index, inner ->
+                val innerKey = "${entry.id}::inner::$index"
+                val innerChecked = hiddenSelected[innerKey] ?: true
+                Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = innerChecked, onCheckedChange = { onToggleInner(entry.id, index) }, modifier = Modifier.size(24.dp))
+                    Text(inner.name, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text("字 ${inner.words} 中 ${inner.fe} 非 ${inner.nc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
             }
@@ -2572,250 +2594,9 @@ private fun addFiles(
                     val f = cf.file
                     val dName = cf.displayName
                     try {
-                        // ── 兜底层：原始二进制扫描（保留为回退） ──
-                        val rawText = scanDwgRaw(f.absolutePath)
-                        var finalStats = countTextKotlin(rawText)
-                        var finalText = rawText
-                        val rawChars = finalStats.fourth
-                        val rawFeRatio = if (rawChars > 0) finalStats.second.toDouble() / rawChars else 0.0
-
-                        // ── 主路径（v1.5.16）：dwg→dxf 结构化文字抽取 + 图框页数 ──
-                        //   端口桌面 extract_text_custom + count_cad_frames：dwg2dxf 由隔离进程执行
-                        //   （native 崩溃只杀隔离进程，不闪退主 app），dxf 由 Kotlin 直接解析
-                        //   TEXT/ATTDEF/MTEXT/MULTILEADER 实体（无需 ezdxf）。
-                        var dxfPages: Int? = null
-                        var dxfPagesReason: String? = null
-                        var dxfMojibake = false
-                        var dxfText = ""
-                        // v1.5.40: 捕获 DXF 编码诊断，供结果透传
-                        var dxfDiag = ""
-                        // v1.5.33: 是否已按「出图口径」统计（对齐桌面 meta["printed_scope"]）
-                        var printedScope = false
-                        val dxfPath = "${f.parent}/${f.nameWithoutExtension}.dxf"
-                        val dxfRes = DwgIsolatedRunner.convertToDxf(context, f.absolutePath, dxfPath)
-                        if (dxfRes.path != null) {
-                            val dxfFile = File(dxfPath)
-                            if (dxfFile.exists() && dxfFile.length() > 0) {
-                                val analysis = DwgDxfParser.analyze(dxfPath)
-                                dxfText = analysis.text
-                                dxfDiag = analysis.diag
-                                var dxfStats = countTextKotlin(dxfText)
-                                dxfPages = analysis.frames
-                                dxfPagesReason = analysis.framesReason
-
-                                // ── v1.5.33: 出图口径裁剪（端口桌面 _extract_dwg_via_ezdxf_printed）──
-                                //   桌面版在「字数密度异常高」时改用 ezdxf 只读模型空间+各布局
-                                //   实际画出的文字，排除未被任何 INSERT 引用的块定义
-                                //   （图库残留、不出图的结构设计说明模板）。
-                                //   巴布亚桩基：全量 59597 字 / 11 页 = 5418 字/页（远超正常
-                                //   1500-3000），改用出图口径后 23932 字，桌面基准 23960。
-                                //   触发条件与桌面 extract_cad:3466 的 density 判据一致，
-                                //   给排水(1063)/水雾(278)/Tenova(512) 密度正常，完全不受影响。
-                                if (analysis.printedText.isNotEmpty() && dxfPages != null && dxfPages!! > 0) {
-                                    val allWords = dxfStats.second + dxfStats.third
-                                    val allDensity = allWords.toDouble() / dxfPages!!
-                                    if (allDensity > 3000.0 && allWords > dxfPages!! * 1000) {
-                                        var pCjk = 0; var pCommon = 0
-                                        val pSet = HashSet<Char>()
-                                        for (ch in analysis.printedText) {
-                                            val cp = ch.code
-                                            if (cp in 0x4E00..0x9FFF) {
-                                                pCjk++; pSet.add(ch)
-                                                if (cp in DwgRawCjkScanner.COMMON_CJK_CHARS) pCommon++
-                                            }
-                                        }
-                                        val pCr = if (pCjk > 0) pCommon.toDouble() / pCjk else 0.0
-                                        val pDv = if (pCjk > 0) pSet.size.toDouble() / pCjk else 1.0
-                                        val pStats = countTextKotlin(analysis.printedText)
-                                        val pWords = pStats.second + pStats.third
-                                        // 质量门（对齐桌面 3517-3545）：足量中文 + 常用字占比够高
-                                        // + 多样性够低（排除「二进制巧合」式假中文），且确实是裁剪而非放大
-                                        if (pCjk >= 200 && pCr >= 0.30 && pDv < 0.60 && pWords in 1 until allWords) {
-                                            dxfText = analysis.printedText
-                                            dxfStats = pStats
-                                            printedScope = true
-                                            dxfPagesReason = "${dxfPagesReason ?: ""}·出图口径统计"
-                                            Log.d("WordCount", "DWG 出图口径 $dName: 全量=$allWords(密度${"%.0f".format(allDensity)}) → 出图=$pWords cjk=$pCjk cr=${"%.2f".format(pCr)} dv=${"%.2f".format(pDv)}")
-                                        } else {
-                                            Log.d("WordCount", "DWG 出图口径 REJECTED $dName: pWords=$pWords all=$allWords cjk=$pCjk cr=${"%.2f".format(pCr)} dv=${"%.2f".format(pDv)}")
-                                        }
-                                    }
-                                }
-                                // ── v1.5.24: DXF mojibake 检测（巴布亚桩基场景）──
-                                //   LibreDWG 把 GBK 中文误作 Latin-1 解码 → DXF 文本含大量
-                                //   随机 CJK（mojibake）。判据：DXF 含大量 CJK 但常用字占比极低
-                                //   + 密度远超正常 DWG（>2500 字/页）。命中则弃用 DXF 结果，
-                                //   改用 raw 扫描作为基线并触发后续 PDF/GBK 恢复。
-                                var dxfCjkCount = 0; var dxfRealCjk = 0
-                                for (ch in dxfText) {
-                                    val cp = ch.code
-                                    if (cp in 0x4E00..0x9FFF) { dxfCjkCount++; if (cp in DwgRawCjkScanner.COMMON_CJK_CHARS) dxfRealCjk++ }
-                                }
-                                val dxfCommonRatio = if (dxfCjkCount > 0) dxfRealCjk.toDouble() / dxfCjkCount else 0.0
-                                val dxfDensity = dxfStats.fourth.toDouble() / maxOf(dxfPages ?: 1, 1)
-                                dxfMojibake = (dxfCjkCount >= 200) && (dxfCommonRatio < 0.05) && (dxfDensity > 2500)
-                                // 仅当 DXF 非 mojibake 且字数更丰富时才采用 DXF 结果
-                                // v1.5.33: 出图口径是「主动裁剪」，字符数必然少于 raw 扫描，
-                                //   不能被 `>= rawChars` 这道门挡掉（桌面版同样是直接替换 items）。
-                                // v1.5.51: raw 扫描会包含二进制里的 ASCII 垃圾，字符数虽多但质量差；
-                                //   当 DXF 抽到足量且常用字占比正常的中文时，应优先采用 DXF，
-                                //   避免高质量 DXF 被 raw 字数门错误地挡掉（给排水_t3 实测）。
-                                // v1.5.52: 降低高质量 DXF 判定阈值。v1.5.51 的 >=500 中文把
-                                //   Tenova 这类单页小图（真机约 239 CJK）误挡在 PDF 提示里；
-                                //   桌面版 Tenova 本就直接出数。改为 >=50 中文且常用字占比 >=30%
-                                //   即视为可信任的 DXF 文本，直接采用。
-                                val dxfQualityGood = (dxfCjkCount >= 50) && (dxfCommonRatio >= 0.30) && (dxfCommonRatio < 0.98)
-                                if (printedScope || (!dxfMojibake && (dxfStats.fourth >= rawChars || dxfQualityGood))) {
-                                    finalStats = dxfStats
-                                    finalText = dxfText
-                                }
-                                Log.d("WordCount", "DWG dxf $dName: enc=${analysis.decodeMode} raw=$rawChars dxf=${dxfStats.fourth} cjk=$dxfCjkCount cr=${"%.3f".format(dxfCommonRatio)} den=${"%.0f".format(dxfDensity)} moji=$dxfMojibake pages=$dxfPages($dxfPagesReason)")
-                            }
-                        }
-
-                        // ── v1.5.29: 编码丢失检测 + GBK/UTF-16 原始字节 CJK 恢复 ──
-                        //   【关键修正】对齐桌面版 wordcount.py:3432 的 `isinstance(frames, int)` 守卫：
-                        //     桌面版：frames 不是 int 时（图框检测失败），整个编码丢失+恢复块被跳过，
-                        //            直接使用 DXF 结果。Android 旧代码用 `dxfPages ?: 1` 把 null 当 1，
-                        //            导致 density=14874/1=14874>>3000，错误触发恢复路径。
-                        //     修复：仅当 dxfPages 为已知正整数时才计算 density 触发恢复；
-                        //            dxfMojibake 始终触发（与 frames 无关）。
-                        val hasValidFrames = (dxfPages != null) && (dxfPages!! > 0)
-                        val framesForDensity = if (hasValidFrames) dxfPages!! else 1  // 仅用于密度计算
-                        var curTotal = finalStats.second + finalStats.third  // fe + nc
-                        val density = curTotal.toDouble() / maxOf(framesForDensity, 1)
-                        // 统计当前结果中的 CJK 质量指标
-                        var itemsCjk = 0; var realCjk = 0
-                        val textForCjkCheck = if (dxfText.isNotEmpty()) dxfText else rawText
-                        for (ch in textForCjkCheck) { val cp = ch.code; if (cp in 0x4E00..0x9FFF) { itemsCjk++; if (cp in DwgRawCjkScanner.COMMON_CJK_CHARS) realCjk++ } }
-                        val garbled = (itemsCjk >= 50) && (realCjk.toDouble() / maxOf(itemsCjk, 1) < 0.05)
-                        val curCjkRatio = if (curTotal > 0) itemsCjk.toDouble() / curTotal else 0.0
-                        val zeroCjkLoss = (curTotal >= 500) && (itemsCjk <= 5) && (curCjkRatio < 0.01)
-                        var sparse = false
-                        var cjkInRaw = 0
-                        try {
-                            val dwgRawBytes = File(f.absolutePath).readBytes()
-                            try {
-                                val decoded = String(dwgRawBytes, charset("GB18030"))
-                                for (c in decoded) { if (c.code in 0x4E00..0x9FFF) cjkInRaw++ }
-                            } catch (_: Exception) {}
-                            sparse = (cjkInRaw > 50000) && (realCjk.toDouble() / maxOf(framesForDensity, 1) < 50.0)
-                        } catch (_: Exception) {}
-                        val encodingLoss = zeroCjkLoss || garbled || sparse
-                        // v1.5.29: density 条件仅在 hasValidFrames 时生效（对齐桌面 isinstance(frames,int)）
-                        //           mojibake 和 encodingLoss 始终生效（与 frames 无关的独立判定）
-                        val densityTrigger = hasValidFrames && (density > 3000.0 && curTotal > framesForDensity * 1000)
-                        val needsRecovery = densityTrigger || encodingLoss || dxfMojibake
-                        var recoverySucceeded = false  // v1.5.26: 追踪恢复是否成功
-                        if (needsRecovery) {
-                            val recovered = DwgRawCjkScanner.scanRawDwg(f.absolutePath)
-                            Log.d("WordCount", "DWG CJK recovery $dName: method=${recovered.method} cjk=${recovered.cjkTotal} div=${"%.3f".format(recovered.cjkDiversity)} cr=${"%.3f".format(recovered.commonRatio)}")
-                            // v1.5.21 安全门：防止字节扫描器覆盖已合理的 DXF 结果（桌面:3552 逻辑）
-                            // v1.5.26: 当 dxfMojibake 时放松安全门（DXF 已确认不可信，恢复结果更可信）
-                            val mayReplace = dxfMojibake ||
-                                    DwgRawCjkScanner.shouldReplaceDxfResult(finalStats.fourth, itemsCjk, recovered)
-                            if (mayReplace && recovered.text.isNotEmpty()) {
-                                val recStats = countTextKotlin(recovered.text)
-                                // v1.5.26: 当 dxfMojibake 时放宽膨胀限制（从 3.5x → 8x），因为 DXF 基线本身不可信
-                                val effectiveMaxRatio = if (dxfMojibake) 8.0 else DwgRawCjkScanner.MAX_REPLACE_RATIO
-                                // v1.5.39: 当 DXF 抽到的字符数极少（<=50，基本是空结果）时，膨胀检查
-                                //   不应以 0 为基数（会让任何恢复都被拒）。改用恢复结果自身为基数，
-                                //   此时是否采用完全由 recovered 质量门（mayReplace/shouldReplaceDxfResult）决定。
-                                val base = if (finalStats.fourth <= 50) recStats.fourth else finalStats.fourth
-                                val limit = (base * effectiveMaxRatio).toInt().coerceAtLeast(100)
-                                if (recStats.fourth <= limit) {
-                                    finalStats = recStats
-                                    finalText = recovered.text
-                                    dxfPagesReason = "${recovered.method}字节扫描恢复"
-                                    recoverySucceeded = true
-                                    // v1.5.26: 恢复成功后更新 curTotal 用于后续 invalid 判定
-                                    curTotal = finalStats.second + finalStats.third
-                                    Log.d("WordCount", "DWG CJK recovery APPLIED $dName: now=${recStats.fourth} fe=${recStats.second}")
-                                } else {
-                                    Log.w("WordCount", "DWG CJK recovery REJECTED (oversize) $dName")
-                                }
-                            } else {
-                                Log.d("WordCount", "DWG CJK recovery SKIPPED (safety gate) $dName")
-                            }
-                        }
-
-                        // v1.5.61: 终极兜底——直接对原始 DWG 字节做 GBK/UTF-16LE 扫描。
-                        // 水雾电气图-7区在真机上出现「DXF 编码丢失 + 常规 recovery 未触发」
-                        // 导致字数显示为 0 的情况；但原始 DWG 字节里 UTF-16LE 中文完整存在。
-                        // 当现有结果中文极少（<=5）时直接尝试 DwgRawCjkScanner，质量可信就采用。
-                        // v1.5.62: 放宽采用门槛，不再要求 commonRatio（CAD 专业图常用字占比低）。
-                        if (!recoverySucceeded && finalStats.second <= 5) {
-                            val rawScanner = DwgRawCjkScanner.scanRawDwg(f.absolutePath)
-                            if (rawScanner.cjkTotal >= 200 && rawScanner.cjkDiversity < 0.6 &&
-                                rawScanner.text.isNotEmpty()) {
-                                val rs = countTextKotlin(rawScanner.text)
-                                finalStats = rs
-                                finalText = rawScanner.text
-                                dxfPagesReason = "${rawScanner.method}原始字节扫描"
-                                recoverySucceeded = true
-                                curTotal = finalStats.second + finalStats.third
-                                Log.d("WordCount", "DWG raw scanner APPLIED $dName: method=${rawScanner.method} cjk=${rawScanner.cjkTotal} common=${"%.2f".format(rawScanner.commonRatio)} words=${rs.first}")
-                            } else {
-                                Log.d("WordCount", "DWG raw scanner SKIPPED/REJECTED $dName: cjk=${rawScanner.cjkTotal} common=${"%.2f".format(rawScanner.commonRatio)} div=${"%.2f".format(rawScanner.cjkDiversity)}")
-                            }
-                        }
-
-                        // ── 回退：raw+dxf+recovery 都疑似无效时，转 PDF 再从 PDF 文本层提取 ──
-                        // v1.5.31: 对齐桌面 extract_cad:3796 的 PDF 兜底触发条件：
-                        //   当 recovery 未成功，且总字数 < 图框数×1000 时，尝试把 DWG 自己渲染成 PDF
-                        //   再走 PDF 文字层提取。这样给排水_t3 这类「矢量文字被抽空/栅格化」文件
-                        //   能拿到 PDF 里的真实字数，而不是停留在 5140/0。
-                        //   同时保留 v1.5.28 的保险：CJK 恢复成功后完全跳过 PDF 兜底，避免覆盖好结果。
-                        //   v1.5.32: 补齐桌面 `isinstance(frames, int) and frames >= 1` 守卫——
-                        //   页数未知时（dxfPages == null）桌面根本不进这个兜底块，
-                        //   旧代码用 `dxfPages ?: 1` 把 null 当 1 页，会把「页数都数不出来」
-                        //   的文件也一律拖去渲染 PDF。
-                        val framesKnown = (dxfPages != null) && (dxfPages!! >= 1)
-                        val framesVal4 = if (framesKnown) dxfPages!! else 1
-                        val finalWords4 = finalStats.second + finalStats.third
-                        val charsNow = finalStats.fourth
-                        val feRatioNow = if (charsNow > 0) finalStats.second.toDouble() / charsNow else 0.0
-                        val cjkNow = finalStats.second
-                        //   v1.5.35: 移除 v1.5.33 的 hasTrustedChinese 硬守卫。
-                        //     桌面版 extract_cad:3788-3799 的 PDF 兜底触发条件只有
-                        //     `frames>=1 && not printed_scope && not encoder_garbled && words < frames*1000`，
-                        //     并不检查当前是否已有可信中文。Android 若因为 DXF 已抽到中文就跳过
-                        //     PDF 兜底，会错失 dwg2pdf 能渲染出的栅格化文字（如水雾电气图）。
-                        //     是否采用 PDF 结果仍由下面的 pdfBetter 门把守：PDF 中文占比必须
-                        //     明显更高、或当前接近零中文、或当前字符极稀疏，才会替换。
-                        val rasterizedTrigger = framesKnown
-                                && !recoverySucceeded
-                                && !printedScope
-                                && (finalWords4 < framesVal4 * 1000)
-                                // v1.5.38: 仅多页图纸（>=3 页）才按字数/页框比判断栅格化。
-                                //   单/双页 DWG（如 Tenova 1页512字）本就字数少，按 words<frames*1000
-                                //   会误报；全局编码修复后 Tenova 应能直接出 512/295，不应提示转 PDF。
-                                && (framesVal4 >= 3)
-                        // v1.5.38: 中文全部丢失的保险触发——只要最终中文≤5 且非中文≥100，并且
-                        //   原始 DWG 按 GB18030 扫描能找到中文（cjkInRaw>=100），就说明该文件
-                        //   其实有中文、是 DXF 编码路径把中文弄丢了，需要文字型 PDF 重新统计。
-                        //   全局编码修复生效后给排水_t3 会直接出 14879/13698（中文不丢），不会触发。
-                        val cjkLostTrigger = framesKnown
-                                && !recoverySucceeded
-                                && (finalStats.second <= 5)
-                                && (finalStats.third >= 100)
-                                && (cjkInRaw >= 100)
-                        // v1.5.36: 取消自动 dwg2pdf 自渲染兜底——
-                        //   LibreDWG 渲染出的 PDF 文字层是栅格化图像，PdfExtractor 抽不到多少字，
-                        //   对统计无益且用户反馈"取不全完全没有用"。改为：当 DWG 统计明显偏少
-                        //   （栅格化/稀疏）时置 needsPdf，由 UI 提示用户在手机上选一份文字型 PDF
-                        //   来重新统计（见 onPickPdf / pdfPicker），不再自动渲染无用的 PDF。
-                        val needsPdf = rasterizedTrigger || cjkLostTrigger || (charsNow < 50)
-                        // ── v1.5.31: 栅格化检测仍然记录日志（PDF 兜底已按桌面条件触发）──
-                        val rasterized4 = framesKnown && (finalWords4 < framesVal4 * 1000)
-                        if (rasterized4) {
-                            Log.d("WordCount", "DWG rasterized $dName: words=$finalWords4 frames=$framesVal4 recovery=$recoverySucceeded")
-                        }
-
-                        val pages = dxfPages ?: estimatePages(finalStats.fourth)
-                        // v1.5.61/62: 对 DWG 最终文字拆分文字部分 / 纯编号部分，供展开后勾选汇总。
-                        // 即使 needsPdf=true，只要已经拿到文字也拆分，方便用户查看“已有统计”。
-                        val cadParts = if (finalText.isNotBlank()) computeCadParts(finalText) else null
+                        // v1.5.81: 共享 DwgProcessor，确保压缩包内 DWG 与单独打开完全一致
+                        val res = DwgProcessor.process(context, f, dName)
+                        val cadParts = res.cadParts
                         val cadPartsMeta = cadParts?.let { mapOf(
                             "text_words" to it.textWords, "text_fe" to it.textFe, "text_nc" to it.textNc, "text_chars" to it.textChars,
                             "code_words" to it.codeWords, "code_fe" to it.codeFe, "code_nc" to it.codeNc, "code_chars" to it.codeChars,
@@ -2823,12 +2604,12 @@ private fun addFiles(
                         ) }
                         val resMap = mapOf(
                             "name" to dName, "ext" to ".dwg",
-                            "stats" to mapOf("words" to finalStats.first, "fe" to finalStats.second, "nc" to finalStats.third, "chars" to finalStats.fourth),
-                            "meta" to mapOf<String, Any?>("pages_reason" to (dxfPagesReason ?: ""), "needs_pdf" to needsPdf,
+                            "stats" to mapOf("words" to res.words, "fe" to res.fe, "nc" to res.nc, "chars" to res.chars),
+                            "meta" to mapOf<String, Any?>("pages_reason" to (res.pagesReason ?: ""), "needs_pdf" to res.needsPdf,
                                 "cad_parts" to cadPartsMeta),
-                            "pages" to pages,
+                            "pages" to res.pages,
                             // v1.5.40: 把 DXF 编码诊断透传出去，便于定位真机仍 0 中文的原因
-                            "diag" to dxfDiag
+                            "diag" to res.diag
                         )
                         val fr = toFileResult(resMap, f.absolutePath)
                         entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))

@@ -304,8 +304,17 @@ object ArchiveEngine {
                     addTextResult(name, text, inner)
                 }
                 ext == "dwg" -> {
-                    val text = runCatching { DwgEngine.extractTextSafe(tmp) }.getOrNull()
-                    addTextResult(name, text, inner, pages = 1)
+                    // v1.5.81: 压缩包内 DWG 必须走与单独打开一致的完整引擎（DwgProcessor）
+                    if (context != null) {
+                        val res = runCatching { DwgProcessor.process(context, tmp, name.substringAfterLast('/')) }.getOrNull()
+                        if (res != null) {
+                            inner.add(InnerResult(
+                                name = name.substringAfterLast('/'),
+                                words = res.words, fe = res.fe, nc = res.nc,
+                                chars = res.chars, pages = res.pages
+                            ))
+                        }
+                    }
                 }
                 ext in SUPPORTED_TEXT || ext.isBlank() -> {
                     val text = decodeTextLenient(bytes)
