@@ -815,11 +815,10 @@ fun FileCard(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(checked = innerChecked, onCheckedChange = { onToggleInner(entry.id, index) }, modifier = Modifier.size(24.dp))
                         Text(inner.name, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text("字 ${inner.words} 中 ${inner.fe} 非 ${inner.nc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                     }
-                    // v1.5.82: 内层文件补充页数显示
+                    // v1.5.85: 第一行只显示文件名(独占一行避免截断)，第二行显示 字数/中文/非中文｜页数
                     val pageStr = inner.pages?.let { "页 $it" } ?: "页 -"
-                    Text(pageStr, Modifier.padding(start = 24.dp), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    Text("字 ${inner.words} 中 ${inner.fe} 非 ${inner.nc} ｜ $pageStr", Modifier.padding(start = 24.dp), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
             }
             entry.result?.sheets?.forEach { s ->
