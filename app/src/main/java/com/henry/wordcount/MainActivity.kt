@@ -819,9 +819,15 @@ fun FileCard(
                         Checkbox(checked = innerChecked, onCheckedChange = { onToggleInner(entry.id, index) }, modifier = Modifier.size(24.dp))
                         Text(inner.name, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    // v1.5.85: 第一行只显示文件名(独占一行避免截断)，第二行显示 字数/中文/非中文｜页数
-                    val pageStr = inner.pages?.let { "页 $it" } ?: "页 -"
-                    Text("字 ${inner.words} 中 ${inner.fe} 非 ${inner.nc} ｜ $pageStr", Modifier.padding(start = 24.dp), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    // v1.5.85/v1.5.88: 第一行只显示文件名(独占一行避免截断)，第二行显示 字数/中文/非中文｜页数
+                    //   若该内层文件被判定为需用PDF统计，则显示提示而不是具体字数（与单独打开的 DWG 一致，避免合计看起来不一致）
+                    val innerStatsText = if (inner.needsPdf) {
+                        "需用PDF统计 ｜ 页 ${inner.pages ?: "-"}"
+                    } else {
+                        val pageStr = inner.pages?.let { "页 $it" } ?: "页 -"
+                        "字 ${inner.words} 中 ${inner.fe} 非 ${inner.nc} ｜ $pageStr"
+                    }
+                    Text(innerStatsText, Modifier.padding(start = 24.dp), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
             }
             entry.result?.sheets?.forEach { s ->
@@ -2144,7 +2150,7 @@ private fun addFiles(
                             val isSupported = ext in setOf("zip", "rar", "7z", "tar", "gz", "tgz")
                             val errMsg = if (isSupported) {
                             if (ext == "rar")
-                                "RAR 格式不支持（仅支持 RAR4，RAR5 需先用电脑转为 ZIP）"
+                                "RAR 解析失败（文件可能损坏、密码保护或为空）"
                             else
                                 "压缩包解析失败（文件可能损坏或密码保护）"
                         } else

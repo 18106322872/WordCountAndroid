@@ -152,7 +152,9 @@ object ArchiveEngine {
                 null
             } else {
                 dest.walkTopDown().filter { it.isFile }.forEach { f ->
-                    try { processEntry(f.name, f.readBytes(), cacheDir, inner, context) } catch (_: Throwable) {}
+                    // v1.5.88: 保留 RAR 内相对路径，避免同名文件被覆盖/统计显示不全
+                    val relName = f.relativeTo(dest).path.replace('\\', '/')
+                    try { processEntry(relName, f.readBytes(), cacheDir, inner, context) } catch (_: Throwable) {}
                 }
                 aggregate(inner)
             }

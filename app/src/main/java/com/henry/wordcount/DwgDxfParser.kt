@@ -578,11 +578,14 @@ object DwgDxfParser {
         val rawRecovered = if (raw.size <= 25 * 1024 * 1024) recoverCjkFromRawDxf(raw) else ""
         val rawCjk = cjkCountOf(rawRecovered)
         val rawCommon = commonCountOf(rawRecovered)
+        val rawCommonRatio = if (rawCjk > 0) rawCommon.toDouble() / rawCjk else 0.0
         // 仅当结构化结果中文偏少、且整文件扫描明显更多（去噪）时才采用兜底。
         // v1.5.60: 放宽门槛（50→200 / commonRatio 2→5），覆盖「结构化解析几乎抽不到中文、
         // 但 DXF 原始字节（含 \U+XXXX 转义）能还原出真实中文」的真机场景（水雾电气图-7区
         // 在部分真机上 collectDxfTexts 仅得极少 CJK，靠整文件转义还原可拿回约 25071 字）。
-        val finalText = if (structCjk < 200 && rawCjk >= maxOf(structCjk + 100, 200) && rawCommon >= 5) rawRecovered else text
+        // v1.5.88: 再加 commonRatio>=0.10 门控，避免英文/栅格化图纸的 DXF 原始字节被
+        // GBK/UTF-16 巧合解码成大量伪 CJK（如 L01-A01D03...dwg 因 commonRatio≈0 虚增到 10059 字）。
+        val finalText = if (structCjk < 200 && rawCjk >= maxOf(structCjk + 100, 200) && rawCommon >= 5 && rawCommonRatio >= 0.10) rawRecovered else text
         val diag = "enc=${encDecision.enc}(u8=${encDecision.u8Cjk},gb=${encDecision.gbCjk}) " +
                 "structCjk=$structCjk rawCjk=$rawCjk rawCommon=$rawCommon"
         return AnalysisResult(finalText, printed, frames, reason, lastDecodeMode, diag)

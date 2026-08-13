@@ -97,7 +97,10 @@ object DwgProcessor {
                 val dxfDensity = dxfStats.fourth.toDouble() / maxOf(dxfPages ?: 1, 1)
                 dxfMojibake = (dxfCjkCount >= 200) && (dxfCommonRatio < 0.05) && (dxfDensity > 2500)
                 val dxfQualityGood = (dxfCjkCount >= 50) && (dxfCommonRatio >= 0.30) && (dxfCommonRatio < 0.98)
-                if (printedScope || (!dxfMojibake && (dxfStats.fourth >= rawChars || dxfQualityGood))) {
+                // v1.5.88: DXF 结构化抽取是主路径；仅当 rawText（二进制ASCII扫描）明显是噪声
+                // 时才优先采用 DXF，避免 scanDwgRaw 把元数据/坐标/随机字节当作有效文字虚增字数。
+                val rawLooksLikeNoise = rawChars > 10000 && dxfStats.fourth > 0 && rawChars > dxfStats.fourth * 5
+                if (printedScope || (!dxfMojibake && (dxfStats.fourth >= rawChars || dxfQualityGood || rawLooksLikeNoise))) {
                     finalStats = dxfStats
                     finalText = dxfText
                 }
@@ -133,7 +136,10 @@ object DwgProcessor {
         if (needsRecovery) {
             val recovered = DwgRawCjkScanner.scanRawDwg(file.absolutePath)
             Log.d("WordCount", "DWG CJK recovery $dName: method=${recovered.method} cjk=${recovered.cjkTotal} div=${"%.3f".format(recovered.cjkDiversity)} cr=${"%.3f".format(recovered.commonRatio)}")
-            val mayReplace = dxfMojibake || DwgRawCjkScanner.shouldReplaceDxfResult(finalStats.fourth, itemsCjk, recovered)
+            // v1.5.88: dxfMojibake 时仍需校验 recovery 质量（commonRatio>=0.10），
+            // 否则 recovery 可能把随机字节巧合解码的伪中文直接替换进来。
+            val recoveryQualityOk = recovered.commonRatio >= 0.10 && recovered.cjkDiversity < 0.6
+            val mayReplace = (dxfMojibake && recoveryQualityOk) || DwgRawCjkScanner.shouldReplaceDxfResult(finalStats.fourth, itemsCjk, recovered)
             if (mayReplace && recovered.text.isNotEmpty()) {
                 val recStats = countTextKotlin(recovered.text)
                 val effectiveMaxRatio = if (dxfMojibake) 8.0 else DwgRawCjkScanner.MAX_REPLACE_RATIO
