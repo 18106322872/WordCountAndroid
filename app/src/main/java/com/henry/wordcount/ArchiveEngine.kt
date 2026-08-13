@@ -264,11 +264,16 @@ object ArchiveEngine {
     private suspend fun processEntry(name: String, bytes: ByteArray, cacheDir: File, inner: MutableList<InnerResult>, context: Context? = null) {
         val ext = name.substringAfterLast('.', "").lowercase()
         if (ext in NESTED_ARCHIVE_SKIP) return
-        if (context == null) return // 极少数无 context 的情况跳过（OCR/Python 不可用）
+        if (context == null) return
         val tmp = writeTemp(bytes, name, cacheDir) ?: return
         try {
             val out = FileProcessor.process(context, tmp, name.substringAfterLast('/'))
-            val m = out.resMap ?: return // 如图片无文字/PDF 全失败：与单独打开得到"空/错误"一致，不计入
+            val m = out.resMap
+            if (m == null) {
+                // 单个内层文件无结果（如图片无文字/PDF全失败），记录后跳过，不影响其他文件
+                Log.d("WordCount", "processEntry skip '$name': resMap=null error=${out.error}")
+                return
+            }
             val stats = m["stats"] as? Map<*, *> ?: emptyMap<String, Any>()
             val meta = m["meta"] as? Map<*, *> ?: emptyMap<String, Any>()
             val words = (stats["words"] as? Number)?.toInt() ?: 0
@@ -276,14 +281,15 @@ object ArchiveEngine {
             val nc = (stats["nc"] as? Number)?.toInt() ?: 0
             val chars = (stats["chars"] as? Number)?.toInt() ?: 0
             val pages = (m["pages"] as? Int) ?: estimatePages(chars)
-            // v1.5.86: 内层文件若自身需要"必须用PDF统计"（如栅格化 DWG），标记 needsPdf，
-            // 明细中提示，且聚合时不计入压缩包合计（对齐电脑版：无法提取中文的 DWG 走 PDF，不虚增字数）。
             val needsPdf = (meta["needs_pdf"] as? Boolean) ?: false
             inner.add(InnerResult(
                 name = name.substringAfterLast('/'),
                 words = words, fe = fe, nc = nc, chars = chars, pages = pages,
                 needsPdf = needsPdf
             ))
+        } catch (e: Throwable) {
+            // v1.5.90: 单个内层文件异常不得导致整个压缩包归零；记录后继续
+            Log.w("WordCount", "processEntry exception '$name': ${e.javaClass.simpleName}: ${e.message}")
         } finally {
             runCatching { tmp.delete() }
         }
@@ -292,14 +298,18 @@ object ArchiveEngine {
     // 内层文件（PDF/OOXML/老Office/图片/DWG/文本/未知）统一由 FileProcessor 处理，
     // 与「单独打开该文件」走完全相同的代码路径，统计结果必然一致。
 
-    /** 写临时文件供引擎使用。 */
+    /** 写临时文件供引擎使用。只取短文件名，避免中文字符被替换后产生子目录。 */
     private fun writeTemp(bytes: ByteArray, name: String, cacheDir: File): File? {
         return try {
-            val safe = name.replace(Regex("[^\\w.\\-/]"), "_").takeLast(80)
+            val shortName = name.substringAfterLast('/').substringAfterLast('\\')
+            val safe = shortName.replace(Regex("[^\\w.]"), "_").takeLast(80).ifEmpty { "bin" }
             val tmp = File(cacheDir, "arc_${System.currentTimeMillis()}_$safe")
             tmp.writeBytes(bytes)
             tmp
-        } catch (_: Throwable) { null }
+        } catch (e: Throwable) {
+            Log.w("WordCount", "writeTemp failed for '$name': ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
     }
 
     // ──────────────────── gzip 工具函数 ────────────────────

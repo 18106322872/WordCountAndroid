@@ -8,6 +8,7 @@ import android.util.Log
 import com.shockwave.pdfium.PdfiumCore
 import com.shockwave.pdfium.util.Size
 import java.io.File
+import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
 
@@ -200,7 +201,8 @@ object PdfOcrEngine {
                             var ocrResult = ""
                             var ocrError: String? = null
                             try {
-                                ocrResult = OcrEngine.recognizeBitmap(ocrBmp, skipPostFilter = true)
+                                // v1.5.90: 改用分块 OCR（密集工程图整页召回低），提升 ML Kit 召回率
+                                ocrResult = recognizeTiled(ocrBmp)
                             } catch (e: Exception) {
                                 ocrError = "${e.javaClass.simpleName}: ${e.message}"
                             }
@@ -289,7 +291,7 @@ object PdfOcrEngine {
                         core.renderPageBitmap(doc, bmp, i, 0, 0, bw, bh)
                         if (isBlankBitmap(bmp)) continue
                         anyContent = true
-                        val t = OcrEngine.recognizeBitmap(bmp, skipPostFilter = true)
+                        val t = recognizeTiled(bmp)
                         if (t.isNotBlank()) sb.append(t).append('\n')
                     } catch (e: Throwable) { errors++; lastFailDetail = "PFD.render[$i]: ${e.javaClass.simpleName}" } finally { bmp.recycle() }
                 } finally { /* closeDocument 释放所有页面 */ }
@@ -329,7 +331,7 @@ object PdfOcrEngine {
                         core.renderPageBitmap(doc, bmp, i, 0, 0, bw, bh)
                         if (isBlankBitmap(bmp)) continue
                         anyContent = true
-                        val t = OcrEngine.recognizeBitmap(bmp, skipPostFilter = true)
+                        val t = recognizeTiled(bmp)
                         if (t.isNotBlank()) sb.append(t).append('\n')
                     } catch (e: Throwable) { errors++; lastFailDetail = "Bytes.render[$i]: ${e.javaClass.simpleName}" } finally { bmp.recycle() }
                 } finally { /* closeDocument 释放 */ }
@@ -530,6 +532,53 @@ object PdfOcrEngine {
             out.setPixels(pixels, 0, w, 0, 0, w, h)
             out
         } catch (_: Throwable) { null }
+    }
+
+    /**
+     * v1.5.90: 分块 OCR —— 把整页位图切成 cols×rows 小块分别识别再合并。
+     * 密集工程图整页超大（常 3000px+）时，ML Kit 文字检测对小字召回率低；
+     * 切成 ~1400px 的小块后每块文字更少、更易被检测，整体召回显著提升。
+     * 小块过小时（最长边 <700）先放大再识别，进一步改善小字识别。
+     */
+    private fun recognizeTiled(src: Bitmap): String {
+        if (src.width <= 0 || src.height <= 0) return ""
+        val target = 1400
+        val cols = minOf(3, maxOf(1, ceil(src.width.toDouble() / target).toInt()))
+        val rows = minOf(3, maxOf(1, ceil(src.height.toDouble() / target).toInt()))
+        if (cols == 1 && rows == 1) {
+            return try { OcrEngine.recognizeBitmap(src, skipPostFilter = true) } catch (_: Throwable) { "" }
+        }
+        val sb = StringBuilder()
+        var totalChars = 0
+        for (r in 0 until rows) {
+            val y = (r * src.height) / rows
+            val h = ((r + 1) * src.height) / rows - y
+            for (c in 0 until cols) {
+                val x = (c * src.width) / cols
+                val w = ((c + 1) * src.width) / cols - x
+                if (w <= 0 || h <= 0) continue
+                var tile: Bitmap? = null
+                try {
+                    tile = Bitmap.createBitmap(src, x, y, w, h)
+                    val ocrBmp = if (max(w, h) < 700) {
+                        try {
+                            val scale = (700.0 / max(w, h)).coerceAtMost(3.0)
+                            val nw = (w * scale).toInt().coerceAtLeast(1)
+                            val nh = (h * scale).toInt().coerceAtLeast(1)
+                            Bitmap.createScaledBitmap(tile, nw, nh, true)
+                        } catch (_: Throwable) { tile }
+                    } else tile
+                    val t = OcrEngine.recognizeBitmap(ocrBmp ?: tile, skipPostFilter = true)
+                    if (t.isNotBlank()) { sb.append(t).append('\n'); totalChars += t.length }
+                    if (ocrBmp != null && ocrBmp !== tile) ocrBmp.recycle()
+                } catch (_: Throwable) {
+                } finally {
+                    tile?.recycle()
+                }
+            }
+        }
+        Log.d("WordCount", "PdfOcr 分块OCR: ${src.width}x${src.height} -> ${cols}x$rows 块, 识别 $totalChars 字")
+        return sb.toString().trim()
     }
 
     private fun computeScale(w: Int, h: Int): Float {
