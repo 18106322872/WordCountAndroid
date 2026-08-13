@@ -75,8 +75,10 @@ object ArchiveEngine {
 
     private fun aggregate(inner: List<InnerResult>): ArchiveResult {
         var w = 0; var fe = 0; var nc = 0; var ch = 0
-        // v1.5.86: 需用PDF统计(栅格化 DWG 等)的内层文件不计入压缩包合计，与电脑版一致
-        inner.forEach { if (!it.needsPdf) { w += it.words; fe += it.fe; nc += it.nc; ch += it.chars } }
+        // v1.5.89: 压缩包内层文件全部计入合计，与电脑版保持一致。
+        // 电脑版对压缩包里的 DWG 直接统计（即使数值偏高），手机版此前把 needsPdf 内层排除导致总字数 0，
+        // 与电脑版不一致；现改为保留 needsPdf 标记仅作提示，但合计仍按实际提取结果累加。
+        inner.forEach { w += it.words; fe += it.fe; nc += it.nc; ch += it.chars }
         return ArchiveResult(inner, w, fe, nc, ch)
     }
 
@@ -147,15 +149,20 @@ object ArchiveEngine {
         dest.mkdirs()
         return try {
             val result = Unrar5j.extract(file.absolutePath, dest.absolutePath, null)
+            Log.d("WordCount", "RAR extract ${file.name}: total=${result?.totalFiles ?: -1} success=${result?.successCount ?: -1} isSuccess=${result?.isSuccess}")
             if (result == null || (!result.isSuccess && result.successCount == 0)) {
                 Log.w("WordCount", "RAR 解压无成功文件: ${file.name} total=${result?.totalFiles ?: -1} success=${result?.successCount ?: -1}")
                 null
             } else {
+                if ((result.totalFiles ?: 0) > result.successCount) {
+                    Log.w("WordCount", "RAR 部分解压: ${file.name} total=${result.totalFiles} success=${result.successCount}")
+                }
                 dest.walkTopDown().filter { it.isFile }.forEach { f ->
                     // v1.5.88: 保留 RAR 内相对路径，避免同名文件被覆盖/统计显示不全
                     val relName = f.relativeTo(dest).path.replace('\\', '/')
                     try { processEntry(relName, f.readBytes(), cacheDir, inner, context) } catch (_: Throwable) {}
                 }
+                Log.d("WordCount", "RAR processed ${file.name}: innerFiles=${inner.size}")
                 aggregate(inner)
             }
         } catch (e: Throwable) {

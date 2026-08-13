@@ -391,8 +391,9 @@ fun WordCountApp(initialUris: List<Uri>) {
             if (result.isArchive) {
                 // v1.5.81: 压缩包按内层文件勾选状态汇总（默认全选）
                 result.inner.forEachIndexed { index, inner ->
-                    // v1.5.86: 需用PDF统计（栅格化 DWG 等）的内层文件不计入压缩包勾选合计
-                    if (hiddenSelected["${r.id}::inner::$index"] != false && !inner.needsPdf) {
+                    // v1.5.89: 压缩包内层文件全部计入勾选合计（包括 needsPdf），与电脑版保持一致。
+                    // needsPdf 仅作为明细提示，不影响汇总。
+                    if (hiddenSelected["${r.id}::inner::$index"] != false) {
                         w += inner.words; fe += inner.fe; nc += inner.nc; ch += inner.chars
                         pg += inner.pages ?: estimatePages(inner.chars)
                     }
@@ -820,14 +821,11 @@ fun FileCard(
                         Text(inner.name, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     // v1.5.85/v1.5.88: 第一行只显示文件名(独占一行避免截断)，第二行显示 字数/中文/非中文｜页数
-                    //   若该内层文件被判定为需用PDF统计，则显示提示而不是具体字数（与单独打开的 DWG 一致，避免合计看起来不一致）
-                    val innerStatsText = if (inner.needsPdf) {
-                        "需用PDF统计 ｜ 页 ${inner.pages ?: "-"}"
-                    } else {
-                        val pageStr = inner.pages?.let { "页 $it" } ?: "页 -"
-                        "字 ${inner.words} 中 ${inner.fe} 非 ${inner.nc} ｜ $pageStr"
-                    }
-                    Text(innerStatsText, Modifier.padding(start = 24.dp), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    // v1.5.89: 内层文件恢复显示实际字数（与电脑版压缩包统计口径一致）；
+                    // needsPdf 仅保留字段，不再把字数替换为提示。
+                    val pageStr = inner.pages?.let { "页 $it" } ?: "页 -"
+                    Text("字 ${inner.words} 中 ${inner.fe} 非 ${inner.nc} ｜ $pageStr",
+                        Modifier.padding(start = 24.dp), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
             }
             entry.result?.sheets?.forEach { s ->
