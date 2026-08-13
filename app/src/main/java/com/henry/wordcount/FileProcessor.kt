@@ -150,8 +150,9 @@ object FileProcessor {
             val ocrForPrintMode = looksLikeGarbage || isFailedChinesePdf
             val ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = ocrForPrintMode)
             if (ocrRes != null) {
-                // 对齐单独打开：可信文本层(ktRes.text) 中 OCR 没识别到的片段用 normKey 软去重补回
-                val mergedText = if (ktRes.reliable && ktStats.second > 0 && ktRes.text.isNotBlank()) {
+                // v1.5.92: 合并可信文本层，补齐 OCR 漏掉的片段（不再仅限中文，英文/编号
+                // 型 PDF 如工程图的文本层同样可补齐）。用 normKey 软去重避免重复计数。
+                val mergedText = if (ktRes.reliable && ktStats.fourth > 0 && ktRes.text.isNotBlank()) {
                     val ocrKeys = ocrRes.text.lines().map { normKey(it) }.filter { it.isNotEmpty() }.toSet()
                     val lines = ktRes.text.lines().map { it.trim() }.filter { it.length >= 3 }
                     val sb = StringBuilder(ocrRes.text)

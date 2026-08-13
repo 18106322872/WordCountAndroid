@@ -573,19 +573,25 @@ object DwgDxfParser {
         // 做多编码扫描（GBK / GB18030 / UTF-8 抽连续 CJK 段 + 全文转义还原），
         // 当结构化结果的中文明显偏少时采用兜底结果，避免误判「需要 PDF」。
         val structCjk = cjkCountOf(text)
+        val textChars = text.length
         // v1.5.58: 大文件跳过整文件多编码兜底——recover 会叠加 GBK/GB18030/UTF-8/latin1
         //   四份大 String，是 OOM 主因；且大文件结构化解析本就能拿到中文，兜底价值低
         val rawRecovered = if (raw.size <= 25 * 1024 * 1024) recoverCjkFromRawDxf(raw) else ""
         val rawCjk = cjkCountOf(rawRecovered)
         val rawCommon = commonCountOf(rawRecovered)
         val rawCommonRatio = if (rawCjk > 0) rawCommon.toDouble() / rawCjk else 0.0
+        val rawChars = rawRecovered.length
         // 仅当结构化结果中文偏少、且整文件扫描明显更多（去噪）时才采用兜底。
         // v1.5.60: 放宽门槛（50→200 / commonRatio 2→5），覆盖「结构化解析几乎抽不到中文、
         // 但 DXF 原始字节（含 \U+XXXX 转义）能还原出真实中文」的真机场景（水雾电气图-7区
         // 在部分真机上 collectDxfTexts 仅得极少 CJK，靠整文件转义还原可拿回约 25071 字）。
         // v1.5.88: 再加 commonRatio>=0.10 门控，避免英文/栅格化图纸的 DXF 原始字节被
         // GBK/UTF-16 巧合解码成大量伪 CJK（如 L01-A01D03...dwg 因 commonRatio≈0 虚增到 10059 字）。
-        val finalText = if (structCjk < 200 && rawCjk >= maxOf(structCjk + 100, 200) && rawCommon >= 5 && rawCommonRatio >= 0.10) rawRecovered else text
+        // v1.5.92: 增加 rawChars >= textChars 门控，避免结构化英文文本充足的图纸被
+        // 少量伪 CJK 兜底覆盖，导致总字数暴跌或出现假中文。
+        val useRecovered = structCjk < 200 && rawCjk >= maxOf(structCjk + 100, 200) && rawCommon >= 5
+                && rawCommonRatio >= 0.10 && rawChars >= textChars
+        val finalText = if (useRecovered) rawRecovered else text
         val diag = "enc=${encDecision.enc}(u8=${encDecision.u8Cjk},gb=${encDecision.gbCjk}) " +
                 "structCjk=$structCjk rawCjk=$rawCjk rawCommon=$rawCommon"
         return AnalysisResult(finalText, printed, frames, reason, lastDecodeMode, diag)

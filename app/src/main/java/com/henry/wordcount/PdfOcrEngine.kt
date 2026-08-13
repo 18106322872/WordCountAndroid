@@ -2,7 +2,6 @@ package com.henry.wordcount
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Rect
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
 import android.util.Log
@@ -30,9 +29,10 @@ import kotlin.math.min
 object PdfOcrEngine {
 
     private const val MAX_PAGES = 40
-    private const val MAX_DIM = 4096  // v1.5.91: 提高到 4K 给大图更多渲染余量（原 3072）
-    private const val TILE_PX = 1400   // v1.5.91: 分块 OCR 的目标边长，文字放大到该尺寸提升 ML Kit 召回
-    private const val LOW_RECALL = 200 // v1.5.91: 渲染路径召回低于此字数视为不足，改试内嵌图(更高分辨率来源)
+    private const val MAX_DIM = 4096         // v1.5.91: 4K 渲染上限
+    private const val TILE_SPLIT_PX = 1000   // v1.5.92: 分块更细，产生更多小块以提升密集小字召回
+    private const val TILE_UPSCALE_PX = 2000 // v1.5.92: 每块放大到 2K，比 1400 更清晰
+    private const val LOW_RECALL = 200       // v1.5.91: 渲染路径召回低于此字数改试内嵌图
 
     data class PdfOcrResult(val text: String, val pages: Int)
 
@@ -561,9 +561,9 @@ object PdfOcrEngine {
      */
     private fun recognizeTiled(src: Bitmap): String {
         if (src.width <= 0 || src.height <= 0) return ""
-        val target = 1400
-        val cols = minOf(3, maxOf(1, ceil(src.width.toDouble() / target).toInt()))
-        val rows = minOf(3, maxOf(1, ceil(src.height.toDouble() / target).toInt()))
+        val target = TILE_SPLIT_PX
+        val cols = minOf(5, maxOf(1, ceil(src.width.toDouble() / target).toInt()))
+        val rows = minOf(5, maxOf(1, ceil(src.height.toDouble() / target).toInt()))
         if (cols == 1 && rows == 1) {
             return try { OcrEngine.recognizeBitmap(src, skipPostFilter = true) } catch (_: Throwable) { "" }
         }
@@ -579,9 +579,9 @@ object PdfOcrEngine {
                 var tile: Bitmap? = null
                 try {
                     tile = Bitmap.createBitmap(src, x, y, w, h)
-                    val ocrBmp = if (max(w, h) < TILE_PX) {
+                    val ocrBmp = if (max(w, h) < TILE_UPSCALE_PX) {
                         try {
-                            val scale = (TILE_PX.toDouble() / max(w, h)).coerceAtMost(3.0)
+                            val scale = (TILE_UPSCALE_PX.toDouble() / max(w, h)).coerceAtMost(3.0)
                             val nw = (w * scale).toInt().coerceAtLeast(1)
                             val nh = (h * scale).toInt().coerceAtLeast(1)
                             Bitmap.createScaledBitmap(tile, nw, nh, true)

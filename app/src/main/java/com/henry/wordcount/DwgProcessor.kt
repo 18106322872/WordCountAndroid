@@ -97,10 +97,11 @@ object DwgProcessor {
                 val dxfDensity = dxfStats.fourth.toDouble() / maxOf(dxfPages ?: 1, 1)
                 dxfMojibake = (dxfCjkCount >= 200) && (dxfCommonRatio < 0.05) && (dxfDensity > 2500)
                 val dxfQualityGood = (dxfCjkCount >= 50) && (dxfCommonRatio >= 0.30) && (dxfCommonRatio < 0.98)
-                // v1.5.88: DXF 结构化抽取是主路径；仅当 rawText（二进制ASCII扫描）明显是噪声
-                // 时才优先采用 DXF，避免 scanDwgRaw 把元数据/坐标/随机字节当作有效文字虚增字数。
-                val rawLooksLikeNoise = rawChars > 10000 && dxfStats.fourth > 0 && rawChars > dxfStats.fourth * 5
-                if (printedScope || (!dxfMojibake && (dxfStats.fourth >= rawChars || dxfQualityGood || rawLooksLikeNoise))) {
+                // v1.5.92: DWG 结构化 DXF 是正式统计的唯一可信来源。只要 DWG→DXF 转换成功、
+                // 解析到非空文字且不是乱码，就直接采用 DXF，不再因二进制 ASCII 扫描数量
+                // 更大而回退到噪声。raw 扫描仅用于后续 CJK 恢复/兜底。
+                val dxfUsable = dxfStats.fourth > 0 && !dxfMojibake
+                if (printedScope || dxfUsable) {
                     finalStats = dxfStats
                     finalText = dxfText
                 }
@@ -181,21 +182,15 @@ object DwgProcessor {
         // ── 回退：栅格化/稀疏/字数极少时置 needsPdf ──
         val framesKnown = (dxfPages != null) && (dxfPages >= 1)
         val framesVal4 = if (framesKnown) dxfPages!! else 1
-        val finalWords4 = finalStats.second + finalStats.third
         val charsNow = finalStats.fourth
-        // v1.5.86: 对齐桌面「栅格化/编码丢失 → 必须用PDF统计」。
+        // v1.5.92: 栅格化判定改为按「字符数/页 < 500」。原 finalWords4=fe+nc 是混合单位，
+        // 英文/编号图纸（如 L01-A01D03）会因此误报 needsPdf；用 chars 更符合"字/页"语义。
         // 桌面在 pdf_fallback=False 检测模式下：凡无法直接提取中文的 DWG 一律标记 needsPdf，
-        // 不再把字节噪声当中文虚增字数。这里用多重判定覆盖所有栅格化/英文图纸情形：
-        //   1) rasterizedTrigger：结构化抽取字数远低于 CAD 典型密度(<1000字/页)
-        //   2) encodedLostTrigger：源含大量疑似CJK字节但结构化抽取几乎无中文、且恢复未取到可信中文
-        //      （对应桌面 encoder_garbled，同样必须走PDF）
-        //   3) cjkLostTrigger：中文严重丢失但有少量非中文残留
-        // 注意：不再用 !recoverySucceeded 抑制 needsPdf——桌面对"恢复取到噪声也仍按栅格化判 needsPdf"，
-        // 只要最终可统计字数远低于每页密度即判定为必须用PDF。
+        // 这里用多重判定覆盖栅格化/编码丢失/中文丢失三类情形。
         val negligibleCjk = itemsCjk <= 5
         val rasterizedTrigger = framesKnown
                 && !printedScope
-                && (finalWords4 < framesVal4 * 1000)
+                && (finalStats.fourth < framesVal4 * 500)
         val encodedLostTrigger = !printedScope
                 && negligibleCjk
                 && (cjkInRaw > 50000)
@@ -205,8 +200,8 @@ object DwgProcessor {
                 && (finalStats.second <= 5)
                 && (finalStats.third >= 100)
                 && (cjkInRaw >= 100)
-        val needsPdf = rasterizedTrigger || encodedLostTrigger || cjkLostTrigger || (charsNow < 50)
-        val rasterized4 = framesKnown && (finalWords4 < framesVal4 * 1000)
+        val needsPdf = rasterizedTrigger || encodedLostTrigger || cjkLostTrigger || (finalStats.fourth < 50)
+        val rasterized4 = framesKnown && (finalStats.fourth < framesVal4 * 500)
         if (rasterized4) {
             Log.d("WordCount", "DWG rasterized $dName: words=$finalWords4 frames=$framesVal4 recovery=$recoverySucceeded")
         }
