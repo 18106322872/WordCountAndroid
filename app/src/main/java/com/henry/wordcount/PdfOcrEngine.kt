@@ -2,6 +2,7 @@ package com.henry.wordcount
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Rect
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
 import android.util.Log
@@ -29,7 +30,9 @@ import kotlin.math.min
 object PdfOcrEngine {
 
     private const val MAX_PAGES = 40
-    private const val MAX_DIM = 3072  // v1.0.41: 提高到 3K 以改善 OCR 识别率（原 2048）
+    private const val MAX_DIM = 4096  // v1.5.91: 提高到 4K 给大图更多渲染余量（原 3072）
+    private const val TILE_PX = 1400   // v1.5.91: 分块 OCR 的目标边长，文字放大到该尺寸提升 ML Kit 召回
+    private const val LOW_RECALL = 200 // v1.5.91: 渲染路径召回低于此字数视为不足，改试内嵌图(更高分辨率来源)
 
     data class PdfOcrResult(val text: String, val pages: Int)
 
@@ -76,20 +79,31 @@ object PdfOcrEngine {
 
         // 1) 系统 PdfRenderer
         val sys = renderWithSystem(context, file, forPrintMode)
-        if (sys != null) return sys
-        val allDiag = StringBuilder(lastDiag)  // v1.3.84: 累积多路径诊断
+        val sysDiag = lastDiag
+        if (sys != null) Log.d("WordCount", "PdfOcr 路径1(Sys) 召回 ${sys.text.length} 字")
 
-        // 2) PdfiumAndroid（PFD + ByteArray 双模式）
-        val pdfium = renderWithPdfium(context, file, forPrintMode)
-        if (pdfium != null) return pdfium
-        allDiag.append(" | ").append(lastDiag)
+        // 2) PdfiumAndroid（仅在系统渲染召回偏低时补充，避免重复渲染）
+        val pdfium = if (sys == null || sys.text.length < LOW_RECALL) renderWithPdfium(context, file, forPrintMode) else null
+        val pdfiumDiag = lastDiag
+        if (pdfium != null) Log.d("WordCount", "PdfOcr 路径2(Pdfium) 召回 ${pdfium.text.length} 字")
 
-        // 3) 内嵌图片提取（多策略）
+        val diag = StringBuilder()
+        if (sys != null) diag.append("[Sys:$sysDiag] ")
+        if (pdfium != null) diag.append("[Pdfium:$pdfiumDiag] ")
+
+        // 渲染召回已较好 -> 直接采用（密集小字在原生高分辨率下 ML Kit 才能读全）
+        if (sys != null && sys.text.length >= LOW_RECALL) { lastDiag = diag.toString(); return sys }
+        if (pdfium != null && pdfium.text.length >= LOW_RECALL) { lastDiag = diag.toString(); return pdfium }
+
+        // 3) 内嵌图片提取（多策略）——栅格化/扫描件的最高分辨率来源，优先于低召回的整页渲染
+        //    v1.5.91: 实测该 PDF 内嵌图原生 ~2088px，比 2x 整页渲染(~1682px)更清晰，
+        //    整页渲染召回偏低时改走内嵌图，可显著拉近与电脑版 RapidOCR 的字数。
         Log.d("WordCount", "PdfOcr 尝试路径3(内嵌图片提取): ${file.name}")
         val images = extractEmbeddedImages(file)
         if (images.isNotEmpty()) {
             val sb = StringBuilder()
             var anyText = false
+            val pageHint = sys?.pages ?: pdfium?.pages ?: images.size
             for ((idx, bmp) in images.withIndex()) {
                 try {
                     val t = OcrEngine.recognizeBitmap(bmp, skipPostFilter = true)
@@ -99,16 +113,21 @@ object PdfOcrEngine {
                 finally { bmp.recycle() }
             }
             if (anyText) {
-                Log.d("WordCount", "PdfOcr(内嵌图片) 成功: ${images.size}张图")
-                return PdfOcrResult(sb.toString().trim(), images.size)
+                Log.d("WordCount", "PdfOcr(内嵌图片) 成功: ${images.size}张图, ${sb.trim().length}字")
+                lastDiag = diag.append("[内嵌图:${sb.trim().length}字]").toString()
+                return PdfOcrResult(sb.toString().trim(), pageHint)
             }
             lastFailReason = FailReason.OCR_EMPTY
         } else {
             lastFailReason = FailReason.NO_EMBEDDED_IMAGES
         }
 
+        // 内嵌图无果 -> 兜底返回已有的少量渲染文字（避免完全 0），再不行才判失败
+        if (sys != null && sys.text.isNotBlank()) { lastDiag = diag.toString(); return sys }
+        if (pdfium != null && pdfium.text.isNotBlank()) { lastDiag = diag.toString(); return pdfium }
+
         // 汇总最终诊断（v1.3.84: 累积所有路径）
-        lastDiag = allDiag.toString().trim()
+        lastDiag = diag.toString().trim()
         if (lastDiag.isEmpty()) {
             lastDiag = "全部路径失败: reason=${lastFailReason.name}"
             if (lastFailDetail.isNotEmpty()) lastDiag += " detail=$lastFailDetail"
@@ -560,9 +579,9 @@ object PdfOcrEngine {
                 var tile: Bitmap? = null
                 try {
                     tile = Bitmap.createBitmap(src, x, y, w, h)
-                    val ocrBmp = if (max(w, h) < 700) {
+                    val ocrBmp = if (max(w, h) < TILE_PX) {
                         try {
-                            val scale = (700.0 / max(w, h)).coerceAtMost(3.0)
+                            val scale = (TILE_PX.toDouble() / max(w, h)).coerceAtMost(3.0)
                             val nw = (w * scale).toInt().coerceAtLeast(1)
                             val nh = (h * scale).toInt().coerceAtLeast(1)
                             Bitmap.createScaledBitmap(tile, nw, nh, true)
