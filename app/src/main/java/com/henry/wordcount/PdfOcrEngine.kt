@@ -244,15 +244,18 @@ object PdfOcrEngine {
                     try {
                     core.renderPageBitmap(doc, bmp, i, 0, 0, bw, bh)
                     if (isBlankBitmap(bmp)) continue
-                    // v1.5.100: 强引擎先预处理（灰度+对比度），再分块 PaddleOCR
-                    val enhanced = enhanceBitmap(bmp) ?: bmp
-                    val t = try {
-                        recognizeTiledGeneric(enhanced) { PaddleOcr.recognize(it) ?: "" }
-                    } finally {
-                        if (enhanced !== bmp) enhanced.recycle()
-                    }
-                    Log.d("WordCount", "PdfOcr(强引擎) p${i + 1}: ${bw}x${bh} -> ${t.length}字")
+                    // v1.5.101: 强引擎同时跑预处理与原图，取字数多者，避免预处理反效果。
+                    val enhanced = enhanceBitmap(bmp)
+                    val tEnhanced = try {
+                        recognizeTiledGeneric(enhanced ?: bmp) { PaddleOcr.recognize(it) ?: "" }
+                    } catch (_: Throwable) { "" }
+                    val tOriginal = try {
+                        recognizeTiledGeneric(bmp) { PaddleOcr.recognize(it) ?: "" }
+                    } catch (_: Throwable) { "" }
+                    val t = if (tEnhanced.length >= tOriginal.length) tEnhanced else tOriginal
+                    Log.d("WordCount", "PdfOcr(强引擎) p${i + 1}: ${bw}x${bh} enhanced=${tEnhanced.length} orig=${tOriginal.length} -> ${t.length}字")
                     if (t.isNotBlank()) { sb.append(t).append('\n'); any = true }
+                    enhanced?.recycle()
                     } finally { bmp.recycle() }
                 } catch (_: Throwable) { }
             }
