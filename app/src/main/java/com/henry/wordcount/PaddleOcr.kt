@@ -2,9 +2,11 @@ package com.henry.wordcount
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.util.Log
 import com.equationl.paddleocr4android.OCR
 import com.equationl.paddleocr4android.OcrConfig
 import com.equationl.paddleocr4android.CpuPowerMode
+import com.equationl.paddleocr4android.Util.paddle.OcrResultModel
 import com.equationl.paddleocr4android.bean.OcrResult
 import com.equationl.paddleocr4android.callback.OcrInitCallback
 import com.equationl.paddleocr4android.callback.OcrRunCallback
@@ -32,6 +34,10 @@ object PaddleOcr : StrongOcr {
     @Volatile var lastError: String? = null
         private set
 
+    /** 最近一次识别的运行信息（bitmap尺寸、simpleText长度、rawResult大小等），供诊断。 */
+    @Volatile var lastRunInfo: String = ""
+        private set
+
     @Volatile private var initTried = false
     private var ocr: OCR? = null
     private val lock = Any()
@@ -52,8 +58,9 @@ object PaddleOcr : StrongOcr {
                 config.detModelFilename = "det.nb"
                 config.recModelFilename = "rec.nb"
                 config.labelPath = "labels/ppocr_keys_v1.txt"
-                // 工程图密集小字：把检测模型长边从默认 960 提到 1280，提升微小文字/标注检出率。
-                config.detLongSize = 1280
+                // v1.5.102: 先恢复库默认 960，排除 1280 导致检测输入尺寸异常使识别为 0。
+                // 后续若确认 1280 可用再逐步提升。
+                config.detLongSize = 960
                 // 降低置信度阈值，避免小字/浅灰字因 score 略低被过滤。
                 config.scoreThreshold = 0.05f
                 config.isRunDet = true
@@ -92,10 +99,14 @@ object PaddleOcr : StrongOcr {
         val engine = ocr ?: return null
         var text: String? = null
         var err: Throwable? = null
+        var rawSize = -1
+        var rawText: String? = null
         val latch = CountDownLatch(1)
         engine.run(bitmap, object : OcrRunCallback {
             override fun onSuccess(result: OcrResult) {
                 text = result.simpleText
+                rawSize = result.outputRawResult?.size ?: 0
+                rawText = result.outputRawResult?.mapNotNull { it.label }?.joinToString("\n")
                 latch.countDown()
             }
             override fun onFail(e: Throwable) {
@@ -104,7 +115,15 @@ object PaddleOcr : StrongOcr {
             }
         })
         latch.await(120, TimeUnit.SECONDS)
-        return if (err == null) text else null
+        val result = if (err == null) {
+            // v1.5.102: 若 simpleText 为空但 raw result 有文本，用 raw result 兜底。
+            val simple = text?.trim() ?: ""
+            val raw = rawText?.trim() ?: ""
+            if (simple.isNotEmpty()) simple else if (raw.isNotEmpty()) raw else null
+        } else null
+        lastRunInfo = "bmp=${bitmap.width}x${bitmap.height} simple=${text?.length ?: -1} raw=$rawSize err=${err?.message ?: "none"} out=${result?.length ?: 0}"
+        Log.d("WordCount", "PaddleOcr.recognize: $lastRunInfo")
+        return result
     }
 
     fun dispose() {
@@ -113,6 +132,7 @@ object PaddleOcr : StrongOcr {
             ocr = null
             available = false
             lastError = null
+            lastRunInfo = ""
         }
     }
 }

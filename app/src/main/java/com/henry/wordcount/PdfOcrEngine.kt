@@ -777,8 +777,9 @@ object PdfOcrEngine {
     /** 构造供 UI 显示的简明 OCR 诊断。 */
     fun buildOcrNote(pages: Int, mergedTag: String = ""): String {
         val err = lastPaddleInitError.takeIf { it.isNotBlank() }?.let { "($it)" } ?: ""
+        val runInfo = PaddleOcr.lastRunInfo.takeIf { it.isNotBlank() }?.let { "|$it" } ?: ""
         val paddle = if (lastPaddleAvailable) "可用" else "不可用"
-        return "已OCR扫描${pages}页${mergedTag} | Paddle=$paddle$err | 主${lastPrimaryChars}/强${lastStrongChars}/合${lastMergedChars}"
+        return "已OCR扫描${pages}页${mergedTag} | Paddle=$paddle$err | 主${lastPrimaryChars}/强${lastStrongChars}/合${lastMergedChars}${runInfo}"
     }
 
     /**

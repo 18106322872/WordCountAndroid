@@ -269,13 +269,13 @@ object DwgProcessor {
             Log.d("WordCount", "DWG rasterized $dName: words=$curTotal frames=$framesVal4 recovery=$recoverySucceeded")
         }
 
-        // ── v1.5.101: 与桌面对齐 —— 读不出来的 DWG 显示"-"而非噪声字数 ──
+        // ── v1.5.102: 与桌面对齐 —— 读不出来的 DWG 显示"-"而非噪声字数 ──
         // 桌面对无法提取中文/无法统计的 DWG 显示"-"。手机若结构化/RAW 仅抽出少量
-        // 噪声（无真实中文恢复、字符数<50 且 needsPdf），应归零，
+        // 噪声（无真实中文恢复、总字数<10 且 needsPdf），应归零，
         // 让 UI 走 needsPdf && !hasStats 分支显示"-"，避免"3个字"这类误导。
-        // v1.5.100 条件过严（要求 nc=0），v1.5.101 放宽为 fe=0 即可覆盖英文/编号噪声。
+        // v1.5.101 用 chars<50 仍可能漏掉 nc=3 但 chars 膨胀的情况；v1.5.102 改为直接看字数。
         if (needsPdf && !recoverySucceeded && !oleApplied
-            && finalStats.second == 0 && finalStats.fourth < 50) {
+            && finalStats.second == 0 && finalStats.first < 10) {
             Log.d("WordCount", "DWG 归零显示-(不可读) $dName: words=${finalStats.first} chars=${finalStats.fourth}")
             finalStats = Quadruple(0, 0, 0, 0)
             finalText = ""
