@@ -121,11 +121,17 @@ object PdfOcrEngine {
                 val sb = StringBuilder()
                 var anyText = false
                 val pageHint = sys?.pages ?: pdfium?.pages ?: images.size
+                // v1.5.99: 内嵌图通常是最高分辨率来源，强引擎可用时优先用 PaddleOCR 分块识别
+                val useStrongForImages = PaddleOcr.available
                 for ((idx, bmp) in images.withIndex()) {
                     try {
-                        val t = OcrEngine.recognizeBitmap(bmp, skipPostFilter = true)
+                        val t = if (useStrongForImages) {
+                            recognizeTiledGeneric(bmp) { PaddleOcr.recognize(it) ?: "" }
+                        } else {
+                            OcrEngine.recognizeBitmap(bmp, skipPostFilter = true)
+                        }
                         if (t.isNotBlank()) { sb.append(t).append('\n'); anyText = true }
-                        Log.d("WordCount", "PdfOcr(内嵌图${idx + 1}) OCR: ${t.length}字")
+                        Log.d("WordCount", "PdfOcr(内嵌图${idx + 1},${if (useStrongForImages) "PaddleOCR" else "MLKit"}) OCR: ${t.length}字")
                     } catch (_: Throwable) {}
                     finally { bmp.recycle() }
                 }
@@ -151,10 +157,16 @@ object PdfOcrEngine {
             runStrongOcr(context, file)?.also { diag.append("[强引擎(PaddleOCR):${it.text.length}字] ") }
         } else null
 
+        // v1.5.99: 强引擎应与主路径合并（去重），而不是二选一。工程图往往 ML Kit 识出大字标题、
+        // PaddleOCR 识出小字标注，合并后才能逼近桌面 RapidOCR 的召回。
         val result = when {
-            strong != null && (primary == null || strong.text.length > primary.text.length * 0.5) -> strong
-            primary != null -> primary
+            strong != null && primary != null -> {
+                val merged = mergeOcrTexts(primary.text, strong.text)
+                Log.d("WordCount", "PdfOcr 合并: 主路径${primary.text.length}字 + 强引擎${strong.text.length}字 -> ${merged.length}字")
+                PdfOcrResult(merged, primary.pages).also { diag.append("[合并后:${merged.length}字] ") }
+            }
             strong != null -> strong
+            primary != null -> primary
             else -> null
         }
 
@@ -200,10 +212,12 @@ object PdfOcrEngine {
                     val bh = max(1, (sh * sc).toInt())
                     val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { continue }
                     try {
-                        core.renderPageBitmap(doc, bmp, i, 0, 0, bw, bh)
-                        if (isBlankBitmap(bmp)) continue
-                        val t = PaddleOcr.recognize(bmp)
-                        if (!t.isNullOrBlank()) { sb.append(t).append('\n'); any = true }
+                    core.renderPageBitmap(doc, bmp, i, 0, 0, bw, bh)
+                    if (isBlankBitmap(bmp)) continue
+                    // v1.5.99: 强引擎必须分块，避免整页大图被 PaddleOCR 内部压缩到 det 输入尺寸而丢小字
+                    val t = recognizeTiledGeneric(bmp) { PaddleOcr.recognize(it) ?: "" }
+                    Log.d("WordCount", "PdfOcr(强引擎) p${i + 1}: ${bw}x${bh} -> ${t.length}字")
+                    if (t.isNotBlank()) { sb.append(t).append('\n'); any = true }
                     } finally { bmp.recycle() }
                 } catch (_: Throwable) { }
             }
@@ -632,17 +646,27 @@ object PdfOcrEngine {
 
     /**
      * v1.5.90: 分块 OCR —— 把整页位图切成 cols×rows 小块分别识别再合并。
-     * 密集工程图整页超大（常 3000px+）时，ML Kit 文字检测对小字召回率低；
-     * 切成 ~1400px 的小块后每块文字更少、更易被检测，整体召回显著提升。
-     * 小块过小时（最长边 <700）先放大再识别，进一步改善小字识别。
+     * 密集工程图整页超大（常 3000px+）时，OCR 文字检测对小字召回率低；
+     * 切成 ~1000px 的小块后每块文字更少、更易被检测，整体召回显著提升。
+     * 小块过小时（最长边 <2000）先放大再识别，进一步改善小字识别。
+     *
+     * v1.5.99: 抽象为通用分块函数，供 ML Kit 主路径与 PaddleOCR 强引擎路径共用。
      */
-    private fun recognizeTiled(src: Bitmap): String {
+    private fun recognizeTiled(src: Bitmap): String =
+        recognizeTiledGeneric(src) { OcrEngine.recognizeBitmap(it, skipPostFilter = true) }
+
+    /**
+     * 通用分块 OCR。传入 recognizer 可分别接入 ML Kit 或 PaddleOCR 等强引擎。
+     * 强引擎路径必须分块，否则整页大图输入会被模型内部压缩到固定输入尺寸（如 960px），
+     * 导致密集小字工程图严重漏识别。
+     */
+    private fun recognizeTiledGeneric(src: Bitmap, recognizer: (Bitmap) -> String?): String {
         if (src.width <= 0 || src.height <= 0) return ""
         val target = TILE_SPLIT_PX
         val cols = minOf(5, maxOf(1, ceil(src.width.toDouble() / target).toInt()))
         val rows = minOf(5, maxOf(1, ceil(src.height.toDouble() / target).toInt()))
         if (cols == 1 && rows == 1) {
-            return try { OcrEngine.recognizeBitmap(src, skipPostFilter = true) } catch (_: Throwable) { "" }
+            return try { recognizer(src) ?: "" } catch (_: Throwable) { "" }
         }
         val sb = StringBuilder()
         var totalChars = 0
@@ -664,7 +688,7 @@ object PdfOcrEngine {
                             Bitmap.createScaledBitmap(tile, nw, nh, true)
                         } catch (_: Throwable) { tile }
                     } else tile
-                    val t = OcrEngine.recognizeBitmap(ocrBmp ?: tile, skipPostFilter = true)
+                    val t = recognizer(ocrBmp ?: tile) ?: ""
                     if (t.isNotBlank()) { sb.append(t).append('\n'); totalChars += t.length }
                     if (ocrBmp != null && ocrBmp !== tile) ocrBmp.recycle()
                 } catch (_: Throwable) {
@@ -676,6 +700,26 @@ object PdfOcrEngine {
         Log.d("WordCount", "PdfOcr 分块OCR: ${src.width}x${src.height} -> ${cols}x$rows 块, 识别 $totalChars 字")
         return sb.toString().trim()
     }
+
+    /** 合并两份 OCR 结果：以 primary 为基准，把 secondary 中未出现过的行按 normKey 去重追加。 */
+    private fun mergeOcrTexts(primary: String, secondary: String): String {
+        if (primary.isBlank()) return secondary.trim()
+        if (secondary.isBlank()) return primary.trim()
+        val seen = primary.lines().map { normKey(it) }.filter { it.isNotEmpty() }.toMutableSet()
+        val sb = StringBuilder(primary.trim())
+        for (ln in secondary.lines()) {
+            val k = normKey(ln)
+            if (k.isNotEmpty() && k !in seen) {
+                sb.append('\n').append(ln)
+                seen.add(k)
+            }
+        }
+        return sb.toString().trim()
+    }
+
+    /** 归一化行文本用于去重（去空白、去标点符号、小写）。 */
+    private fun normKey(s: String): String =
+        s.lowercase().replace(Regex("[\\p{P}\\p{S}\\s]+"), "")
 
     private fun computeScale(w: Int, h: Int): Float {
         val maxSide = max(w, h)
