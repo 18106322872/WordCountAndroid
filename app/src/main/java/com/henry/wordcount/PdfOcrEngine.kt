@@ -26,6 +26,17 @@ import kotlin.math.min
  *  3) PdfiumAndroid ByteArray 模式 → ML Kit OCR
  *  4) 内嵌图片提取（多策略）→ ML Kit OCR
  */
+/**
+ * 方案 C 的"强引擎"统一接口：ML Kit 之外的第二个 OCR 阅读器（如 Tesseract / PaddleOCR-mobile）。
+ * 仅作为高召回兜底，不污染 ML Kit 主路径结果。后续更换引擎只需替换实现，路由逻辑不动。
+ */
+interface StrongOcr {
+    /** 引擎是否就绪（模型存在且初始化成功）。false 时 PdfOcrEngine 自动退回纯 ML Kit。 */
+    val available: Boolean
+    /** 识别单张位图，失败/未就绪返回 null。 */
+    fun recognize(bitmap: android.graphics.Bitmap): String?
+}
+
 object PdfOcrEngine {
 
     private const val MAX_PAGES = 40
@@ -33,6 +44,7 @@ object PdfOcrEngine {
     private const val TILE_SPLIT_PX = 1000   // v1.5.92: 分块更细，产生更多小块以提升密集小字召回
     private const val TILE_UPSCALE_PX = 2000 // v1.5.92: 每块放大到 2K，比 1400 更清晰
     private const val LOW_RECALL = 200       // v1.5.91: 渲染路径召回低于此字数改试内嵌图
+    private const val STRONG_TRIGGER = 200    // 方案 C：主路径总字数低于此值才启用强引擎兜底（避免污染 ML Kit 好结果）
 
     data class PdfOcrResult(val text: String, val pages: Int)
 
@@ -75,7 +87,9 @@ object PdfOcrEngine {
             lastDiag = "OCR已禁用(ocrEnabled=false)"
             return null
         }
-        Log.d("WordCount", "PdfOcr 开始: ${file.name} (${file.length()} bytes) printMode=$forPrintMode ocrEnabled=${OcrEngine.ocrEnabled} ocrFailed=${OcrEngine.ocrFailed}")
+        // 方案 C：惰性初始化强引擎（Tesseract）；模型缺失时 available=false，不抛异常、不阻断主流程
+        TesseractOcr.ensureInit(context)
+        Log.d("WordCount", "PdfOcr 开始: ${file.name} (${file.length()} bytes) printMode=$forPrintMode ocrEnabled=${OcrEngine.ocrEnabled} ocrFailed=${OcrEngine.ocrFailed} strongOcr=${TesseractOcr.available}")
 
         // 1) 系统 PdfRenderer
         val sys = renderWithSystem(context, file, forPrintMode)
@@ -91,49 +105,112 @@ object PdfOcrEngine {
         if (sys != null) diag.append("[Sys:$sysDiag] ")
         if (pdfium != null) diag.append("[Pdfium:$pdfiumDiag] ")
 
-        // 渲染召回已较好 -> 直接采用（密集小字在原生高分辨率下 ML Kit 才能读全）
-        if (sys != null && sys.text.length >= LOW_RECALL) { lastDiag = diag.toString(); return sys }
-        if (pdfium != null && pdfium.text.length >= LOW_RECALL) { lastDiag = diag.toString(); return pdfium }
-
-        // 3) 内嵌图片提取（多策略）——栅格化/扫描件的最高分辨率来源，优先于低召回的整页渲染
-        //    v1.5.91: 实测该 PDF 内嵌图原生 ~2088px，比 2x 整页渲染(~1682px)更清晰，
-        //    整页渲染召回偏低时改走内嵌图，可显著拉近与电脑版 RapidOCR 的字数。
-        Log.d("WordCount", "PdfOcr 尝试路径3(内嵌图片提取): ${file.name}")
-        val images = extractEmbeddedImages(file)
-        if (images.isNotEmpty()) {
-            val sb = StringBuilder()
-            var anyText = false
-            val pageHint = sys?.pages ?: pdfium?.pages ?: images.size
-            for ((idx, bmp) in images.withIndex()) {
-                try {
-                    val t = OcrEngine.recognizeBitmap(bmp, skipPostFilter = true)
-                    if (t.isNotBlank()) { sb.append(t).append('\n'); anyText = true }
-                    Log.d("WordCount", "PdfOcr(内嵌图${idx+1}) OCR: ${t.length}字")
-                } catch (_: Throwable) {}
-                finally { bmp.recycle() }
-            }
-            if (anyText) {
-                Log.d("WordCount", "PdfOcr(内嵌图片) 成功: ${images.size}张图, ${sb.trim().length}字")
-                lastDiag = diag.append("[内嵌图:${sb.trim().length}字]").toString()
-                return PdfOcrResult(sb.toString().trim(), pageHint)
-            }
-            lastFailReason = FailReason.OCR_EMPTY
+        // ── 选取主路径结果（保持原优先级：高召回渲染 > 内嵌图 > 低召回渲染兜底）──
+        var primary: PdfOcrResult? = null
+        if (sys != null && sys.text.length >= LOW_RECALL) {
+            primary = sys
+        } else if (pdfium != null && pdfium.text.length >= LOW_RECALL) {
+            primary = pdfium
         } else {
-            lastFailReason = FailReason.NO_EMBEDDED_IMAGES
+            // 3) 内嵌图片提取（多策略）——栅格化/扫描件的最高分辨率来源
+            //    v1.5.91: 实测该 PDF 内嵌图原生 ~2088px，比 2x 整页渲染(~1682px)更清晰，
+            //    整页渲染召回偏低时改走内嵌图，可显著拉近与电脑版 RapidOCR 的字数。
+            Log.d("WordCount", "PdfOcr 尝试路径3(内嵌图片提取): ${file.name}")
+            val images = extractEmbeddedImages(file)
+            if (images.isNotEmpty()) {
+                val sb = StringBuilder()
+                var anyText = false
+                val pageHint = sys?.pages ?: pdfium?.pages ?: images.size
+                for ((idx, bmp) in images.withIndex()) {
+                    try {
+                        val t = OcrEngine.recognizeBitmap(bmp, skipPostFilter = true)
+                        if (t.isNotBlank()) { sb.append(t).append('\n'); anyText = true }
+                        Log.d("WordCount", "PdfOcr(内嵌图${idx + 1}) OCR: ${t.length}字")
+                    } catch (_: Throwable) {}
+                    finally { bmp.recycle() }
+                }
+                if (anyText) {
+                    Log.d("WordCount", "PdfOcr(内嵌图片) 成功: ${images.size}张图, ${sb.trim().length}字")
+                    primary = PdfOcrResult(sb.toString().trim(), pageHint)
+                    diag.append("[内嵌图:${sb.trim().length}字] ")
+                } else {
+                    lastFailReason = FailReason.OCR_EMPTY
+                }
+            } else {
+                lastFailReason = FailReason.NO_EMBEDDED_IMAGES
+            }
+            // 内嵌图无果 -> 兜底用已有的少量渲染文字（避免完全 0）
+            if (primary == null) {
+                if (sys != null && sys.text.isNotBlank()) primary = sys
+                else if (pdfium != null && pdfium.text.isNotBlank()) primary = pdfium
+            }
         }
 
-        // 内嵌图无果 -> 兜底返回已有的少量渲染文字（避免完全 0），再不行才判失败
-        if (sys != null && sys.text.isNotBlank()) { lastDiag = diag.toString(); return sys }
-        if (pdfium != null && pdfium.text.isNotBlank()) { lastDiag = diag.toString(); return pdfium }
+        // ── 方案 C：强引擎兜底（Tesseract）。仅当主路径召回偏低或全空时启用，避免污染 ML Kit 好结果 ──
+        val strong = if (TesseractOcr.available && (primary == null || primary.text.length < STRONG_TRIGGER)) {
+            runStrongOcr(context, file)?.also { diag.append("[强引擎(Tesseract):${it.text.length}字] ") }
+        } else null
+
+        val result = when {
+            strong != null && (primary == null || strong.text.length > primary.text.length * 0.5) -> strong
+            primary != null -> primary
+            strong != null -> strong
+            else -> null
+        }
 
         // 汇总最终诊断（v1.3.84: 累积所有路径）
         lastDiag = diag.toString().trim()
-        if (lastDiag.isEmpty()) {
-            lastDiag = "全部路径失败: reason=${lastFailReason.name}"
-            if (lastFailDetail.isNotEmpty()) lastDiag += " detail=$lastFailDetail"
+        if (result == null) {
+            if (lastDiag.isEmpty()) {
+                lastDiag = "全部路径失败: reason=${lastFailReason.name}"
+                if (lastFailDetail.isNotEmpty()) lastDiag += " detail=$lastFailDetail"
+            }
+            Log.w("WordCount", "PdfOcr 全部路径失败: ${file.name}, $lastDiag")
         }
-        Log.w("WordCount", "PdfOcr 全部路径失败: ${file.name}, $lastDiag")
-        return null
+        return result
+    }
+
+    /**
+     * 方案 C 强引擎路径：用 Pdfium 以 3x 渲染每页（高密度小字需要高分辨率），
+     * 逐页交给 Tesseract 识别。仅在 ML Kit 主路径召回偏低时由 extractText 调用。
+     * 引擎未就绪（available=false）或异常时返回 null，不抛异常。
+     */
+    private fun runStrongOcr(context: Context, file: File): PdfOcrResult? {
+        val core = try { PdfiumCore(context) } catch (_: Throwable) {
+            Log.w("WordCount", "PdfOcr(强引擎) PdfiumCore 初始化失败")
+            return null
+        }
+        return try {
+            val pfd = try { ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY) } catch (_: Throwable) { return null }
+            val doc = try { core.newDocument(pfd) } catch (_: Throwable) { return null }
+            val pageCount = try { core.getPageCount(doc) } catch (_: Throwable) { return null }
+            val limit = min(pageCount, MAX_PAGES)
+            val sb = StringBuilder()
+            var any = false
+            for (i in 0 until limit) {
+                try { core.openPage(doc, i) } catch (_: Throwable) { continue }
+                try {
+                    val sz = try { core.getPageSize(doc, i) } catch (_: Throwable) { null } ?: continue
+                    val sw = sz.width.toInt()
+                    val sh = sz.height.toInt()
+                    if (sw <= 0 || sh <= 0) continue
+                    // 3x 渲染（与桌面 RapidOCR 同档），MAX_DIM 钳制防 OOM
+                    val sc = min(3f, MAX_DIM.toFloat() / max(sw, sh).toFloat())
+                    val bw = max(1, (sw * sc).toInt())
+                    val bh = max(1, (sh * sc).toInt())
+                    val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { continue }
+                    try {
+                        core.renderPageBitmap(doc, bmp, i, 0, 0, bw, bh)
+                        if (isBlankBitmap(bmp)) continue
+                        val t = TesseractOcr.recognize(bmp)
+                        if (!t.isNullOrBlank()) { sb.append(t).append('\n'); any = true }
+                    } finally { bmp.recycle() }
+                } catch (_: Throwable) { }
+            }
+            if (any) PdfOcrResult(sb.toString().trim(), pageCount) else null
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     // ══════════════════ 1) 系统 PdfRenderer ══════════════════

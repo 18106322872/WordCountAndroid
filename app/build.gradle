@@ -14,8 +14,8 @@ android {
         // minSdk 26：Apache POI 5.x / log4j 用到 MethodHandle.invoke，D8 要求 Android O(26) 起
         minSdk 26
         targetSdk 34
-        versionCode 218
-        versionName '1.5.93'
+        versionCode 219
+        versionName '1.5.95'
 
         // 只编 arm64-v8a（华为等现代手机），缩小体积、功能零影响
         ndk {
@@ -108,6 +108,9 @@ dependencies {
     // 注意：不要再加 com.google.mlkit:text-recognition:16.0.0（Latin 版），该版本已改为 Play Services
     // 动态下发模型，会与中文版冲突，导致无 Play 服务的设备上模型取不到、OCR 静默返回空。
     implementation 'com.google.mlkit:text-recognition-chinese:16.0.0'
+    // 方案 C 强引擎兜底：Tesseract（tess-two，离线 OCR 模型随 APK 内置，chi_sim+eng）。
+    // 仅在 ML Kit 主路径召回偏低时启用，提升密集工程图小字召回；模型缺失时自动降级为零回归。
+    implementation 'com.rmtheis:tess-two:9.1.0'
     // PDF 扫描件渲染后备：PdfiumAndroid（内置 Pdfium 编译启用 OpenJPEG，可渲染 JPEG2000/JBIG2 压缩的扫描图；
     //   系统 PdfRenderer/Pdfium 不支持这两种格式，会导致扫描件页面渲染为空白、OCR 认不出字）。
     // 注：该库传递依赖旧版 com.android.support:support-compat，与 AndroidX 冲突，需 exclude 掉（其运行时不依赖它）。
