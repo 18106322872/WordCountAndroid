@@ -203,7 +203,7 @@ object DwgProcessor {
         val needsPdf = rasterizedTrigger || encodedLostTrigger || cjkLostTrigger || (finalStats.fourth < 50)
         val rasterized4 = framesKnown && (finalStats.fourth < framesVal4 * 500)
         if (rasterized4) {
-            Log.d("WordCount", "DWG rasterized $dName: words=$finalWords4 frames=$framesVal4 recovery=$recoverySucceeded")
+            Log.d("WordCount", "DWG rasterized $dName: words=$curTotal frames=$framesVal4 recovery=$recoverySucceeded")
         }
 
         val pages = dxfPages ?: estimatePages(finalStats.fourth)
