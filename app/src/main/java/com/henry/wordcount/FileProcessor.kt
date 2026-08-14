@@ -392,8 +392,17 @@ object FileProcessor {
             )
             ProcessOutput(resMap, null)
         } catch (e: Throwable) {
-            Log.w("WordCount", "DWG 扫描失败 ${f.name}: ${e.message}")
-            ProcessOutput(null, "无法统计.dwg文件（${e.message}）")
+            // v1.5.93: 绝不让内层 DWG 被静默丢弃（否则压缩包计数 22→28 类丢失）。
+            // 即使异常，也返回一个非空的最小 resMap，使该文件计入总数（数值为 0），保证文件数正确。
+            Log.w("WordCount", "DWG 扫描失败(兜底计数) ${f.name}: ${e.message}")
+            val resMap = mapOf(
+                "name" to dName, "ext" to ".dwg",
+                "stats" to mapOf("words" to 0, "fe" to 0, "nc" to 0, "chars" to 0),
+                "meta" to mapOf<String, Any?>("pages_reason" to "", "needs_pdf" to true, "cad_parts" to null),
+                "pages" to 1,
+                "diag" to "DWG处理异常兜底: ${e.message}"
+            )
+            ProcessOutput(resMap, null)
         }
     }
 

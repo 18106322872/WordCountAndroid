@@ -32,6 +32,19 @@ object DwgProcessor {
     )
 
     suspend fun process(context: Context, file: File, dName: String = file.name): DwgProcessResult {
+        return try {
+            processInner(context, file, dName)
+        } catch (e: Throwable) {
+            // v1.5.93: 任何意外异常都不得让 DWG 处理崩溃（否则压缩包内层 DWG 会被静默丢弃，
+            // 导致 22→28 类文件数丢失）。一律回退到原始字节扫描基线，保证返回一个非空、可用的结果。
+            Log.w("WordCount", "DWG process 异常兜底 $dName: ${e.javaClass.simpleName}: ${e.message}")
+            val fb = try { scanDwgRaw(file.absolutePath) } catch (_: Throwable) { "" }
+            val fs = try { countTextKotlin(fb) } catch (_: Throwable) { Quadruple(0, 0, 0, 0) }
+            DwgProcessResult(fs.first, fs.second, fs.third, fs.fourth, 1, "异常兜底", false, "process异常: ${e.message}", null, fb)
+        }
+    }
+
+    private suspend fun processInner(context: Context, file: File, dName: String): DwgProcessResult {
         // ── 兜底层：原始二进制扫描（保留为回退） ──
         val rawText = scanDwgRaw(file.absolutePath)
         var finalStats = countTextKotlin(rawText)
@@ -97,10 +110,17 @@ object DwgProcessor {
                 val dxfDensity = dxfStats.fourth.toDouble() / maxOf(dxfPages ?: 1, 1)
                 dxfMojibake = (dxfCjkCount >= 200) && (dxfCommonRatio < 0.05) && (dxfDensity > 2500)
                 val dxfQualityGood = (dxfCjkCount >= 50) && (dxfCommonRatio >= 0.30) && (dxfCommonRatio < 0.98)
+                // v1.5.93: 纯英文/编号 DWG（dwg2dxf 把块炸开成大量实体→字数虚高但几乎无中文）
+                // 不应采信其膨胀的矢量文字，改用 OLE 预览 OCR（见下方 OLE 块）。对齐桌面：
+                // 桌面在 encoding_loss 时丢弃 LibreDWG 膨胀 items，改用 dwggrep + OLE 预览 OCR。
+                val dxfCjkRatioToTotal = if (dxfStats.fourth > 0) dxfCjkCount.toDouble() / dxfStats.fourth else 0.0
+                val nonChineseDxf = dxfStats.fourth >= 500 && dxfCjkCount <= 5 && dxfCjkRatioToTotal < 0.01
                 // v1.5.92: DWG 结构化 DXF 是正式统计的唯一可信来源。只要 DWG→DXF 转换成功、
                 // 解析到非空文字且不是乱码，就直接采用 DXF，不再因二进制 ASCII 扫描数量
                 // 更大而回退到噪声。raw 扫描仅用于后续 CJK 恢复/兜底。
-                val dxfUsable = dxfStats.fourth > 0 && !dxfMojibake
+                // v1.5.93: 纯英文/编号 DWG 的 DXF 矢量文字是 dwg2dxf 块炸开的膨胀结果，
+                // 不可采信（nonChineseDxf 为 true 时排除），改用 OLE 预览 OCR + 原始字节扫描。
+                val dxfUsable = dxfStats.fourth > 0 && !dxfMojibake && !nonChineseDxf
                 if (printedScope || dxfUsable) {
                     finalStats = dxfStats
                     finalText = dxfText
@@ -161,10 +181,52 @@ object DwgProcessor {
             }
         }
 
+        // ── v1.5.93: 编码丢失 / 纯英文 DXF → OLE 预览 OCR 替换膨胀矢量文字 ──
+        // 对齐桌面：桌面在 encoding_loss 丢弃 LibreDWG 膨胀 items，改用 dwggrep(原始字节)
+        // + OLE 嵌入预览 OCR。手机无 dwggrep，故以 OLE 预览位图 OCR 作为可见文字来源
+        // （含中文 fe 与编号 nc），缺失时回退原始字节 CJK 扫描。仅在 recovery 尚未成功时介入，
+        // 避免覆盖已成功的栅格化/乱码中文恢复结果（如水雾等中文充足图纸）。
+        var oleApplied = false
+        if ((nonChineseDxf || encodingLoss) && !recoverySucceeded && !oleApplied) {
+            try {
+                val oleRes = DwgOleExtractor.extractOleText(dxfPath)
+                if (oleRes.text.isNotBlank()) {
+                    val oleStats = countTextKotlin(oleRes.text)
+                    if (oleStats.fourth > 0) {
+                        finalStats = oleStats
+                        finalText = oleRes.text
+                        curTotal = oleStats.second + oleStats.third
+                        dxfPagesReason = "OLE预览OCR(对象${oleRes.objects}/位图${oleRes.bitmapsOcred})"
+                        recoverySucceeded = true
+                        oleApplied = true
+                        Log.d("WordCount", "DWG OLE OCR 采用 $dName: fe=${oleStats.second} nc=${oleStats.third} chars=${oleStats.fourth}")
+                    }
+                }
+            } catch (e: Throwable) {
+                Log.w("WordCount", "DWG OLE OCR 失败 $dName: ${e.message}")
+            }
+            // OLE 未给出中文时，回退原始字节 CJK 扫描补充（仅当当前 fe 仍极低）
+            if (!oleApplied && finalStats.second <= 5) {
+                try {
+                    val rawScan = DwgRawCjkScanner.scanRawDwg(file.absolutePath)
+                    if (rawScan.cjkTotal >= 200 && rawScan.cjkDiversity < 0.6 && rawScan.commonRatio >= 0.10 && rawScan.text.isNotBlank()) {
+                        val rs = countTextKotlin(rawScan.text)
+                        finalStats = rs
+                        finalText = rawScan.text
+                        curTotal = rs.second + rs.third
+                        dxfPagesReason = "${rawScan.method}原始字节扫描恢复"
+                        recoverySucceeded = true
+                        oleApplied = true
+                        Log.d("WordCount", "DWG OLE缺失→原始字节扫描 $dName: cjk=${rawScan.cjkTotal}")
+                    }
+                } catch (_: Throwable) {}
+            }
+        }
+
         // ── v1.5.61 / v1.5.86: 终极兜底 ──
         // 仅当源 DWG 二进制中确有中文字符证据时才做原始字节扫描；
         // 否则对栅格化/英文 DWG 的随机字节扫描会产生虚假 CJK 膨胀。
-        if (!recoverySucceeded && finalStats.second <= 5 && cjkInRaw >= 50) {
+        if (!recoverySucceeded && !oleApplied && finalStats.second <= 5 && cjkInRaw >= 50) {
             val rawScanner = DwgRawCjkScanner.scanRawDwg(file.absolutePath)
             if (rawScanner.cjkTotal >= 200 && rawScanner.cjkDiversity < 0.6 && rawScanner.commonRatio >= 0.10 && rawScanner.text.isNotEmpty()) {
                 val rs = countTextKotlin(rawScanner.text)
