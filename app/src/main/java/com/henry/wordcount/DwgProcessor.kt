@@ -55,6 +55,7 @@ object DwgProcessor {
         var dxfPages: Int? = null
         var dxfPagesReason: String? = null
         var dxfMojibake = false
+        var nonChineseDxf = false
         var dxfText = ""
         var dxfDiag = ""
         var printedScope = false
@@ -114,7 +115,7 @@ object DwgProcessor {
                 // 不应采信其膨胀的矢量文字，改用 OLE 预览 OCR（见下方 OLE 块）。对齐桌面：
                 // 桌面在 encoding_loss 时丢弃 LibreDWG 膨胀 items，改用 dwggrep + OLE 预览 OCR。
                 val dxfCjkRatioToTotal = if (dxfStats.fourth > 0) dxfCjkCount.toDouble() / dxfStats.fourth else 0.0
-                val nonChineseDxf = dxfStats.fourth >= 500 && dxfCjkCount <= 5 && dxfCjkRatioToTotal < 0.01
+                nonChineseDxf = dxfStats.fourth >= 500 && dxfCjkCount <= 5 && dxfCjkRatioToTotal < 0.01
                 // v1.5.92: DWG 结构化 DXF 是正式统计的唯一可信来源。只要 DWG→DXF 转换成功、
                 // 解析到非空文字且不是乱码，就直接采用 DXF，不再因二进制 ASCII 扫描数量
                 // 更大而回退到噪声。raw 扫描仅用于后续 CJK 恢复/兜底。
