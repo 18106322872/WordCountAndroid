@@ -6,7 +6,7 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
-# 单任务：编译 APK。图片 OCR 主路径用 Google ML Kit Text Recognition；方案 C 增加 Tesseract(tess-two) 作为低召回兜底（模型由本 workflow 下载进 assets）。
+# 单任务：编译 APK。图片 OCR 主路径用 Google ML Kit Text Recognition；方案 C 最强引擎兜底升级为 PaddleOCR(PP-OCRv4，equationl/paddleocr4android，Paddle-Lite 后端)，模型由本 workflow 下载进 assets。
 
 # 允许默认 GITHUB_TOKEN 创建 Release（否则发布 APK 会 403）
 permissions:
@@ -51,14 +51,22 @@ jobs:
           VER=$(grep versionName app/build.gradle | head -1 | grep -oP "[\d.]+" || echo "1.0.9")
           echo "VER=$VER" >> "$GITHUB_OUTPUT"
           echo "版本号: $VER"
-      # 方案 C：下载 Tesseract 离线 OCR 模型（chi_sim+eng）进 assets/tessdata，随 APK 内置。
-      # 模型缺失时 TesseractOcr.available=false，自动退回纯 ML Kit（零回归，构建不依赖模型存在）。
-      - name: Download Tesseract OCR models
+      # 方案 C：下载 PaddleOCR(PP-OCRv4) 离线模型(cls/det/rec .nb)进 assets/models/ch_PP-OCRv4，随 APK 内置。
+      # 模型来自 equationl/paddleocr4android 官方 demo 自带模型（已通过 Paddle-Lite 量化，适配移动端）。
+      # 模型缺失时 PaddleOcr.available=false，自动退回纯 ML Kit（零回归，构建不依赖模型存在）。
+      - name: Download PaddleOCR (PP-OCRv4) models
         run: |
-          mkdir -p app/src/main/assets/tessdata
-          curl -fsSL -o app/src/main/assets/tessdata/chi_sim.traineddata https://github.com/tesseract-ocr/tessdata_fast/raw/main/chi_sim.traineddata || true
-          curl -fsSL -o app/src/main/assets/tessdata/eng.traineddata https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata || true
-          ls -lh app/src/main/assets/tessdata || true
+          mkdir -p app/src/main/assets/models/ch_PP-OCRv4
+          BASE=https://raw.githubusercontent.com/equationl/paddleocr4android/master/app/src/main/assets/models/ch_PP-OCRv4
+          curl -fsSL -o app/src/main/assets/models/ch_PP-OCRv4/cls.nb "$BASE/cls.nb" || true
+          curl -fsSL -o app/src/main/assets/models/ch_PP-OCRv4/det.nb "$BASE/det.nb" || true
+          curl -fsSL -o app/src/main/assets/models/ch_PP-OCRv4/rec.nb "$BASE/rec.nb" || true
+          for f in cls.nb det.nb rec.nb; do
+            if [ ! -s "app/src/main/assets/models/ch_PP-OCRv4/$f" ]; then
+              echo "MODEL MISSING/EMPTY: $f"; exit 1
+            fi
+          done
+          ls -lh app/src/main/assets/models/ch_PP-OCRv4
       # v1.5.5(WordCount): 改用 JNI 加载 libdwg2dxf.so（替代 v1.5.1~1.5.3 的 exec 二进制方案）。
       # Android SELinux 禁止从 app 私有目录 exec 原生二进制，但允许从 APK lib/ 加载 .so（JNI）。
       # 步骤：交叉编译 LibreDWG 静态库 → 编译 JNI wrapper(dwg2dxf_jni.c) 链接成 libdwg2dxf.so → 放 jniLibs。
@@ -164,6 +172,11 @@ jobs:
             echo "ALL ABI BUILDS OK"
           fi
 
+      # 预触发 JitPack 构建 paddleocr4android（首次按需编译可能较慢，提前预热以便 Gradle 解析时命中缓存）
+      - name: Warm JitPack PaddleOCR build
+        continue-on-error: true
+        run: |
+          curl -fsSL --max-time 240 -o /dev/null "https://jitpack.io/com/github/equationl/paddleocr4android/paddleocr4android/v1.3.0/build.log" || true
 
       - name: Clean & Build debug APK（强制 clean + --no-build-cache，确保打包的是最新 Python/Kotlin 源码）
         env:

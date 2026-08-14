@@ -27,7 +27,7 @@ import kotlin.math.min
  *  4) 内嵌图片提取（多策略）→ ML Kit OCR
  */
 /**
- * 方案 C 的"强引擎"统一接口：ML Kit 之外的第二个 OCR 阅读器（如 Tesseract / PaddleOCR-mobile）。
+ * 方案 C 的"强引擎"统一接口：ML Kit 之外的第二个 OCR 阅读器（当前实现为 PaddleOCR，PP-OCRv4）。
  * 仅作为高召回兜底，不污染 ML Kit 主路径结果。后续更换引擎只需替换实现，路由逻辑不动。
  */
 interface StrongOcr {
@@ -44,7 +44,7 @@ object PdfOcrEngine {
     private const val TILE_SPLIT_PX = 1000   // v1.5.92: 分块更细，产生更多小块以提升密集小字召回
     private const val TILE_UPSCALE_PX = 2000 // v1.5.92: 每块放大到 2K，比 1400 更清晰
     private const val LOW_RECALL = 200       // v1.5.91: 渲染路径召回低于此字数改试内嵌图
-    private const val STRONG_TRIGGER = 200    // 方案 C：主路径总字数低于此值才启用强引擎兜底（避免污染 ML Kit 好结果）
+    private const val STRONG_TRIGGER = 800    // 方案 C：主路径总字数低于此值才启用强引擎兜底（图纸类 ML Kit 常 <800，故 PaddleOCR 多会介入）
 
     data class PdfOcrResult(val text: String, val pages: Int)
 
@@ -87,9 +87,9 @@ object PdfOcrEngine {
             lastDiag = "OCR已禁用(ocrEnabled=false)"
             return null
         }
-        // 方案 C：惰性初始化强引擎（Tesseract）；模型缺失时 available=false，不抛异常、不阻断主流程
-        TesseractOcr.ensureInit(context)
-        Log.d("WordCount", "PdfOcr 开始: ${file.name} (${file.length()} bytes) printMode=$forPrintMode ocrEnabled=${OcrEngine.ocrEnabled} ocrFailed=${OcrEngine.ocrFailed} strongOcr=${TesseractOcr.available}")
+        // 方案 C：惰性初始化强引擎（PaddleOCR）；模型缺失时 available=false，不抛异常、不阻断主流程
+        PaddleOcr.ensureInit(context)
+        Log.d("WordCount", "PdfOcr 开始: ${file.name} (${file.length()} bytes) printMode=$forPrintMode ocrEnabled=${OcrEngine.ocrEnabled} ocrFailed=${OcrEngine.ocrFailed} strongOcr=${PaddleOcr.available}")
 
         // 1) 系统 PdfRenderer
         val sys = renderWithSystem(context, file, forPrintMode)
@@ -146,9 +146,9 @@ object PdfOcrEngine {
             }
         }
 
-        // ── 方案 C：强引擎兜底（Tesseract）。仅当主路径召回偏低或全空时启用，避免污染 ML Kit 好结果 ──
-        val strong = if (TesseractOcr.available && (primary == null || primary.text.length < STRONG_TRIGGER)) {
-            runStrongOcr(context, file)?.also { diag.append("[强引擎(Tesseract):${it.text.length}字] ") }
+        // ── 方案 C：强引擎兜底（PaddleOCR）。仅当主路径召回偏低或全空时启用，避免污染 ML Kit 好结果 ──
+        val strong = if (PaddleOcr.available && (primary == null || primary.text.length < STRONG_TRIGGER)) {
+            runStrongOcr(context, file)?.also { diag.append("[强引擎(PaddleOCR):${it.text.length}字] ") }
         } else null
 
         val result = when {
@@ -172,7 +172,7 @@ object PdfOcrEngine {
 
     /**
      * 方案 C 强引擎路径：用 Pdfium 以 3x 渲染每页（高密度小字需要高分辨率），
-     * 逐页交给 Tesseract 识别。仅在 ML Kit 主路径召回偏低时由 extractText 调用。
+     * 逐页交给 PaddleOCR 识别。仅在 ML Kit 主路径召回偏低时由 extractText 调用。
      * 引擎未就绪（available=false）或异常时返回 null，不抛异常。
      */
     private fun runStrongOcr(context: Context, file: File): PdfOcrResult? {
@@ -202,7 +202,7 @@ object PdfOcrEngine {
                     try {
                         core.renderPageBitmap(doc, bmp, i, 0, 0, bw, bh)
                         if (isBlankBitmap(bmp)) continue
-                        val t = TesseractOcr.recognize(bmp)
+                        val t = PaddleOcr.recognize(bmp)
                         if (!t.isNullOrBlank()) { sb.append(t).append('\n'); any = true }
                     } finally { bmp.recycle() }
                 } catch (_: Throwable) { }
