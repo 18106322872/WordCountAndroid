@@ -2454,7 +2454,7 @@ private fun addFiles(
                                     "meta" to emptyMap<String, Any?>(),
                                     "pages" to ocrRes.pages,
                                     "diag" to "$pdfDiag\n(OCR补充$mergedTag)",
-                                    "ocrNote" to "已OCR扫描${ocrRes.pages}页$mergedTag"
+                                    "ocrNote" to PdfOcrEngine.buildOcrNote(ocrRes.pages, mergedTag)
                                 )
                                 val fr = toFileResult(resMap, f.absolutePath)
                                 entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_ocr", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))

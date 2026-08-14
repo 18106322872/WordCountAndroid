@@ -169,7 +169,7 @@ object FileProcessor {
                     "meta" to emptyMap<String, Any?>(),
                     "pages" to ocrRes.pages,
                     "diag" to "$pdfDiag\n(OCR补充$mergedTag)",
-                    "ocrNote" to "已OCR扫描${ocrRes.pages}页$mergedTag"
+                    "ocrNote" to PdfOcrEngine.buildOcrNote(ocrRes.pages, mergedTag)
                 )
                 ProcessOutput(resMap, null)
             } else {

@@ -72,6 +72,18 @@ object PdfOcrEngine {
     @Volatile var lastDiag: String = ""
         private set
 
+    // v1.5.100: 供 UI 直接显示的简明诊断（PaddleOCR 是否工作、各路径字数）
+    @Volatile var lastPaddleAvailable: Boolean = false
+        private set
+    @Volatile var lastPaddleInitError: String = ""
+        private set
+    @Volatile var lastPrimaryChars: Int = 0
+        private set
+    @Volatile var lastStrongChars: Int = 0
+        private set
+    @Volatile var lastMergedChars: Int = 0
+        private set
+
     /**
      * 提取 PDF 文本（渲染+OCR）。
      * @param forPrintMode v1.3.81: 为"文字型但Kotlin无法解码"的PDF使用更高渲染质量（PRINT模式+2x分辨率），
@@ -81,6 +93,11 @@ object PdfOcrEngine {
         lastFailReason = FailReason.OK
         lastFailDetail = ""
         lastDiag = ""
+        lastPaddleAvailable = false
+        lastPaddleInitError = ""
+        lastPrimaryChars = 0
+        lastStrongChars = 0
+        lastMergedChars = 0
         if (!OcrEngine.ocrEnabled) {
             Log.w("WordCount", "PdfOcr 跳过: ocrEnabled=false")
             lastFailReason = FailReason.OCR_DISABLED
@@ -89,7 +106,9 @@ object PdfOcrEngine {
         }
         // 方案 C：惰性初始化强引擎（PaddleOCR）；模型缺失时 available=false，不抛异常、不阻断主流程
         PaddleOcr.ensureInit(context)
-        Log.d("WordCount", "PdfOcr 开始: ${file.name} (${file.length()} bytes) printMode=$forPrintMode ocrEnabled=${OcrEngine.ocrEnabled} ocrFailed=${OcrEngine.ocrFailed} strongOcr=${PaddleOcr.available}")
+        lastPaddleAvailable = PaddleOcr.available
+        lastPaddleInitError = PaddleOcr.lastError ?: ""
+        Log.d("WordCount", "PdfOcr 开始: ${file.name} (${file.length()} bytes) printMode=$forPrintMode ocrEnabled=${OcrEngine.ocrEnabled} ocrFailed=${OcrEngine.ocrFailed} strongOcr=${PaddleOcr.available} paddleErr=${lastPaddleInitError}")
 
         // 1) 系统 PdfRenderer
         val sys = renderWithSystem(context, file, forPrintMode)
@@ -125,8 +144,13 @@ object PdfOcrEngine {
                 val useStrongForImages = PaddleOcr.available
                 for ((idx, bmp) in images.withIndex()) {
                     try {
+                        val src = if (useStrongForImages) (enhanceBitmap(bmp) ?: bmp) else bmp
                         val t = if (useStrongForImages) {
-                            recognizeTiledGeneric(bmp) { PaddleOcr.recognize(it) ?: "" }
+                            try {
+                                recognizeTiledGeneric(src) { PaddleOcr.recognize(it) ?: "" }
+                            } finally {
+                                if (src !== bmp) src.recycle()
+                            }
                         } else {
                             OcrEngine.recognizeBitmap(bmp, skipPostFilter = true)
                         }
@@ -152,6 +176,8 @@ object PdfOcrEngine {
             }
         }
 
+        lastPrimaryChars = primary?.text?.length ?: 0
+
         // ── 方案 C：强引擎兜底（PaddleOCR）。仅当主路径召回偏低或全空时启用，避免污染 ML Kit 好结果 ──
         val strong = if (PaddleOcr.available && (primary == null || primary.text.length < STRONG_TRIGGER)) {
             runStrongOcr(context, file)?.also { diag.append("[强引擎(PaddleOCR):${it.text.length}字] ") }
@@ -169,6 +195,10 @@ object PdfOcrEngine {
             primary != null -> primary
             else -> null
         }
+
+        // v1.5.100: 记录简明诊断供 UI 显示
+        lastStrongChars = strong?.text?.length ?: 0
+        lastMergedChars = result?.text?.length ?: 0
 
         // 汇总最终诊断（v1.3.84: 累积所有路径）
         lastDiag = diag.toString().trim()
@@ -214,8 +244,13 @@ object PdfOcrEngine {
                     try {
                     core.renderPageBitmap(doc, bmp, i, 0, 0, bw, bh)
                     if (isBlankBitmap(bmp)) continue
-                    // v1.5.99: 强引擎必须分块，避免整页大图被 PaddleOCR 内部压缩到 det 输入尺寸而丢小字
-                    val t = recognizeTiledGeneric(bmp) { PaddleOcr.recognize(it) ?: "" }
+                    // v1.5.100: 强引擎先预处理（灰度+对比度），再分块 PaddleOCR
+                    val enhanced = enhanceBitmap(bmp) ?: bmp
+                    val t = try {
+                        recognizeTiledGeneric(enhanced) { PaddleOcr.recognize(it) ?: "" }
+                    } finally {
+                        if (enhanced !== bmp) enhanced.recycle()
+                    }
                     Log.d("WordCount", "PdfOcr(强引擎) p${i + 1}: ${bw}x${bh} -> ${t.length}字")
                     if (t.isNotBlank()) { sb.append(t).append('\n'); any = true }
                     } finally { bmp.recycle() }
@@ -734,6 +769,49 @@ object PdfOcrEngine {
             return i
         }
         return -1
+    }
+
+    /** 构造供 UI 显示的简明 OCR 诊断。 */
+    fun buildOcrNote(pages: Int, mergedTag: String = ""): String {
+        val err = lastPaddleInitError.takeIf { it.isNotBlank() }?.let { "($it)" } ?: ""
+        val paddle = if (lastPaddleAvailable) "可用" else "不可用"
+        return "已OCR扫描${pages}页${mergedTag} | Paddle=$paddle$err | 主${lastPrimaryChars}/强${lastStrongChars}/合${lastMergedChars}"
+    }
+
+    /**
+     * v1.5.100: 图片预处理——转灰度 + 自动对比度拉伸 + 对比度增强。
+     * 对齐桌面 RapidOCR 的 `_ocr_image_chunked` 预处理（autocontrast + contrast 1.6），
+     * 可显著提升 CAD 工程图中浅灰/细小文字的检出率。
+     */
+    private fun enhanceBitmap(src: Bitmap): Bitmap? {
+        return try {
+            val w = src.width; val h = src.height
+            if (w <= 0 || h <= 0) return@enhanceBitmap null
+            val pixels = IntArray(w * h)
+            src.getPixels(pixels, 0, w, 0, 0, w, h)
+            var minLum = 255; var maxLum = 0
+            for (i in pixels.indices) {
+                val p = pixels[i]
+                val r = p shr 16 and 0xFF; val g = p shr 8 and 0xFF; val b = p and 0xFF
+                val lum = (0.299 * r + 0.587 * g + 0.114 * b).toInt()
+                if (lum < minLum) minLum = lum
+                if (lum > maxLum) maxLum = lum
+            }
+            val range = maxLum - minLum
+            // autocontrast 拉伸到满量程后再增强 1.6 倍
+            val scale = if (range <= 0) 1.6f else (255f / range) * 1.6f
+            val translate = -minLum * scale
+            val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            for (i in pixels.indices) {
+                val p = pixels[i]
+                val r = p shr 16 and 0xFF; val g = p shr 8 and 0xFF; val b = p and 0xFF
+                val lum = (0.299 * r + 0.587 * g + 0.114 * b)
+                val v = (lum * scale + translate).toInt().coerceIn(0, 255)
+                pixels[i] = (p and -0x1000000.toInt()) or (v shl 16) or (v shl 8) or v
+            }
+            out.setPixels(pixels, 0, w, 0, 0, w, h)
+            out
+        } catch (_: Throwable) { null }
     }
 
 }

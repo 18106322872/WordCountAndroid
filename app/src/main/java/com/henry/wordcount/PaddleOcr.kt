@@ -28,6 +28,10 @@ object PaddleOcr : StrongOcr {
     @Volatile override var available: Boolean = false
         private set
 
+    /** 最近一次初始化失败的错误信息（供 UI 诊断显示）。 */
+    @Volatile var lastError: String? = null
+        private set
+
     @Volatile private var initTried = false
     private var ocr: OCR? = null
     private val lock = Any()
@@ -47,6 +51,11 @@ object PaddleOcr : StrongOcr {
                 config.clsModelFilename = "cls.nb"
                 config.detModelFilename = "det.nb"
                 config.recModelFilename = "rec.nb"
+                config.labelPath = "labels/ppocr_keys_v1.txt"
+                // 工程图密集小字：把检测模型长边从默认 960 提到 1280，提升微小文字/标注检出率。
+                config.detLongSize = 1280
+                // 降低置信度阈值，避免小字/浅灰字因 score 略低被过滤。
+                config.scoreThreshold = 0.05f
                 config.isRunDet = true
                 config.isRunCls = true
                 config.isRunRec = true
@@ -64,13 +73,16 @@ object PaddleOcr : StrongOcr {
                 if (ok.get() && err == null) {
                     ocr = engine
                     available = true
+                    lastError = null
                 } else {
                     available = false
+                    lastError = err?.message ?: err?.javaClass?.simpleName ?: "未知初始化失败"
                     try { engine.releaseModel() } catch (_: Throwable) {}
                 }
             } catch (t: Throwable) {
                 available = false
                 ocr = null
+                lastError = t.message ?: t.javaClass.simpleName
             }
         }
     }
@@ -100,6 +112,7 @@ object PaddleOcr : StrongOcr {
             try { ocr?.releaseModel() } catch (_: Throwable) {}
             ocr = null
             available = false
+            lastError = null
         }
     }
 }
