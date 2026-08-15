@@ -151,7 +151,7 @@ object PdfOcrEngine {
                         val src = if (useStrongForImages) (enhanceBitmap(bmp) ?: bmp) else bmp
                         val t = if (useStrongForImages) {
                             try {
-                                recognizeTiledGeneric(src) { PaddleOcr.recognize(it) ?: "" }
+                                recognizeTiledGeneric(src, upscalePx = 1280) { PaddleOcr.recognize(it) ?: "" }
                             } finally {
                                 if (src !== bmp) src.recycle()
                             }
@@ -217,119 +217,119 @@ object PdfOcrEngine {
     }
 
     /**
-     * 方案 C 强引擎路径：用 Pdfium 以 3x 渲染每页（高密度小字需要高分辨率），
-     * 逐页交给 PaddleOCR 识别。仅在 ML Kit 主路径召回偏低时由 extractText 调用。
-     * 引擎未就绪（available=false）或异常时返回 null，不抛异常。
+     * 方案 C 强引擎路径：用系统 PdfRenderer / PdfiumCore 渲染每页，交给 PaddleOCR 识别。
+     * 仅在 ML Kit 主路径召回偏低时由 extractText 调用。引擎未就绪或异常时返回 null。
      *
-     * v1.6.1: 增加强引擎诊断，并在 PdfiumCore 渲染空白/失败时 fallback 到系统 PdfRenderer。
+     * v1.6.2: 优先走系统 PdfRenderer（已知对 ML Kit 有效，避免 PdfiumCore 对特定 PDF
+     * 渲染失败导致强引擎完全拿不到图）；PdfiumCore 作为高分辨率补充。所有路径都记录
+     * 详细诊断，即使最终返回 null，lastStrongDiag 也不会为空。
      */
     private fun runStrongOcr(context: Context, file: File): PdfOcrResult? {
         val diag = StringBuilder()
-        val core = try { PdfiumCore(context) } catch (e: Throwable) {
-            lastStrongDiag = "PdfiumCore初始化失败:${e.javaClass.simpleName}"
-            Log.w("WordCount", "PdfOcr(强引擎) $lastStrongDiag")
-            return null
-        }
-    var sysPfd: ParcelFileDescriptor? = null
-    var sysRenderer: PdfRenderer? = null
-    return try {
-        val pfd = try { ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY) } catch (_: Throwable) { return null }
-        val doc = try { core.newDocument(pfd) } catch (_: Throwable) { return null }
-        val pageCount = try { core.getPageCount(doc) } catch (_: Throwable) { return null }
-        val limit = min(pageCount, MAX_PAGES)
         val sb = StringBuilder()
         var any = false
         var blankCount = 0
         var failCount = 0
-        var sysFallbackCount = 0
-        for (i in 0 until limit) {
-                try { core.openPage(doc, i) } catch (_: Throwable) { failCount++; continue }
-                var pageBmp: Bitmap? = null
-                var source = ""
+        var pdfiumOkCount = 0
+        var sysOkCount = 0
+        var pageCount = 0
+
+        fun processBitmap(bmp: Bitmap, source: String, pageIdx: Int) {
+            try {
+                val dark = String.format("%.2f", darkPixelRatio(bmp))
+                val maxSide = max(bmp.width, bmp.height)
+                val strongBmp = if (maxSide > 1280) {
+                    try {
+                        val scale = 1280f / maxSide
+                        Bitmap.createScaledBitmap(bmp, (bmp.width * scale).toInt().coerceAtLeast(1), (bmp.height * scale).toInt().coerceAtLeast(1), true)
+                    } catch (_: Throwable) { bmp }
+                } else bmp
+                val enhanced = enhanceBitmap(strongBmp)
+                val tEnhanced = try {
+                    recognizeTiledGeneric(enhanced ?: strongBmp, upscalePx = 1280) { PaddleOcr.recognize(it) ?: "" }
+                } catch (_: Throwable) { "" }
+                val tOriginal = try {
+                    recognizeTiledGeneric(strongBmp, upscalePx = 1280) { PaddleOcr.recognize(it) ?: "" }
+                } catch (_: Throwable) { "" }
+                val t = if (tEnhanced.length >= tOriginal.length) tEnhanced else tOriginal
+                diag.append(" p${pageIdx + 1}[$source ${bmp.width}x${bmp.height} d=$dark% e=${tEnhanced.length} o=${tOriginal.length}]")
+                if (t.isNotBlank()) { sb.append(t).append('\n'); any = true }
+                enhanced?.recycle()
+            } catch (_: Throwable) {
+                diag.append(" p${pageIdx + 1}[$source procErr]")
+            }
+        }
+
+        // Stage 1: 系统 PdfRenderer 2x（与 ML Kit 同一路径，最可能成功）
+        var sysPfd: ParcelFileDescriptor? = null
+        var sysRenderer: PdfRenderer? = null
+        try {
+            sysPfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+            sysRenderer = PdfRenderer(sysPfd)
+            pageCount = sysRenderer.pageCount
+            val limit = min(pageCount, MAX_PAGES)
+            for (i in 0 until limit) {
+                val page = try { sysRenderer.openPage(i) } catch (_: Throwable) { failCount++; continue }
                 try {
-                    val sz = try { core.getPageSize(doc, i) } catch (_: Throwable) { null } ?: continue
-                    val sw = sz.width.toInt(); val sh = sz.height.toInt()
-                    if (sw <= 0 || sh <= 0) continue
-                    val sc = min(3f, MAX_DIM.toFloat() / max(sw, sh).toFloat())
-                    val bw = max(1, (sw * sc).toInt())
-                    val bh = max(1, (sh * sc).toInt())
+                    val w = page.width; val h = page.height
+                    if (w <= 0 || h <= 0) { failCount++; continue }
+                    val scale = min(2f, MAX_DIM.toFloat() / max(w, h))
+                    val bw = max(1, (w * scale).toInt())
+                    val bh = max(1, (h * scale).toInt())
                     val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { failCount++; continue }
                     try {
-                        core.renderPageBitmap(doc, bmp, i, 0, 0, bw, bh)
+                        page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                         if (!isBlankBitmap(bmp)) {
-                            pageBmp = bmp
-                            source = "Pdfium"
+                            processBitmap(bmp, "Sys", i)
+                            sysOkCount++
                         } else {
                             blankCount++
                         }
-                    } catch (_: Throwable) { failCount++ }
-                } catch (_: Throwable) { failCount++ }
-
-                // v1.6.1: PdfiumCore 渲染空白或失败时，fallback 到系统 PdfRenderer 2x
-                if (pageBmp == null) {
-                    try {
-                        if (sysRenderer == null) {
-                            sysPfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-                            sysRenderer = PdfRenderer(sysPfd!!)
-                        }
-                        if (i < sysRenderer.pageCount) {
-                            val page = sysRenderer.openPage(i)
-                            try {
-                                val w = page.width; val h = page.height
-                                if (w > 0 && h > 0) {
-                                    val scale = min(2f, MAX_DIM.toFloat() / max(w, h))
-                                    val bw = max(1, (w * scale).toInt())
-                                    val bh = max(1, (h * scale).toInt())
-                                    val bmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
-                                    page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                                    if (!isBlankBitmap(bmp)) {
-                                        pageBmp = bmp
-                                        source = "SysFb"
-                                        sysFallbackCount++
-                                    } else {
-                                        bmp.recycle()
-                                    }
-                                }
-                            } finally { page.close() }
-                        }
-                    } catch (_: Throwable) {}
-                }
-
-                if (pageBmp == null) continue
-                try {
-                    // v1.6.1: 限制 PaddleOCR 输入最大边不超过 1280，避免过度放大导致检测失败。
-                    val maxSide = max(pageBmp.width, pageBmp.height)
-                    val strongBmp = if (maxSide > 1280) {
-                        try {
-                            val scale = 1280f / maxSide
-                            Bitmap.createScaledBitmap(pageBmp, (pageBmp.width * scale).toInt().coerceAtLeast(1), (pageBmp.height * scale).toInt().coerceAtLeast(1), true)
-                        } catch (_: Throwable) { pageBmp }
-                    } else pageBmp
-                    val enhanced = enhanceBitmap(strongBmp)
-                    val tEnhanced = try {
-                        recognizeTiledGeneric(enhanced ?: strongBmp, upscalePx = 1280) { PaddleOcr.recognize(it) ?: "" }
-                    } catch (_: Throwable) { "" }
-                    val tOriginal = try {
-                        recognizeTiledGeneric(strongBmp, upscalePx = 1280) { PaddleOcr.recognize(it) ?: "" }
-                    } catch (_: Throwable) { "" }
-                    val t = if (tEnhanced.length >= tOriginal.length) tEnhanced else tOriginal
-                    val dark = String.format("%.2f", darkPixelRatio(pageBmp))
-                    diag.append(" p${i + 1}[$source ${pageBmp.width}x${pageBmp.height} d=$dark% e=${tEnhanced.length} o=${tOriginal.length}]")
-                    if (t.isNotBlank()) { sb.append(t).append('\n'); any = true }
-                    enhanced?.recycle()
-                } finally {
-                    pageBmp?.recycle()
-                }
+                    } finally { bmp.recycle() }
+                } finally { page.close() }
             }
-            lastStrongDiag = "强引擎:pages=$pageCount blank=$blankCount fail=$failCount fb=$sysFallbackCount$diag"
-            Log.d("WordCount", "PdfOcr(强引擎) 汇总: $lastStrongDiag")
-            if (any) PdfOcrResult(sb.toString().trim(), pageCount) else null
         } catch (e: Throwable) {
-            lastStrongDiag = "强引擎异常:${e.javaClass.simpleName}"
-            null
-        } finally {
-            runCatching { sysRenderer?.close() }; runCatching { sysPfd?.close() }
+            diag.append(" [sysErr:${e.javaClass.simpleName}]")
         }
+
+        // Stage 2: 若系统 PdfRenderer 没拿到任何字，再用 PdfiumCore 3x 高分辨率补充
+        if (!any) {
+            try {
+                val core = PdfiumCore(context)
+                val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+                val doc = core.newDocument(pfd)
+                val pc = core.getPageCount(doc)
+                if (pageCount == 0) pageCount = pc
+                val limit = min(pc, MAX_PAGES)
+                for (i in 0 until limit) {
+                    try { core.openPage(doc, i) } catch (_: Throwable) { failCount++; continue }
+                    try {
+                        val sz = core.getPageSize(doc, i) ?: continue
+                        val sw = sz.width.toInt(); val sh = sz.height.toInt()
+                        if (sw <= 0 || sh <= 0) continue
+                        val sc = min(3f, MAX_DIM.toFloat() / max(sw, sh))
+                        val bw = max(1, (sw * sc).toInt())
+                        val bh = max(1, (sh * sc).toInt())
+                        val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { failCount++; continue }
+                        try {
+                            core.renderPageBitmap(doc, bmp, i, 0, 0, bw, bh)
+                            if (!isBlankBitmap(bmp)) {
+                                processBitmap(bmp, "Pdfium", i)
+                                pdfiumOkCount++
+                            } else {
+                                blankCount++
+                            }
+                        } finally { bmp.recycle() }
+                    } catch (_: Throwable) { failCount++ }
+                }
+            } catch (e: Throwable) {
+                diag.append(" [pdfiumErr:${e.javaClass.simpleName}]")
+            }
+        }
+
+        lastStrongDiag = "强引擎:pages=$pageCount blank=$blankCount fail=$failCount sys=$sysOkCount pdfium=$pdfiumOkCount$diag"
+        Log.d("WordCount", "PdfOcr(强引擎) 汇总: $lastStrongDiag")
+        return if (any) PdfOcrResult(sb.toString().trim(), pageCount) else null
     }
 
     // ══════════════════ 1) 系统 PdfRenderer ══════════════════
