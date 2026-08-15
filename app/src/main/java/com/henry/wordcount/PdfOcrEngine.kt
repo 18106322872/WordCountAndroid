@@ -41,10 +41,12 @@ object PdfOcrEngine {
 
     private const val MAX_PAGES = 40
     private const val MAX_DIM = 4096         // v1.5.91: 4K 渲染上限
-    // v1.7.0: 改回 1200px tile，比 1400 块数更多（6 vs 4），比 1000 更不易切字；
+    // v1.7.1: 分块 1100px，在常见工程图页面上可达 3x2=6 块；每块放大到 2560px，
+    // 给 detLongSize=1920 的检测模型提供超采样源图，避免 v1.7.0 因 1920 源图信息量
+    // 不足导致小字漏检、字数反而下降的问题。
     // 每块放大到 1920px 与 detLongSize 对齐，避免二次缩放模糊。
-    private const val TILE_SPLIT_PX = 1200
-    private const val TILE_UPSCALE_PX = 1920
+    private const val TILE_SPLIT_PX = 1100
+    private const val TILE_UPSCALE_PX = 2560
     private const val LOW_RECALL = 200       // v1.5.91: 渲染路径召回低于此字数改试内嵌图
     private const val STRONG_TRIGGER = 800    // 方案 C：主路径总字数低于此值才启用强引擎兜底（图纸类 ML Kit 常 <800，故 PaddleOCR 多会介入）
 
@@ -259,9 +261,9 @@ object PdfOcrEngine {
                     if (variantBmp == null) continue
                     val t = try {
                     val maxSide = max(variantBmp.width, variantBmp.height)
-                    // v1.7.0: PaddleOCR 输入上限降到 2048，与 detLongSize=1920 接近，
-                    // 避免 2560 放大后被模型缩回导致插值模糊。
-                    val inputBmp = if (maxSide > 2048) {
+                    // v1.7.1: 输入上限恢复 2560，与 TILE_UPSCALE_PX 一致；源图大于 2560 时
+                    // 先缩放到 2560 再交给模型 resize 到 detLongSize=1920，保留超采样细节。
+                    val inputBmp = if (maxSide > 2560) {
                         try {
                             val scale = 2560f / maxSide
                             Bitmap.createScaledBitmap(variantBmp, (variantBmp.width * scale).toInt().coerceAtLeast(1), (variantBmp.height * scale).toInt().coerceAtLeast(1), true)
