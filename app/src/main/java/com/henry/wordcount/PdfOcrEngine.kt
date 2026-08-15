@@ -230,19 +230,19 @@ object PdfOcrEngine {
             Log.w("WordCount", "PdfOcr(强引擎) $lastStrongDiag")
             return null
         }
-        var sysPfd: ParcelFileDescriptor? = null
-        var sysRenderer: PdfRenderer? = null
-        try {
-            val pfd = try { ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY) } catch (_: Throwable) { return null }
-            val doc = try { core.newDocument(pfd) } catch (_: Throwable) { return null }
-            val pageCount = try { core.getPageCount(doc) } catch (_: Throwable) { return null }
-            val limit = min(pageCount, MAX_PAGES)
-            val sb = StringBuilder()
-            var any = false
-            var blankCount = 0
-            var failCount = 0
-            var sysFallbackCount = 0
-            for (i in 0 until limit) {
+    var sysPfd: ParcelFileDescriptor? = null
+    var sysRenderer: PdfRenderer? = null
+    return try {
+        val pfd = try { ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY) } catch (_: Throwable) { return null }
+        val doc = try { core.newDocument(pfd) } catch (_: Throwable) { return null }
+        val pageCount = try { core.getPageCount(doc) } catch (_: Throwable) { return null }
+        val limit = min(pageCount, MAX_PAGES)
+        val sb = StringBuilder()
+        var any = false
+        var blankCount = 0
+        var failCount = 0
+        var sysFallbackCount = 0
+        for (i in 0 until limit) {
                 try { core.openPage(doc, i) } catch (_: Throwable) { failCount++; continue }
                 var pageBmp: Bitmap? = null
                 var source = ""
