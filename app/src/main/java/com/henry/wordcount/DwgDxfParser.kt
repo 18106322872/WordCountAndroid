@@ -551,9 +551,12 @@ object DwgDxfParser {
         val msLines = if (sec.entities.isNotEmpty()) sec.entities else lines
         val msEnts = countTopLevelEntities(msLines)
 
-        // 图纸空间布局：LibreDWG 把非活动布局的实体写在 BLOCKS 段的 *Paper_SpaceN 块里
+        // 图纸空间布局：优先按桌面 ezdxf 的 LAYOUT 对象计数（OBJECTS 段），
+        // 缺失或为零时回退到 BLOCKS 段的 *Paper_SpaceN 块计数。
+        val layoutCount = countLayoutObjects(lines)
         val paperCounts = paperBlockEntityCounts(sec.blocks)
-        val paper = paperCounts.values.count { it > 0 }
+        val blockPaper = paperCounts.values.count { it > 0 }
+        val paper = if (layoutCount >= 1) layoutCount else blockPaper
         val paperTotalEnts = paperCounts.values.sum()
 
         // v1.5.59: 优先采用 LWPOLYLINE 闭合图框（CAD 图纸图框通常用 LWPOLYLINE 绘制）
@@ -732,12 +735,61 @@ object DwgDxfParser {
     }
 
     /**
+     * 扫 OBJECTS 段，按 LAYOUT 对象统计命名布局数（排除 Model）。
+     * 桌面版 ezdxf 的 doc.layouts 实际遍历的是 LAYOUT 字典对象，而不是 BLOCKS 里的
+     * *Paper_Space* 块。LibreDWG 转 DXF 时常同时写出 *Paper_Space（无数字后缀，
+     * 活动 paper space 占位）和 *Paper_Space0 两个块，导致按块计数变成 2，
+     * 而 ezdxf 只识别到一个 LAYOUT。此函数直接对齐 ezdxf 的 layout 口径。
+     */
+    private fun countLayoutObjects(lines: List<String>): Int {
+        var inObjects = false
+        var inLayout = false
+        var name: String? = null
+        var count = 0
+        val n = lines.size
+        var i = 0
+        while (i < n - 1) {
+            val code = lines[i].trim()
+            val value = lines[i + 1].trim()
+            if (code == "0" && value == "SECTION") {
+                if (i + 3 < n && lines[i + 2].trim() == "2") {
+                    inObjects = lines[i + 3].trim() == "OBJECTS"
+                    i += 4
+                    continue
+                }
+            }
+            if (code == "0" && value == "ENDSEC") {
+                if (inLayout) {
+                    if (name != null && name.uppercase() != "MODEL") count++
+                    inLayout = false
+                    name = null
+                }
+                inObjects = false
+                i += 2
+                continue
+            }
+            if (!inObjects) { i += 2; continue }
+            if (code == "0") {
+                if (inLayout) {
+                    if (name != null && name.uppercase() != "MODEL") count++
+                    inLayout = false
+                    name = null
+                }
+                if (value == "LAYOUT") {
+                    inLayout = true
+                }
+            } else if (inLayout && code == "1") {
+                name = value
+            }
+            i += 2
+        }
+        if (inLayout && name != null && name.uppercase() != "MODEL") count++
+        return count
+    }
+
+    /**
      * 扫 BLOCKS 段，统计每个 *Paper_SpaceN 块内的顶层实体数。
-     * 对齐桌面 count_cad_frames 里的：
-     *     for layout in doc.layouts:  nents = len(list(layout))
-     *     paper_total_ents += nents;  if nents > 0: paper += 1
-     * 注意：活动的 *Paper_Space（无数字后缀）被 LibreDWG 跳过不写实体，
-     * 与 ezdxf 视角一致（其实体落在 ENTITIES 段，被当成 modelspace）。
+     * 仅作为 LAYOUT 对象缺失时的兜底；桌面版优先使用 LAYOUT 对象计数。
      */
     private fun paperBlockEntityCounts(blocks: List<String>): Map<String, Int> {
         val res = LinkedHashMap<String, Int>()
