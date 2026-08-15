@@ -908,11 +908,10 @@ object PdfOcrEngine {
             val digits = t.count { it.isDigit() }
             // 保留：较长中文片段 / 中英混合 / 含数字的标注（如"图1"）
             cjk >= 4 || hasWesternWord || (cjk >= 2 && digits > 0)
-        }.joinToString("
-")
+        }.joinToString("\n")
     }
 
-        private fun computeScale(w: Int, h: Int): Float {
+    private fun computeScale(w: Int, h: Int): Float {
         val maxSide = max(w, h)
         return if (maxSide <= MAX_DIM) 1f else MAX_DIM.toFloat() / maxSide
     }
