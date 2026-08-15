@@ -151,7 +151,7 @@ object PdfOcrEngine {
                         val src = if (useStrongForImages) (enhanceBitmap(bmp) ?: bmp) else bmp
                         val t = if (useStrongForImages) {
                             try {
-                                recognizeTiledGeneric(src, upscalePx = 1280) { PaddleOcr.recognize(it) ?: "" }
+                                recognizeTiledGeneric(src, upscalePx = 1920) { PaddleOcr.recognize(it) ?: "" }
                             } finally {
                                 if (src !== bmp) src.recycle()
                             }
@@ -236,25 +236,45 @@ object PdfOcrEngine {
 
         fun processBitmap(bmp: Bitmap, source: String, pageIdx: Int) {
             try {
-                val dark = String.format("%.2f", darkPixelRatio(bmp))
-                val maxSide = max(bmp.width, bmp.height)
-                val strongBmp = if (maxSide > 1280) {
-                    try {
-                        val scale = 1280f / maxSide
-                        Bitmap.createScaledBitmap(bmp, (bmp.width * scale).toInt().coerceAtLeast(1), (bmp.height * scale).toInt().coerceAtLeast(1), true)
-                    } catch (_: Throwable) { bmp }
-                } else bmp
-                val enhanced = enhanceBitmap(strongBmp)
-                val tEnhanced = try {
-                    recognizeTiledGeneric(enhanced ?: strongBmp, upscalePx = 1280) { PaddleOcr.recognize(it) ?: "" }
-                } catch (_: Throwable) { "" }
-                val tOriginal = try {
-                    recognizeTiledGeneric(strongBmp, upscalePx = 1280) { PaddleOcr.recognize(it) ?: "" }
-                } catch (_: Throwable) { "" }
-                val t = if (tEnhanced.length >= tOriginal.length) tEnhanced else tOriginal
-                diag.append(" p${pageIdx + 1}[$source ${bmp.width}x${bmp.height} d=$dark% e=${tEnhanced.length} o=${tOriginal.length}]")
-                if (t.isNotBlank()) { sb.append(t).append('\n'); any = true }
-                enhanced?.recycle()
+                val dark = darkPixelRatio(bmp)
+                val darkStr = String.format("%.2f", dark)
+                // v1.6.3: 暗像素>90% 疑似黑底白字/深色背景，自动反色后再识别，
+                // 并与增强图/原图多路比较取字数最多者。
+                val needsInvert = dark > 90.0
+                val inv = if (needsInvert) invertBitmap(bmp) else null
+                val variants = mutableListOf<Pair<Bitmap?, String>>()
+                variants.add(enhanceBitmap(bmp) to "enh")
+                variants.add(bmp to "orig")
+                if (inv != null) {
+                    variants.add(inv to "inv")
+                    variants.add(enhanceBitmap(inv) to "invEnh")
+                }
+
+                var bestText = ""
+                var bestLabel = ""
+                val detail = StringBuilder()
+                for ((variantBmp, label) in variants) {
+                    if (variantBmp == null) continue
+                    val t = try {
+                        val maxSide = max(variantBmp.width, variantBmp.height)
+                        val inputBmp = if (maxSide > 1920) {
+                            try {
+                                val scale = 1920f / maxSide
+                                Bitmap.createScaledBitmap(variantBmp, (variantBmp.width * scale).toInt().coerceAtLeast(1), (variantBmp.height * scale).toInt().coerceAtLeast(1), true)
+                            } catch (_: Throwable) { variantBmp }
+                        } else variantBmp
+                        recognizeTiledGeneric(inputBmp, upscalePx = 1920) { PaddleOcr.recognize(it) ?: "" }
+                    } catch (_: Throwable) { "" }
+                    detail.append("$label=${t.length}")
+                    if (t.length > bestText.length) { bestText = t; bestLabel = label }
+                }
+                // 回收内部生成的临时 variant，原图由 caller 负责 recycle
+                for ((variantBmp, label) in variants) {
+                    if (variantBmp != null && variantBmp !== bmp) variantBmp.recycle()
+                }
+
+                diag.append(" p${pageIdx + 1}[$source ${bmp.width}x${bmp.height} d=$darkStr% best=$bestLabel($detail)]")
+                if (bestText.isNotBlank()) { sb.append(bestText).append('\n'); any = true }
             } catch (_: Throwable) {
                 diag.append(" p${pageIdx + 1}[$source procErr]")
             }

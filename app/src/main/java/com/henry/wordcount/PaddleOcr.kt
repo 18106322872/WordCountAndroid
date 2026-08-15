@@ -58,9 +58,9 @@ object PaddleOcr : StrongOcr {
                 config.detModelFilename = "det.nb"
                 config.recModelFilename = "rec.nb"
                 config.labelPath = "labels/ppocr_keys_v1.txt"
-                // v1.5.102: 先恢复库默认 960，排除 1280 导致检测输入尺寸异常使识别为 0。
-                // 后续若确认 1280 可用再逐步提升。
-                config.detLongSize = 960
+                // v1.6.3: 强引擎已能正常跑起来，恢复 1280 提升检测输入分辨率，
+                // 看能否提高工程图小字召回。
+                config.detLongSize = 1280
                 // 降低置信度阈值，避免小字/浅灰字因 score 略低被过滤。
                 config.scoreThreshold = 0.05f
                 config.isRunDet = true
