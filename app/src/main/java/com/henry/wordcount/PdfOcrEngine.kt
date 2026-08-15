@@ -187,9 +187,19 @@ object PdfOcrEngine {
         lastPrimaryChars = primary?.text?.length ?: 0
 
         // ── 方案 C：强引擎兜底（PaddleOCR）。仅当主路径召回偏低或全空时启用，避免污染 ML Kit 好结果 ──
-        val strong = if (PaddleOcr.available && (primary == null || primary.text.length < STRONG_TRIGGER)) {
+        val strongRaw = if (PaddleOcr.available && (primary == null || primary.text.length < STRONG_TRIGGER)) {
             runStrongOcr(context, file)?.also { diag.append("[强引擎(PaddleOCR):${it.text.length}字] ") }
         } else null
+
+        // v1.7.2: 主路径几乎无中文时，过滤强引擎里的孤立短中文噪声（工程图符号/线条误识）。
+        // 注意：仅在主路径有可观中文时才不过滤，避免误伤真实中英混合文档。
+        val strong = if (strongRaw != null && primary != null) {
+            val filtered = filterStrongCjkNoise(primary.text, strongRaw.text)
+            if (filtered.length < strongRaw.text.length) {
+                diag.append("[去噪:-${strongRaw.text.length - filtered.length}字] ")
+                strongRaw.copy(text = filtered)
+            } else strongRaw
+        } else strongRaw
 
         // v1.5.99: 强引擎应与主路径合并（去重），而不是二选一。工程图往往 ML Kit 识出大字标题、
         // PaddleOCR 识出小字标注，合并后才能逼近桌面 RapidOCR 的召回。
@@ -866,7 +876,43 @@ object PdfOcrEngine {
     private fun normKey(s: String): String =
         s.lowercase().replace(Regex("[\\p{P}\\p{S}\\s]+"), "")
 
-    private fun computeScale(w: Int, h: Int): Float {
+/** v1.7.2: 判断字符是否属于 CJK/假名/韩文范围，用于中文噪声过滤。 */
+    private fun isCjkChar(c: Char): Boolean {
+        val code = c.code
+        return code in 0x4E00..0x9FFF ||   // CJK Unified Ideographs
+               code in 0x3400..0x4DBF ||   // CJK Extension A
+               code in 0xF900..0xFAFF ||   // CJK Compatibility Ideographs
+               code in 0x3040..0x309F ||   // Hiragana
+               code in 0x30A0..0x30FF ||   // Katakana
+               code in 0xAC00..0xD7AF     // Hangul Syllables
+    }
+
+    /**
+     * v1.7.2: 强引擎中文噪声过滤。
+     * 当 ML Kit 主路径几乎没识别出中文时（常见于纯英文图纸），PaddleOCR 容易把
+     * 工程符号、图框角标、剖面线等误识成孤立汉字。这里过滤掉强引擎结果中
+     * "短小且孤立"的 CJK 片段，保留真实中文行（≥4 字或中英混合或含数字标注）。
+     */
+    private fun filterStrongCjkNoise(primary: String, strong: String): String {
+        if (primary.isBlank() || strong.isBlank()) return strong
+        val primaryCjk = primary.count { isCjkChar(it) }
+        // 主路径本身有可观中文时，不过滤，避免误伤真实中英混合文档
+        if (primaryCjk >= 3) return strong
+
+        return strong.lines().filter { raw ->
+            val t = raw.trim()
+            if (t.isEmpty()) return@filter false
+            val cjk = t.count { isCjkChar(it) }
+            if (cjk == 0) return@filter true
+            val hasWesternWord = Regex("[A-Za-z]{2,}").containsMatchIn(t)
+            val digits = t.count { it.isDigit() }
+            // 保留：较长中文片段 / 中英混合 / 含数字的标注（如"图1"）
+            cjk >= 4 || hasWesternWord || (cjk >= 2 && digits > 0)
+        }.joinToString("
+")
+    }
+
+        private fun computeScale(w: Int, h: Int): Float {
         val maxSide = max(w, h)
         return if (maxSide <= MAX_DIM) 1f else MAX_DIM.toFloat() / maxSide
     }
