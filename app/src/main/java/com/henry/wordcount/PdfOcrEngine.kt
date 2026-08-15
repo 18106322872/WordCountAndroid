@@ -41,8 +41,10 @@ object PdfOcrEngine {
 
     private const val MAX_PAGES = 40
     private const val MAX_DIM = 4096         // v1.5.91: 4K 渲染上限
-    private const val TILE_SPLIT_PX = 1000   // v1.5.92: 分块更细，产生更多小块以提升密集小字召回
-    private const val TILE_UPSCALE_PX = 2000 // v1.5.92: 每块放大到 2K，比 1400 更清晰
+    // v1.6.9: 与桌面 RapidOCR 对齐：切 1400px 大 tile，避免 5x5 细碎分块切字/丢上下文。
+    private const val TILE_SPLIT_PX = 1400
+    // v1.6.9: 每块放大到 2560px，配合 3x 渲染后几乎不再被二次缩放。
+    private const val TILE_UPSCALE_PX = 2560
     private const val LOW_RECALL = 200       // v1.5.91: 渲染路径召回低于此字数改试内嵌图
     private const val STRONG_TRIGGER = 800    // 方案 C：主路径总字数低于此值才启用强引擎兜底（图纸类 ML Kit 常 <800，故 PaddleOCR 多会介入）
 
@@ -151,7 +153,7 @@ object PdfOcrEngine {
                         val src = if (useStrongForImages) (enhanceBitmap(bmp) ?: bmp) else bmp
                         val t = if (useStrongForImages) {
                             try {
-                                recognizeTiledGeneric(src, upscalePx = 1920) { PaddleOcr.recognize(it) ?: "" }
+                                recognizeTiledGeneric(src, upscalePx = 2560) { PaddleOcr.recognize(it) ?: "" }
                             } finally {
                                 if (src !== bmp) src.recycle()
                             }
@@ -256,14 +258,15 @@ object PdfOcrEngine {
                 for ((variantBmp, label) in variants) {
                     if (variantBmp == null) continue
                     val t = try {
-                        val maxSide = max(variantBmp.width, variantBmp.height)
-                        val inputBmp = if (maxSide > 1920) {
-                            try {
-                                val scale = 1920f / maxSide
-                                Bitmap.createScaledBitmap(variantBmp, (variantBmp.width * scale).toInt().coerceAtLeast(1), (variantBmp.height * scale).toInt().coerceAtLeast(1), true)
-                            } catch (_: Throwable) { variantBmp }
-                        } else variantBmp
-                        recognizeTiledGeneric(inputBmp, upscalePx = 1920) { PaddleOcr.recognize(it) ?: "" }
+                    val maxSide = max(variantBmp.width, variantBmp.height)
+                    // v1.6.9: PaddleOCR 输入上限从 1920 提到 2560，配合 3x 渲染。
+                    val inputBmp = if (maxSide > 2560) {
+                        try {
+                            val scale = 2560f / maxSide
+                            Bitmap.createScaledBitmap(variantBmp, (variantBmp.width * scale).toInt().coerceAtLeast(1), (variantBmp.height * scale).toInt().coerceAtLeast(1), true)
+                        } catch (_: Throwable) { variantBmp }
+                    } else variantBmp
+                    recognizeTiledGeneric(inputBmp, upscalePx = 2560) { PaddleOcr.recognize(it) ?: "" }
                     } catch (_: Throwable) { "" }
                     detail.append("$label=${t.length}")
                     if (t.length > bestText.length) { bestText = t; bestLabel = label }
@@ -293,7 +296,8 @@ object PdfOcrEngine {
                 try {
                     val w = page.width; val h = page.height
                     if (w <= 0 || h <= 0) { failCount++; continue }
-                    val scale = min(2f, MAX_DIM.toFloat() / max(w, h))
+                    // v1.6.9: 系统 PdfRenderer 也从 2x 提到 3x，与桌面 fitz 3x 渲染对齐。
+                    val scale = min(3f, MAX_DIM.toFloat() / max(w, h))
                     val bw = max(1, (w * scale).toInt())
                     val bh = max(1, (h * scale).toInt())
                     val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { failCount++; continue }
