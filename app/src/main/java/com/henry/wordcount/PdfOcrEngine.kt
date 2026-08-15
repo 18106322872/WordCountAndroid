@@ -263,7 +263,7 @@ object PdfOcrEngine {
                     // 避免 2560 放大后被模型缩回导致插值模糊。
                     val inputBmp = if (maxSide > 2048) {
                         try {
-                            val scale = 2048f / maxSide
+                            val scale = 2560f / maxSide
                             Bitmap.createScaledBitmap(variantBmp, (variantBmp.width * scale).toInt().coerceAtLeast(1), (variantBmp.height * scale).toInt().coerceAtLeast(1), true)
                         } catch (_: Throwable) { variantBmp }
                     } else variantBmp
