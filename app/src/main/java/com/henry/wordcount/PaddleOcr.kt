@@ -58,13 +58,12 @@ object PaddleOcr : StrongOcr {
                 config.detModelFilename = "det.nb"
                 config.recModelFilename = "rec.nb"
                 config.labelPath = "labels/ppocr_keys_v1.txt"
-                // v1.6.9: 继续提升检测输入分辨率，工程图小字标注密集，
-                // 1280 仍漏大量小字；1600 在移动端仍可接受。
-                config.detLongSize = 1600
-                // v1.6.9: 阈值从 0.3 回调到 0.2。v1.6.5 提到 0.3 后字数从 824
-                // 降到 628，但同份 PDF 桌面 706；现字数仅 138，说明 0.3 对
-                // 该 PDF 过滤过狠，0.2 可在噪声与召回间取得更接近桌面的结果。
-                config.scoreThreshold = 0.2f
+                // v1.7.0: 进一步提高检测输入分辨率到 1920，配合 1200px 分块与 3x 渲染，
+                // 提升工程图小字标注召回。
+                config.detLongSize = 1920
+                // v1.7.0: 阈值从 0.2 降到 0.15。v1.6.9 字数 478 距离桌面 706 仍差 228，
+                // 说明 0.2 对弱对比度小字过滤偏严；0.15 可在噪声可控前提下再提召回。
+                config.scoreThreshold = 0.15f
                 config.isRunDet = true
                 config.isRunCls = true
                 config.isRunRec = true

@@ -41,10 +41,10 @@ object PdfOcrEngine {
 
     private const val MAX_PAGES = 40
     private const val MAX_DIM = 4096         // v1.5.91: 4K 渲染上限
-    // v1.6.9: 与桌面 RapidOCR 对齐：切 1400px 大 tile，避免 5x5 细碎分块切字/丢上下文。
-    private const val TILE_SPLIT_PX = 1400
-    // v1.6.9: 每块放大到 2560px，配合 3x 渲染后几乎不再被二次缩放。
-    private const val TILE_UPSCALE_PX = 2560
+    // v1.7.0: 改回 1200px tile，比 1400 块数更多（6 vs 4），比 1000 更不易切字；
+    // 每块放大到 1920px 与 detLongSize 对齐，避免二次缩放模糊。
+    private const val TILE_SPLIT_PX = 1200
+    private const val TILE_UPSCALE_PX = 1920
     private const val LOW_RECALL = 200       // v1.5.91: 渲染路径召回低于此字数改试内嵌图
     private const val STRONG_TRIGGER = 800    // 方案 C：主路径总字数低于此值才启用强引擎兜底（图纸类 ML Kit 常 <800，故 PaddleOCR 多会介入）
 
@@ -259,14 +259,15 @@ object PdfOcrEngine {
                     if (variantBmp == null) continue
                     val t = try {
                     val maxSide = max(variantBmp.width, variantBmp.height)
-                    // v1.6.9: PaddleOCR 输入上限从 1920 提到 2560，配合 3x 渲染。
-                    val inputBmp = if (maxSide > 2560) {
+                    // v1.7.0: PaddleOCR 输入上限降到 2048，与 detLongSize=1920 接近，
+                    // 避免 2560 放大后被模型缩回导致插值模糊。
+                    val inputBmp = if (maxSide > 2048) {
                         try {
-                            val scale = 2560f / maxSide
+                            val scale = 2048f / maxSide
                             Bitmap.createScaledBitmap(variantBmp, (variantBmp.width * scale).toInt().coerceAtLeast(1), (variantBmp.height * scale).toInt().coerceAtLeast(1), true)
                         } catch (_: Throwable) { variantBmp }
                     } else variantBmp
-                    recognizeTiledGeneric(inputBmp, upscalePx = 2560) { PaddleOcr.recognize(it) ?: "" }
+                    recognizeTiledGeneric(inputBmp, upscalePx = 1920) { PaddleOcr.recognize(it) ?: "" }
                     } catch (_: Throwable) { "" }
                     detail.append("$label=${t.length}")
                     if (t.length > bestText.length) { bestText = t; bestLabel = label }
