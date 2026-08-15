@@ -61,8 +61,10 @@ object PaddleOcr : StrongOcr {
                 // v1.6.3: 强引擎已能正常跑起来，恢复 1280 提升检测输入分辨率，
                 // 看能否提高工程图小字召回。
                 config.detLongSize = 1280
-                // 降低置信度阈值，避免小字/浅灰字因 score 略低被过滤。
-                config.scoreThreshold = 0.05f
+                // v1.6.5: 提高置信度阈值到 0.3，过滤低置信度噪声（网格线/噪点误识别），
+                // 减少过度识别。之前 0.05 过低，导致比桌面版多识别出大量字符。
+                // 工程图小字仍需一定召回，0.3 为平衡点（RapidOCR 桌面默认约 0.5）。
+                config.scoreThreshold = 0.3f
                 config.isRunDet = true
                 config.isRunCls = true
                 config.isRunRec = true

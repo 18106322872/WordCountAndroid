@@ -833,13 +833,23 @@ object PdfOcrEngine {
     private fun mergeOcrTexts(primary: String, secondary: String): String {
         if (primary.isBlank()) return secondary.trim()
         if (secondary.isBlank()) return primary.trim()
-        val seen = primary.lines().map { normKey(it) }.filter { it.isNotEmpty() }.toMutableSet()
+        // v1.6.5: 词级软去重——主路径已识别出的"有效词"建集合；
+        // 强引擎某行若其所有有效词都已存在于主路径，视为重复
+        // （如主已识别的大字标题/图框被强引擎重复识别），跳过该行，避免重复计字。
+        // 若强引擎行含主路径未出现的新词（小字标注），则保留，保证召回。
+        val primaryWords = primary.split(Regex("\\s+"))
+            .map { normKey(it) }.filter { it.length >= 2 }.toSet()
+        val seenLines = primary.lines().map { normKey(it) }.filter { it.isNotEmpty() }.toMutableSet()
         val sb = StringBuilder(primary.trim())
         for (ln in secondary.lines()) {
             val k = normKey(ln)
-            if (k.isNotEmpty() && k !in seen) {
+            if (k.isEmpty()) continue
+            if (k in seenLines) continue
+            val words = ln.split(Regex("\\s+")).map { normKey(it) }.filter { it.length >= 2 }
+            val redundant = words.isNotEmpty() && words.all { it in primaryWords }
+            if (!redundant) {
                 sb.append('\n').append(ln)
-                seen.add(k)
+                seenLines.add(k)
             }
         }
         return sb.toString().trim()
