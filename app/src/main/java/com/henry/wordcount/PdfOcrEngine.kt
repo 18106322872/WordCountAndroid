@@ -83,6 +83,9 @@ object PdfOcrEngine {
         private set
     @Volatile var lastMergedChars: Int = 0
         private set
+    // v1.6.1: 强引擎每页渲染/识别详细诊断，用于定位 PaddleOCR 为何为 0
+    @Volatile var lastStrongDiag: String = ""
+        private set
 
     /**
      * 提取 PDF 文本（渲染+OCR）。
@@ -98,6 +101,7 @@ object PdfOcrEngine {
         lastPrimaryChars = 0
         lastStrongChars = 0
         lastMergedChars = 0
+        lastStrongDiag = ""
         if (!OcrEngine.ocrEnabled) {
             Log.w("WordCount", "PdfOcr 跳过: ocrEnabled=false")
             lastFailReason = FailReason.OCR_DISABLED
@@ -216,52 +220,115 @@ object PdfOcrEngine {
      * 方案 C 强引擎路径：用 Pdfium 以 3x 渲染每页（高密度小字需要高分辨率），
      * 逐页交给 PaddleOCR 识别。仅在 ML Kit 主路径召回偏低时由 extractText 调用。
      * 引擎未就绪（available=false）或异常时返回 null，不抛异常。
+     *
+     * v1.6.1: 增加强引擎诊断，并在 PdfiumCore 渲染空白/失败时 fallback 到系统 PdfRenderer。
      */
     private fun runStrongOcr(context: Context, file: File): PdfOcrResult? {
-        val core = try { PdfiumCore(context) } catch (_: Throwable) {
-            Log.w("WordCount", "PdfOcr(强引擎) PdfiumCore 初始化失败")
+        val diag = StringBuilder()
+        val core = try { PdfiumCore(context) } catch (e: Throwable) {
+            lastStrongDiag = "PdfiumCore初始化失败:${e.javaClass.simpleName}"
+            Log.w("WordCount", "PdfOcr(强引擎) $lastStrongDiag")
             return null
         }
-        return try {
+        var sysPfd: ParcelFileDescriptor? = null
+        var sysRenderer: PdfRenderer? = null
+        try {
             val pfd = try { ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY) } catch (_: Throwable) { return null }
             val doc = try { core.newDocument(pfd) } catch (_: Throwable) { return null }
             val pageCount = try { core.getPageCount(doc) } catch (_: Throwable) { return null }
             val limit = min(pageCount, MAX_PAGES)
             val sb = StringBuilder()
             var any = false
+            var blankCount = 0
+            var failCount = 0
+            var sysFallbackCount = 0
             for (i in 0 until limit) {
-                try { core.openPage(doc, i) } catch (_: Throwable) { continue }
+                try { core.openPage(doc, i) } catch (_: Throwable) { failCount++; continue }
+                var pageBmp: Bitmap? = null
+                var source = ""
                 try {
                     val sz = try { core.getPageSize(doc, i) } catch (_: Throwable) { null } ?: continue
-                    val sw = sz.width.toInt()
-                    val sh = sz.height.toInt()
+                    val sw = sz.width.toInt(); val sh = sz.height.toInt()
                     if (sw <= 0 || sh <= 0) continue
-                    // 3x 渲染（与桌面 RapidOCR 同档），MAX_DIM 钳制防 OOM
                     val sc = min(3f, MAX_DIM.toFloat() / max(sw, sh).toFloat())
                     val bw = max(1, (sw * sc).toInt())
                     val bh = max(1, (sh * sc).toInt())
-                    val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { continue }
+                    val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { failCount++; continue }
                     try {
-                    core.renderPageBitmap(doc, bmp, i, 0, 0, bw, bh)
-                    if (isBlankBitmap(bmp)) continue
-                    // v1.5.101: 强引擎同时跑预处理与原图，取字数多者，避免预处理反效果。
-                    val enhanced = enhanceBitmap(bmp)
+                        core.renderPageBitmap(doc, bmp, i, 0, 0, bw, bh)
+                        if (!isBlankBitmap(bmp)) {
+                            pageBmp = bmp
+                            source = "Pdfium"
+                        } else {
+                            blankCount++
+                        }
+                    } catch (_: Throwable) { failCount++ }
+                } catch (_: Throwable) { failCount++ }
+
+                // v1.6.1: PdfiumCore 渲染空白或失败时，fallback 到系统 PdfRenderer 2x
+                if (pageBmp == null) {
+                    try {
+                        if (sysRenderer == null) {
+                            sysPfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+                            sysRenderer = PdfRenderer(sysPfd!!)
+                        }
+                        if (i < sysRenderer.pageCount) {
+                            val page = sysRenderer.openPage(i)
+                            try {
+                                val w = page.width; val h = page.height
+                                if (w > 0 && h > 0) {
+                                    val scale = min(2f, MAX_DIM.toFloat() / max(w, h))
+                                    val bw = max(1, (w * scale).toInt())
+                                    val bh = max(1, (h * scale).toInt())
+                                    val bmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
+                                    page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                                    if (!isBlankBitmap(bmp)) {
+                                        pageBmp = bmp
+                                        source = "SysFb"
+                                        sysFallbackCount++
+                                    } else {
+                                        bmp.recycle()
+                                    }
+                                }
+                            } finally { page.close() }
+                        }
+                    } catch (_: Throwable) {}
+                }
+
+                if (pageBmp == null) continue
+                try {
+                    // v1.6.1: 限制 PaddleOCR 输入最大边不超过 1280，避免过度放大导致检测失败。
+                    val maxSide = max(pageBmp.width, pageBmp.height)
+                    val strongBmp = if (maxSide > 1280) {
+                        try {
+                            val scale = 1280f / maxSide
+                            Bitmap.createScaledBitmap(pageBmp, (pageBmp.width * scale).toInt().coerceAtLeast(1), (pageBmp.height * scale).toInt().coerceAtLeast(1), true)
+                        } catch (_: Throwable) { pageBmp }
+                    } else pageBmp
+                    val enhanced = enhanceBitmap(strongBmp)
                     val tEnhanced = try {
-                        recognizeTiledGeneric(enhanced ?: bmp) { PaddleOcr.recognize(it) ?: "" }
+                        recognizeTiledGeneric(enhanced ?: strongBmp, upscalePx = 1280) { PaddleOcr.recognize(it) ?: "" }
                     } catch (_: Throwable) { "" }
                     val tOriginal = try {
-                        recognizeTiledGeneric(bmp) { PaddleOcr.recognize(it) ?: "" }
+                        recognizeTiledGeneric(strongBmp, upscalePx = 1280) { PaddleOcr.recognize(it) ?: "" }
                     } catch (_: Throwable) { "" }
                     val t = if (tEnhanced.length >= tOriginal.length) tEnhanced else tOriginal
-                    Log.d("WordCount", "PdfOcr(强引擎) p${i + 1}: ${bw}x${bh} enhanced=${tEnhanced.length} orig=${tOriginal.length} -> ${t.length}字")
+                    val dark = String.format("%.2f", darkPixelRatio(pageBmp))
+                    diag.append(" p${i + 1}[$source ${pageBmp.width}x${pageBmp.height} d=$dark% e=${tEnhanced.length} o=${tOriginal.length}]")
                     if (t.isNotBlank()) { sb.append(t).append('\n'); any = true }
                     enhanced?.recycle()
-                    } finally { bmp.recycle() }
-                } catch (_: Throwable) { }
+                } finally {
+                    pageBmp?.recycle()
+                }
             }
+            lastStrongDiag = "强引擎:pages=$pageCount blank=$blankCount fail=$failCount fb=$sysFallbackCount$diag"
+            Log.d("WordCount", "PdfOcr(强引擎) 汇总: $lastStrongDiag")
             if (any) PdfOcrResult(sb.toString().trim(), pageCount) else null
-        } catch (_: Throwable) {
+        } catch (e: Throwable) {
+            lastStrongDiag = "强引擎异常:${e.javaClass.simpleName}"
             null
+        } finally {
+            runCatching { sysRenderer?.close() }; runCatching { sysPfd?.close() }
         }
     }
 
@@ -697,8 +764,11 @@ object PdfOcrEngine {
      * 通用分块 OCR。传入 recognizer 可分别接入 ML Kit 或 PaddleOCR 等强引擎。
      * 强引擎路径必须分块，否则整页大图输入会被模型内部压缩到固定输入尺寸（如 960px），
      * 导致密集小字工程图严重漏识别。
+     *
+     * @param upscalePx 每块放大目标；ML Kit 可用 2000 提升小字召回，PaddleOCR 因内部
+     *                  detLongSize=960，放太大无益，建议用 1280。
      */
-    private fun recognizeTiledGeneric(src: Bitmap, recognizer: (Bitmap) -> String?): String {
+    private fun recognizeTiledGeneric(src: Bitmap, upscalePx: Int = TILE_UPSCALE_PX, recognizer: (Bitmap) -> String?): String {
         if (src.width <= 0 || src.height <= 0) return ""
         val target = TILE_SPLIT_PX
         val cols = minOf(5, maxOf(1, ceil(src.width.toDouble() / target).toInt()))
@@ -718,9 +788,9 @@ object PdfOcrEngine {
                 var tile: Bitmap? = null
                 try {
                     tile = Bitmap.createBitmap(src, x, y, w, h)
-                    val ocrBmp = if (max(w, h) < TILE_UPSCALE_PX) {
+                    val ocrBmp = if (max(w, h) < upscalePx) {
                         try {
-                            val scale = (TILE_UPSCALE_PX.toDouble() / max(w, h)).coerceAtMost(3.0)
+                            val scale = (upscalePx.toDouble() / max(w, h)).coerceAtMost(3.0)
                             val nw = (w * scale).toInt().coerceAtLeast(1)
                             val nh = (h * scale).toInt().coerceAtLeast(1)
                             Bitmap.createScaledBitmap(tile, nw, nh, true)
@@ -778,8 +848,9 @@ object PdfOcrEngine {
     fun buildOcrNote(pages: Int, mergedTag: String = ""): String {
         val err = lastPaddleInitError.takeIf { it.isNotBlank() }?.let { "($it)" } ?: ""
         val runInfo = PaddleOcr.lastRunInfo.takeIf { it.isNotBlank() }?.let { "|$it" } ?: ""
+        val strongDiag = lastStrongDiag.takeIf { it.isNotBlank() }?.let { "|$it" } ?: ""
         val paddle = if (lastPaddleAvailable) "可用" else "不可用"
-        return "已OCR扫描${pages}页${mergedTag} | Paddle=$paddle$err | 主${lastPrimaryChars}/强${lastStrongChars}/合${lastMergedChars}${runInfo}"
+        return "已OCR扫描${pages}页${mergedTag} | Paddle=$paddle$err | 主${lastPrimaryChars}/强${lastStrongChars}/合${lastMergedChars}${runInfo}${strongDiag}"
     }
 
     /**
