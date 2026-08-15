@@ -96,8 +96,10 @@ object DwgDxfParser {
     /** ezdxf 口径下不算「顶层实体」的从属记录：POLYLINE 的顶点、INSERT 的属性、序列结束符 */
     private val SUB_ENTITY_TYPES = setOf("VERTEX", "SEQEND", "ATTRIB")
 
-    /** 图纸空间块名：R13+ 写作 *Paper_SpaceN，转旧版本时写作 $PAPER_SPACEN */
-    private val PAPER_BLOCK_NAME = Regex("^[*\\$]Paper_Space", RegexOption.IGNORE_CASE)
+    /** 图纸空间块名：R13+ 写作 *Paper_SpaceN（N≥0），转旧版本时写作 $PAPER_SPACEN。
+     *  v1.6.6: 排除无数字后缀的 *Paper_Space（活动 paper space 占位块），
+     *  LibreDWG 常把它和真实布局块都写出，导致 ezdxf 只计 1 个 layout 而手机误计 2 个。 */
+    private val PAPER_BLOCK_NAME = Regex("^[*\\$]Paper_Space[0-9]+$", RegexOption.IGNORE_CASE)
 
     // ───────────────────────────── DXF 实体解析 ─────────────────────────────
 
@@ -754,7 +756,9 @@ object DwgDxfParser {
                     inBlock = true; awaitingName = true; curName = null; count = 0
                 } else if (value == "ENDBLK") {
                     val name = curName
-                    if (inBlock && name != null && PAPER_BLOCK_NAME.containsMatchIn(name)) {
+                    // v1.6.6: 过滤极简单/占位 layout block（实体数<2），避免 dwg2dxf 残留的
+                    // 空布局或仅含标题块占位符的 block 被误计为独立图纸页。
+                    if (inBlock && name != null && PAPER_BLOCK_NAME.containsMatchIn(name) && count >= 2) {
                         res[name] = (res[name] ?: 0) + count
                     }
                     inBlock = false; awaitingName = false; curName = null; count = 0

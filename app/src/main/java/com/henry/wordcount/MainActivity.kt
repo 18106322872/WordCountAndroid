@@ -701,8 +701,7 @@ fun FileCard(
                 Column(Modifier.weight(1f)) {
                     // r 已在文件名行前定义（用于 prefixTags 和此处共用）
                     if (r != null) {
-                        val isEstimated = r.pagesReason?.contains("estimate") == true ||
-                            r.pagesReason?.contains("layout") == true
+                        val isEstimated = r.pagesReason?.contains("estimate") == true
                         val pageLabel = if (isEstimated) "页 ${r.pages ?: estimatePages(r.chars)}(估)"
                             else "页 ${r.pages ?: estimatePages(r.chars)}"
                         // v1.5.37/v1.5.62: 需要 PDF 统计的 DWG 仍显示当前已拿到的字数（与电脑版
