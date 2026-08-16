@@ -1,286 +1,292 @@
-name: Build WordCount APK
+name: Build WordCount APK
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+# 串行化构建：避免多次快速 push 时多个 run 竞态，导致后完成的旧版本 run
+# 用"删除旧 release + 重建"把 apk tag 覆盖成旧版 APK（v1.8.9 发布时曾因此被 1.8.8 run 反超）。
+concurrency:
+  group: apk-build
+  cancel-in-progress: true
 
-on:
-  push:
-    branches: [main]
-    tags: ['v*']
-  workflow_dispatch:
-
-# 单任务：编译 APK。图片 OCR 主路径用 Google ML Kit Text Recognition；方案 C 最强引擎兜底升级为 PaddleOCR(PP-OCRv4，equationl/paddleocr4android，Paddle-Lite 后端)，模型由本 workflow 下载进 assets。
-
-# 允许默认 GITHUB_TOKEN 创建 Release（否则发布 APK 会 403）
-permissions:
-  contents: write
-
-jobs:
-  apk:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          api-level: 34
-          build-tools: 34.0.0
-          components: 'platform-tools'
-
-      - name: Accept SDK licenses
-        run: yes | sdkmanager --licenses || true
-
-      - name: Set up Python 3.10 (Chaquopy buildPython)
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: 8.9
-          cache-disabled: true
-
-      # 版本号抽成独立步骤，后续步骤统一引用，避免作用域为空
-      - name: Read version
-        id: ver
-        run: |
-          VER=$(grep versionName app/build.gradle | head -1 | grep -oP "[\d.]+" || echo "1.0.9")
-          echo "VER=$VER" >> "$GITHUB_OUTPUT"
-          echo "版本号: $VER"
-      # 方案 C：下载 PaddleOCR(PP-OCRv4) 离线模型(cls/det/rec .nb)进 assets/models/ch_PP-OCRv4，随 APK 内置。
-      # 模型来自 equationl/paddleocr4android 官方 demo 自带模型（已通过 Paddle-Lite 量化，适配移动端）。
-      # 模型缺失时 PaddleOcr.available=false，自动退回纯 ML Kit（零回归，构建不依赖模型存在）。
-      - name: Download PaddleOCR (PP-OCRv4) models
-        run: |
-          mkdir -p app/src/main/assets/models/ch_PP-OCRv4
-          BASE=https://raw.githubusercontent.com/equationl/paddleocr4android/master/app/src/main/assets/models/ch_PP-OCRv4
-          curl -fsSL -o app/src/main/assets/models/ch_PP-OCRv4/cls.nb "$BASE/cls.nb" || true
-          curl -fsSL -o app/src/main/assets/models/ch_PP-OCRv4/det.nb "$BASE/det.nb" || true
-          curl -fsSL -o app/src/main/assets/models/ch_PP-OCRv4/rec.nb "$BASE/rec.nb" || true
-          for f in cls.nb det.nb rec.nb; do
-            if [ ! -s "app/src/main/assets/models/ch_PP-OCRv4/$f" ]; then
-              echo "MODEL MISSING/EMPTY: $f"; exit 1
-            fi
-          done
-          ls -lh app/src/main/assets/models/ch_PP-OCRv4
-      # v1.5.5(WordCount): 改用 JNI 加载 libdwg2dxf.so（替代 v1.5.1~1.5.3 的 exec 二进制方案）。
-      # Android SELinux 禁止从 app 私有目录 exec 原生二进制，但允许从 APK lib/ 加载 .so（JNI）。
-      # 步骤：交叉编译 LibreDWG 静态库 → 编译 JNI wrapper(dwg2dxf_jni.c) 链接成 libdwg2dxf.so → 放 jniLibs。
-      # 失败时（exit 1）把编译日志 POST 到 commit comment 便于排查，并让构建失败（不发布残包）。
-      - name: "Build libdwg2dxf.so (multi-ABI: arm64-v8a + armeabi-v7a)"
-        id: dwg2dxf
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SHA: ${{ github.sha }}
-        run: |
-          exec > >(tee /tmp/so_build.log) 2>&1
-          set -x
-          yes | sdkmanager "ndk;25.2.9519653" || true
-          NDK="$ANDROID_HOME/ndk/25.2.9519653"
-          TOOL="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
-          API=21
-          export AR="$TOOL/bin/llvm-ar"
-          export RANLIB="$TOOL/bin/llvm-ranlib"
-          export STRIP="$TOOL/bin/llvm-strip"
-          export PATH="$TOOL/bin:$PATH"
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq autoconf automake libtool texinfo pkg-config
-          cd /tmp
-          TAG=$(curl -fsSL https://api.github.com/repos/LibreDWG/libredwg/releases/latest | python3 -c "import sys,json;print(json.load(sys.stdin)['tag_name'])")
-          echo "LibreDWG tag=$TAG"
-          rm -rf libredwg && git clone --depth 1 --branch "$TAG" --recursive https://github.com/LibreDWG/libredwg.git libredwg
-          cd libredwg
-          autoreconf -fiv || ./autogen.sh || true
-          export ac_cv_func_malloc_0_nonnull=yes
-          export ac_cv_func_realloc_0_nonnull=yes
-          export ac_cv_c_bigendian=no
-          WS="${GITHUB_WORKSPACE:-.}"
-          JNI_SRC="$WS/app/src/main/cpp/dwg2dxf_jni.c"
-          FAIL=""
-          for ABI in arm64-v8a armeabi-v7a; do
-            if [ "$ABI" = "arm64-v8a" ]; then
-              HOST=aarch64-linux-android
-              CC="$TOOL/bin/aarch64-linux-android$API-clang"
-            else
-              HOST=armv7a-linux-androideabi
-              CC="$TOOL/bin/armv7a-linux-androideabi$API-clang"
-            fi
-            # 必须导出 CC/CXX 让 autotools 交叉编译到目标 ABI，否则会退化为主机(x86_64) .a
-            export CC
-            export CXX="$CC++"
-            echo "=== Building for $ABI (host=$HOST) ==="
-            rm -rf build-$ABI && mkdir -p build-$ABI && cd build-$ABI
-            ../configure --host=$HOST CFLAGS="-fPIC" CXXFLAGS="-fPIC" --prefix=/tmp/ldinst-$ABI \
-              --disable-bindings --disable-python --disable-perl --disable-docs \
-              --enable-static --disable-shared --disable-werror || \
-            ../configure --host=$HOST CFLAGS="-fPIC" CXXFLAGS="-fPIC" --prefix=/tmp/ldinst-$ABI --disable-docs --enable-static --disable-shared --disable-werror
-            make -j"$(nproc)"
-            # LibreDWG 静态库名在不同版本可能是 libdwg.a 或 libredwg.a，两者都搜
-            LIBDWG=$(find . \( -name "libdwg.a" -o -name "libredwg.a" \) 2>/dev/null | head -1)
-            echo "LIBDWG($ABI)=$LIBDWG"
-            if [ -z "$LIBDWG" ]; then echo "libdwg.a/libredwg.a 未生成 for $ABI"; FAIL=1; fi
-            cp src/config.h ../include/ 2>/dev/null || cp ../src/config.h ../include/ 2>/dev/null || true
-            mkdir -p "$WS/app/src/main/jniLibs/$ABI"
-            "$CC" --shared -fPIC \
-              -static-libstdc++ \
-              -I../src -I../include -I.. -Isrc \
-              -I"$TOOL/sysroot/usr/include" \
-              "$JNI_SRC" \
-              "$LIBDWG" -lm -lz -llog \
-              -o "$WS/app/src/main/jniLibs/$ABI/libdwg2dxf.so"
-            SO_RC=$?
-            if [ $SO_RC -ne 0 ]; then echo "COMPILE FAILED($ABI) rc=$SO_RC"; tail -60 /tmp/so_build.log || true; FAIL=1; fi
-            SO="$WS/app/src/main/jniLibs/$ABI/libdwg2dxf.so"
-            if [ -f "$SO" ]; then
-              "$STRIP" "$SO" || true
-              ls -lh "$SO"; file "$SO" || true; echo "DWG2DXF_SO_OK($ABI)"
-            else
-              echo "libdwg2dxf.so 未生成 for $ABI"; FAIL=1
-            fi
-            cd /tmp/libredwg
-          done
-          if [ -n "$FAIL" ]; then
-            echo "MULTI-ABI BUILD FAILED"
-            echo "libdwg2dxf.so 未生成"
-            python3 - <<'PY'
-          import os, json, urllib.request
-          try:
-              log = open('/tmp/so_build.log', encoding='utf-8', errors='replace').read()
-          except Exception as e:
-              log = '(no log: %s)' % e
-          body = "## .so build FAILED (v1.5.9)\n\n### 编译日志尾部\n```\n%s\n```" % log[-4500:]
-          data = json.dumps({"body": body}).encode('utf-8')
-          req = urllib.request.Request(
-              "https://api.github.com/repos/18106322872/WordCountAndroid/commits/%s/comments" % os.environ['SHA'],
-              data=data,
-              headers={"Authorization": "Bearer " + os.environ['GH_TOKEN'],
-                       "Accept": "application/vnd.github+json",
-                       "Content-Type": "application/json"},
-              method="POST")
-          try:
-              r = urllib.request.urlopen(req)
-              print("diag posted:", r.status)
-          except Exception as e:
-              print("diag post failed:", e)
-          PY
-            exit 1
-          else
-            echo "ALL ABI BUILDS OK"
-          fi
-
-      # 预触发 JitPack 构建 paddleocr4android（首次按需编译可能较慢，提前预热以便 Gradle 解析时命中缓存）
-      - name: Warm JitPack PaddleOCR build
-        continue-on-error: true
-        run: |
-          curl -fsSL --max-time 240 -o /dev/null "https://jitpack.io/com/github/equationl/paddleocr4android/paddleocr4android/v1.3.0/build.log" || true
-
-      - name: Clean & Build debug APK（强制 clean + --no-build-cache，确保打包的是最新 Python/Kotlin 源码）
-        env:
-          ANDROID_HOME: ${{ env.ANDROID_HOME }}
-        run: |
-          set -o pipefail
-          gradle clean --no-daemon > build.log 2>&1 || true
-          gradle assembleDebug --no-build-cache --rerun-tasks --no-daemon >> build.log 2>&1
-          echo "BUILD OK"
-
-      # 构建失败时：用 python3 正确 JSON 编码，把编译错误行 + 日志尾部 POST 到 commit comment（匿名可读，无需 admin 权限）
-      - name: Post build failure diagnostics
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SHA: ${{ github.sha }}
-        run: |
-          python3 - <<'PY'
-          import os, json, urllib.request
-          sha = os.environ.get('SHA','')[:7]
-          parts = []
-          # Try .so build log first
-          try:
-              solines = open('/tmp/so_build.log', encoding='utf-8', errors='replace').read().splitlines()
-              parts.append("### .so build log (tail)\n```\n" + '\n'.join(solines[-120:]) + "\n```")
-          except Exception as e:
-              parts.append("(so_build.log 不存在: %s)" % e)
-          # Try gradle build.log
-          try:
-              lines = open('build.log', encoding='utf-8', errors='replace').read().splitlines()
-              tail = '\n'.join(lines[-160:])
-              keys = ('e: ', 'error:', 'Error:', 'FAILURE', 'What went wrong', 'Caused by', 'Unresolved', 'Compilation error', 'A problem occurred', '> Task')
-              errlines = [l for l in lines if any(k in l for k in keys)]
-              parts.append("### Gradle log (tail)\n```\n" + ('\n'.join(errlines[-70:]) or '(未匹配到错误关键字)') + "\n\n" + tail[-3000:] + "\n```")
-          except Exception as e:
-              parts.append("(build.log 不存在: %s)" % e)
-          body = ("## CI Build Diagnostics (%s)\n\n" % sha) + "\n\n".join(parts)
-          print(body)
-          data = json.dumps({"body": body}).encode('utf-8')
-          req = urllib.request.Request(
-              "https://api.github.com/repos/18106322872/WordCountAndroid/commits/%s/comments" % os.environ['SHA'],
-              data=data,
-              headers={"Authorization": "Bearer " + os.environ['GH_TOKEN'],
-                       "Accept": "application/vnd.github+json",
-                       "Content-Type": "application/json"},
-              method="POST")
-          try:
-              r = urllib.request.urlopen(req)
-              print("comment posted:", r.status)
-          except Exception as e:
-              print("comment post failed:", e)
-          PY
-
-      # v1.5.5: 验证 libdwg2dxf.so 确实打进 APK（防止像 v1.5.2 那样静默缺二进制）
-      - name: Verify libdwg2dxf.so in APK
-        run: |
-          python3 - <<'PY'
-          import zipfile, sys
-          apk = "app/build/outputs/apk/debug/app-debug.apk"
-          with zipfile.ZipFile(apk) as z:
-              names = z.namelist()
-          if any("libdwg2dxf.so" in n for n in names):
-              print("OK: libdwg2dxf.so 已打包进 APK")
-          else:
-              print("FAIL: libdwg2dxf.so 未打包进 APK，DWG 功能将不可用")
-              sys.exit(1)
-          PY
-
-      - name: Rename APK（WordCount-版本号格式）
-        run: |
-          echo "APK 输出目录："
-          ls -lh app/build/outputs/apk/debug/ || true
-          cp app/build/outputs/apk/debug/app-debug.apk "app/build/outputs/apk/debug/WordCount-${{ steps.ver.outputs.VER }}.apk"
-          echo "APK: WordCount-${{ steps.ver.outputs.VER }}.apk"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wordcount-apk
-          path: app/build/outputs/apk/debug/WordCount-*.apk
-
-      # 重发前清理旧 release 与 tag，避免 app-debug.apk 残留、保证只留 wordcount.apk
-      # 用 GitHub REST API（curl）可靠删除，不依赖 gh CLI
-      - name: Remove stale release/tag
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          REL=$(curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/18106322872/WordCountAndroid/releases/tags/apk)
-          RID=$(printf '%s' "$REL" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
-          if [ -n "$RID" ]; then
-            echo "deleting release id=$RID"
-            curl -s -X DELETE -H "Authorization: Bearer $GH_TOKEN" \
-              https://api.github.com/repos/18106322872/WordCountAndroid/releases/$RID
-          fi
-          curl -s -X DELETE -H "Authorization: Bearer $GH_TOKEN" \
-            https://api.github.com/repos/18106322872/WordCountAndroid/git/refs/tags/apk || true
-
-      - name: Create GitHub Release (APK only)
-        uses: softprops/action-gh-release@v2
-        if: success()
-        with:
-          tag_name: apk
-          name: WordCount v${{ steps.ver.outputs.VER }} APK
-          make_latest: true
-          files: app/build/outputs/apk/debug/WordCount-*.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+# 单任务：编译 APK。图片 OCR 主路径用 Google ML Kit Text Recognition；方案 C 最强引擎兜底升级为 PaddleOCR(PP-OCRv4，equationl/paddleocr4android，Paddle-Lite 后端)，模型由本 workflow 下载进 assets。
+
+# 允许默认 GITHUB_TOKEN 创建 Release（否则发布 APK 会 403）
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 34
+          build-tools: 34.0.0
+          components: 'platform-tools'
+
+      - name: Accept SDK licenses
+        run: yes | sdkmanager --licenses || true
+
+      - name: Set up Python 3.10 (Chaquopy buildPython)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+          cache-disabled: true
+
+      # 版本号抽成独立步骤，后续步骤统一引用，避免作用域为空
+      - name: Read version
+        id: ver
+        run: |
+          VER=$(grep versionName app/build.gradle | head -1 | grep -oP "[\d.]+" || echo "1.0.9")
+          echo "VER=$VER" >> "$GITHUB_OUTPUT"
+          echo "版本号: $VER"
+      # 方案 C：下载 PaddleOCR(PP-OCRv4) 离线模型(cls/det/rec .nb)进 assets/models/ch_PP-OCRv4，随 APK 内置。
+      # 模型来自 equationl/paddleocr4android 官方 demo 自带模型（已通过 Paddle-Lite 量化，适配移动端）。
+      # 模型缺失时 PaddleOcr.available=false，自动退回纯 ML Kit（零回归，构建不依赖模型存在）。
+      - name: Download PaddleOCR (PP-OCRv4) models
+        run: |
+          mkdir -p app/src/main/assets/models/ch_PP-OCRv4
+          BASE=https://raw.githubusercontent.com/equationl/paddleocr4android/master/app/src/main/assets/models/ch_PP-OCRv4
+          curl -fsSL -o app/src/main/assets/models/ch_PP-OCRv4/cls.nb "$BASE/cls.nb" || true
+          curl -fsSL -o app/src/main/assets/models/ch_PP-OCRv4/det.nb "$BASE/det.nb" || true
+          curl -fsSL -o app/src/main/assets/models/ch_PP-OCRv4/rec.nb "$BASE/rec.nb" || true
+          for f in cls.nb det.nb rec.nb; do
+            if [ ! -s "app/src/main/assets/models/ch_PP-OCRv4/$f" ]; then
+              echo "MODEL MISSING/EMPTY: $f"; exit 1
+            fi
+          done
+          ls -lh app/src/main/assets/models/ch_PP-OCRv4
+      # v1.5.5(WordCount): 改用 JNI 加载 libdwg2dxf.so（替代 v1.5.1~1.5.3 的 exec 二进制方案）。
+      # Android SELinux 禁止从 app 私有目录 exec 原生二进制，但允许从 APK lib/ 加载 .so（JNI）。
+      # 步骤：交叉编译 LibreDWG 静态库 → 编译 JNI wrapper(dwg2dxf_jni.c) 链接成 libdwg2dxf.so → 放 jniLibs。
+      # 失败时（exit 1）把编译日志 POST 到 commit comment 便于排查，并让构建失败（不发布残包）。
+      - name: "Build libdwg2dxf.so (multi-ABI: arm64-v8a + armeabi-v7a)"
+        id: dwg2dxf
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          exec > >(tee /tmp/so_build.log) 2>&1
+          set -x
+          yes | sdkmanager "ndk;25.2.9519653" || true
+          NDK="$ANDROID_HOME/ndk/25.2.9519653"
+          TOOL="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          API=21
+          export AR="$TOOL/bin/llvm-ar"
+          export RANLIB="$TOOL/bin/llvm-ranlib"
+          export STRIP="$TOOL/bin/llvm-strip"
+          export PATH="$TOOL/bin:$PATH"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq autoconf automake libtool texinfo pkg-config
+          cd /tmp
+          TAG=$(curl -fsSL https://api.github.com/repos/LibreDWG/libredwg/releases/latest | python3 -c "import sys,json;print(json.load(sys.stdin)['tag_name'])")
+          echo "LibreDWG tag=$TAG"
+          rm -rf libredwg && git clone --depth 1 --branch "$TAG" --recursive https://github.com/LibreDWG/libredwg.git libredwg
+          cd libredwg
+          autoreconf -fiv || ./autogen.sh || true
+          export ac_cv_func_malloc_0_nonnull=yes
+          export ac_cv_func_realloc_0_nonnull=yes
+          export ac_cv_c_bigendian=no
+          WS="${GITHUB_WORKSPACE:-.}"
+          JNI_SRC="$WS/app/src/main/cpp/dwg2dxf_jni.c"
+          FAIL=""
+          for ABI in arm64-v8a armeabi-v7a; do
+            if [ "$ABI" = "arm64-v8a" ]; then
+              HOST=aarch64-linux-android
+              CC="$TOOL/bin/aarch64-linux-android$API-clang"
+            else
+              HOST=armv7a-linux-androideabi
+              CC="$TOOL/bin/armv7a-linux-androideabi$API-clang"
+            fi
+            # 必须导出 CC/CXX 让 autotools 交叉编译到目标 ABI，否则会退化为主机(x86_64) .a
+            export CC
+            export CXX="$CC++"
+            echo "=== Building for $ABI (host=$HOST) ==="
+            rm -rf build-$ABI && mkdir -p build-$ABI && cd build-$ABI
+            ../configure --host=$HOST CFLAGS="-fPIC" CXXFLAGS="-fPIC" --prefix=/tmp/ldinst-$ABI \
+              --disable-bindings --disable-python --disable-perl --disable-docs \
+              --enable-static --disable-shared --disable-werror || \
+            ../configure --host=$HOST CFLAGS="-fPIC" CXXFLAGS="-fPIC" --prefix=/tmp/ldinst-$ABI --disable-docs --enable-static --disable-shared --disable-werror
+            make -j"$(nproc)"
+            # LibreDWG 静态库名在不同版本可能是 libdwg.a 或 libredwg.a，两者都搜
+            LIBDWG=$(find . \( -name "libdwg.a" -o -name "libredwg.a" \) 2>/dev/null | head -1)
+            echo "LIBDWG($ABI)=$LIBDWG"
+            if [ -z "$LIBDWG" ]; then echo "libdwg.a/libredwg.a 未生成 for $ABI"; FAIL=1; fi
+            cp src/config.h ../include/ 2>/dev/null || cp ../src/config.h ../include/ 2>/dev/null || true
+            mkdir -p "$WS/app/src/main/jniLibs/$ABI"
+            "$CC" --shared -fPIC \
+              -static-libstdc++ \
+              -I../src -I../include -I.. -Isrc \
+              -I"$TOOL/sysroot/usr/include" \
+              "$JNI_SRC" \
+              "$LIBDWG" -lm -lz -llog \
+              -o "$WS/app/src/main/jniLibs/$ABI/libdwg2dxf.so"
+            SO_RC=$?
+            if [ $SO_RC -ne 0 ]; then echo "COMPILE FAILED($ABI) rc=$SO_RC"; tail -60 /tmp/so_build.log || true; FAIL=1; fi
+            SO="$WS/app/src/main/jniLibs/$ABI/libdwg2dxf.so"
+            if [ -f "$SO" ]; then
+              "$STRIP" "$SO" || true
+              ls -lh "$SO"; file "$SO" || true; echo "DWG2DXF_SO_OK($ABI)"
+            else
+              echo "libdwg2dxf.so 未生成 for $ABI"; FAIL=1
+            fi
+            cd /tmp/libredwg
+          done
+          if [ -n "$FAIL" ]; then
+            echo "MULTI-ABI BUILD FAILED"
+            echo "libdwg2dxf.so 未生成"
+            python3 - <<'PY'
+          import os, json, urllib.request
+          try:
+              log = open('/tmp/so_build.log', encoding='utf-8', errors='replace').read()
+          except Exception as e:
+              log = '(no log: %s)' % e
+          body = "## .so build FAILED (v1.5.9)\n\n### 编译日志尾部\n```\n%s\n```" % log[-4500:]
+          data = json.dumps({"body": body}).encode('utf-8')
+          req = urllib.request.Request(
+              "https://api.github.com/repos/18106322872/WordCountAndroid/commits/%s/comments" % os.environ['SHA'],
+              data=data,
+              headers={"Authorization": "Bearer " + os.environ['GH_TOKEN'],
+                       "Accept": "application/vnd.github+json",
+                       "Content-Type": "application/json"},
+              method="POST")
+          try:
+              r = urllib.request.urlopen(req)
+              print("diag posted:", r.status)
+          except Exception as e:
+              print("diag post failed:", e)
+          PY
+            exit 1
+          else
+            echo "ALL ABI BUILDS OK"
+          fi
+
+      # 预触发 JitPack 构建 paddleocr4android（首次按需编译可能较慢，提前预热以便 Gradle 解析时命中缓存）
+      - name: Warm JitPack PaddleOCR build
+        continue-on-error: true
+        run: |
+          curl -fsSL --max-time 240 -o /dev/null "https://jitpack.io/com/github/equationl/paddleocr4android/paddleocr4android/v1.3.0/build.log" || true
+
+      - name: Clean & Build debug APK（强制 clean + --no-build-cache，确保打包的是最新 Python/Kotlin 源码）
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+        run: |
+          set -o pipefail
+          gradle clean --no-daemon > build.log 2>&1 || true
+          gradle assembleDebug --no-build-cache --rerun-tasks --no-daemon >> build.log 2>&1
+          echo "BUILD OK"
+
+      # 构建失败时：用 python3 正确 JSON 编码，把编译错误行 + 日志尾部 POST 到 commit comment（匿名可读，无需 admin 权限）
+      - name: Post build failure diagnostics
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import os, json, urllib.request
+          sha = os.environ.get('SHA','')[:7]
+          parts = []
+          # Try .so build log first
+          try:
+              solines = open('/tmp/so_build.log', encoding='utf-8', errors='replace').read().splitlines()
+              parts.append("### .so build log (tail)\n```\n" + '\n'.join(solines[-120:]) + "\n```")
+          except Exception as e:
+              parts.append("(so_build.log 不存在: %s)" % e)
+          # Try gradle build.log
+          try:
+              lines = open('build.log', encoding='utf-8', errors='replace').read().splitlines()
+              tail = '\n'.join(lines[-160:])
+              keys = ('e: ', 'error:', 'Error:', 'FAILURE', 'What went wrong', 'Caused by', 'Unresolved', 'Compilation error', 'A problem occurred', '> Task')
+              errlines = [l for l in lines if any(k in l for k in keys)]
+              parts.append("### Gradle log (tail)\n```\n" + ('\n'.join(errlines[-70:]) or '(未匹配到错误关键字)') + "\n\n" + tail[-3000:] + "\n```")
+          except Exception as e:
+              parts.append("(build.log 不存在: %s)" % e)
+          body = ("## CI Build Diagnostics (%s)\n\n" % sha) + "\n\n".join(parts)
+          print(body)
+          data = json.dumps({"body": body}).encode('utf-8')
+          req = urllib.request.Request(
+              "https://api.github.com/repos/18106322872/WordCountAndroid/commits/%s/comments" % os.environ['SHA'],
+              data=data,
+              headers={"Authorization": "Bearer " + os.environ['GH_TOKEN'],
+                       "Accept": "application/vnd.github+json",
+                       "Content-Type": "application/json"},
+              method="POST")
+          try:
+              r = urllib.request.urlopen(req)
+              print("comment posted:", r.status)
+          except Exception as e:
+              print("comment post failed:", e)
+          PY
+
+      # v1.5.5: 验证 libdwg2dxf.so 确实打进 APK（防止像 v1.5.2 那样静默缺二进制）
+      - name: Verify libdwg2dxf.so in APK
+        run: |
+          python3 - <<'PY'
+          import zipfile, sys
+          apk = "app/build/outputs/apk/debug/app-debug.apk"
+          with zipfile.ZipFile(apk) as z:
+              names = z.namelist()
+          if any("libdwg2dxf.so" in n for n in names):
+              print("OK: libdwg2dxf.so 已打包进 APK")
+          else:
+              print("FAIL: libdwg2dxf.so 未打包进 APK，DWG 功能将不可用")
+              sys.exit(1)
+          PY
+
+      - name: Rename APK（WordCount-版本号格式）
+        run: |
+          echo "APK 输出目录："
+          ls -lh app/build/outputs/apk/debug/ || true
+          cp app/build/outputs/apk/debug/app-debug.apk "app/build/outputs/apk/debug/WordCount-${{ steps.ver.outputs.VER }}.apk"
+          echo "APK: WordCount-${{ steps.ver.outputs.VER }}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wordcount-apk
+          path: app/build/outputs/apk/debug/WordCount-*.apk
+
+      # 重发前清理旧 release 与 tag，避免 app-debug.apk 残留、保证只留 wordcount.apk
+      # 用 GitHub REST API（curl）可靠删除，不依赖 gh CLI
+      - name: Remove stale release/tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REL=$(curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/18106322872/WordCountAndroid/releases/tags/apk)
+          RID=$(printf '%s' "$REL" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
+          if [ -n "$RID" ]; then
+            echo "deleting release id=$RID"
+            curl -s -X DELETE -H "Authorization: Bearer $GH_TOKEN" \
+              https://api.github.com/repos/18106322872/WordCountAndroid/releases/$RID
+          fi
+          curl -s -X DELETE -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/18106322872/WordCountAndroid/git/refs/tags/apk || true
+
+      - name: Create GitHub Release (APK only)
+        uses: softprops/action-gh-release@v2
+        if: success()
+        with:
+          tag_name: apk
+          name: WordCount v${{ steps.ver.outputs.VER }} APK
+          make_latest: true
+          files: app/build/outputs/apk/debug/WordCount-*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
