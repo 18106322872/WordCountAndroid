@@ -906,7 +906,8 @@ object PdfOcrEngine {
      * 片段：1-3 个 CJK 且没有西文词、没有数字的行全部丢弃。
      * 真实中文行通常 CJK≥4，或中英混合，不会只有 1-3 个孤立汉字。
      */
-    private fun filterStrongCjkNoise(strong: String): String {
+    /** v1.8.2: 改为 internal，供 FileProcessor 在合并 PDF 文本层后二次去噪。 */
+    internal fun filterStrongCjkNoise(strong: String): String {
         if (strong.isBlank()) return strong
         return strong.lines().filter { raw ->
             val t = raw.trim()
