@@ -718,15 +718,6 @@ fun FileCard(
                             statsText,
                             style = MaterialTheme.typography.bodySmall, color = Color.Gray
                         )
-                        // v1.5.66: PDF 的 OCR 状态摘要（直接显示，无需展开诊断）
-                        if (r.ocrNote != null) {
-                            val isWarn = r.ocrNote!!.startsWith("⚠️")
-                            Text(
-                                r.ocrNote!!,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = if (isWarn) Color(0xFFB00020) else Color(0xFF2E7D32)
-                            )
-                        }
                         // v1.3.6: 明细折叠/展开切换（点击统计行展开）
                         // v1.3.34: 备注合并为一条汇总，所以 notesSlides 只算 1
                         val detailCount = (r.inner?.size ?: 0) + (r.sheets?.size ?: 0) +
