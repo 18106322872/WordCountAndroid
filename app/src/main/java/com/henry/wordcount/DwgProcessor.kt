@@ -31,12 +31,12 @@ object DwgProcessor {
         return try {
             processInner(context, file, dName)
         } catch (e: Throwable) {
-            // v1.5.93: 任何意外异常都不得让 DWG 处理崩溃（否则压缩包内层 DWG 会被静默丢弃，
-            // 导致 22→28 类文件数丢失）。一律回退到原始字节扫描基线，保证返回一个非空、可用的结果。
+            // v1.8.9: 任何意外异常都归零显示"-"，绝不再把 scanDwgRaw 二进制噪声当作字数。
+            // 此前该兜底返回原始字节扫描结果，对编码混乱/不可读的 DWG 会显示 10059 字/中文54
+            // 这类假数字（与桌面"-"不符）。改返回零值 + needsPdf=true，UI 走 needsPdf 分支显示"-"，
+            // 既不会让 app 崩溃（压缩包内层 DWG 仍会被统计、仅显示"-"），也不会误导用户。
             Log.w("WordCount", "DWG process 异常兜底 $dName: ${e.javaClass.simpleName}: ${e.message}")
-            val fb = try { scanDwgRaw(file.absolutePath) } catch (_: Throwable) { "" }
-            val fs = try { countTextKotlin(fb) } catch (_: Throwable) { Quadruple(0, 0, 0, 0) }
-            DwgProcessResult(fs.first, fs.second, fs.third, fs.fourth, 1, "异常兜底", false, "process异常: ${e.message}", null, fb)
+            DwgProcessResult(0, 0, 0, 0, 1, "异常兜底", true, "process异常: ${e.message}", null, "")
         }
     }
     private suspend fun processInner(context: Context, file: File, dName: String): DwgProcessResult {
@@ -55,9 +55,11 @@ object DwgProcessor {
         var printedScope = false
         val dxfPath = "${file.parent}/${file.nameWithoutExtension}.dxf"
         val dxfRes = DwgIsolatedRunner.convertToDxf(context, file.absolutePath, dxfPath)
+        var dxfSuccess = false
         if (dxfRes.path != null) {
             val dxfFile = File(dxfPath)
             if (dxfFile.exists() && dxfFile.length() > 0) {
+                dxfSuccess = true
                 val analysis = DwgDxfParser.analyze(dxfPath)
                 dxfText = analysis.text
                 dxfDiag = analysis.diag
@@ -255,6 +257,17 @@ object DwgProcessor {
             } else {
                 Log.d("WordCount", "DWG raw scanner SKIPPED/REJECTED $dName: cjk=${rawScanner.cjkTotal} common=${"%.2f".format(rawScanner.commonRatio)} div=${"%.2f".format(rawScanner.cjkDiversity)}")
             }
+        }
+        // ── v1.8.9: 转换失败兜底清零 ──
+        // 根因：:dwgisolated 进程在连续 dwg2dxf 调用后可能 native 崩溃/超时 → dxfRes.path==null
+        // （dxfSuccess=false）。此时所有依赖 DXF 的路径（结构化/OLE/字节恢复）全部失效，
+        // finalStats 仍停在 processInner 开头的 scanDwgRaw 二进制垃圾（本文件实测 10059字/中文54/
+        // 非中文10005）。由于 first>3，"归零显示-"守卫不会触发，垃圾被当成真实字数显示，
+        // 与桌面"-"（编码混乱无法提取）不符。修复：DXF 转换失败且无任何可靠文字恢复时，直接归零显示"-"。
+        if (!dxfSuccess && !recoverySucceeded && !oleApplied && finalStats.first > 3) {
+            Log.d("WordCount", "DWG 转换失败→归零显示-(无可靠来源) $dName: rawWords=${finalStats.first} fe=${finalStats.second} nc=${finalStats.third}")
+            finalStats = Quadruple(0, 0, 0, 0)
+            finalText = ""
         }
         // ── 回退：栅格化/稀疏/字数极少时置 needsPdf ──
         val framesKnown = (dxfPages != null) && (dxfPages >= 1)
