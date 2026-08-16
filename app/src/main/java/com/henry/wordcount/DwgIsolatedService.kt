@@ -61,6 +61,12 @@ class DwgIsolatedService : Service() {
                     try { replyTo?.send(resp) } catch (e: Throwable) {
                         Log.e("DwgIsolated", "reply failed: ${e.message}")
                     }
+                    // v1.8.9: 每次转换完成即销毁隔离进程。:dwgisolated 进程在 LibreDWG native 调用
+                    // 后可能残留崩溃/不稳定状态；若被下次 dwg2dxf 复用会污染结果（连续统计压缩包时
+                    // 出现"先正常、后全挂"的有状态现象）。每次调用后彻底销毁，下次由 DwgIsolatedRunner
+                    // 重新 startService+bind 得到全新干净进程。回复已通过 Messenger 同步送达，
+                    // 此时 stopSelf 不影响结果回传。
+                    stopSelf()
                 }
                 MSG_CONVERT -> {
                     val data = msg.data
@@ -86,6 +92,8 @@ class DwgIsolatedService : Service() {
                     } catch (e: Throwable) {
                         Log.e("DwgIsolated", "reply failed: ${e.message}")
                     }
+                    // v1.8.9: 同上，转换完成即销毁隔离进程，杜绝 native 崩溃状态跨文件复用污染。
+                    stopSelf()
                 }
                 else -> super.handleMessage(msg)
             }
