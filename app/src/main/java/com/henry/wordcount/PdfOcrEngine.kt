@@ -888,16 +888,8 @@ object PdfOcrEngine {
     private fun normKey(s: String): String =
         s.lowercase().replace(Regex("[\\p{P}\\p{S}\\s]+"), "")
 
-/** v1.7.2: 判断字符是否属于 CJK/假名/韩文范围，用于中文噪声过滤。 */
-    private fun isCjkChar(c: Char): Boolean {
-        val code = c.code
-        return code in 0x4E00..0x9FFF ||   // CJK Unified Ideographs
-               code in 0x3400..0x4DBF ||   // CJK Extension A
-               code in 0xF900..0xFAFF ||   // CJK Compatibility Ideographs
-               code in 0x3040..0x309F ||   // Hiragana
-               code in 0x30A0..0x30FF ||   // Katakana
-               code in 0xAC00..0xD7AF     // Hangul Syllables
-    }
+/** v1.8.3: 与 countTextKotlin 的 FarEast 口径完全一致（含全角 U+FF00–FFEF、CJK 标点 U+3000–303F）。 */
+    private fun isCjkChar(c: Char): Boolean = isFarEast(c)
 
     /**
      * v1.8.0: 强引擎中文噪声过滤。
@@ -919,6 +911,43 @@ object PdfOcrEngine {
             // 丢弃：1-3 个孤立 CJK（无西文词、无数字），99% 是工程图符号误识
             !(cjk in 1..3 && !hasWesternWord && digits == 0)
         }.joinToString("\n")
+    }
+
+    /**
+     * v1.8.3: 与 MainActivity.countTextKotlin 的 FarEast 判定完全一致。
+     * countTextKotlin 把“中文(fe)”定义为 FarEast 区间（含汉字/假名/韩文/全角/中文标点），
+     * 旧版 isCjkChar 漏掉全角(U+FF00–U+FFEF)与中文标点(U+3000–U+303F)，导致这两类字符
+     * 被计入“中文”却不被噪声过滤器移除 → 纯英文图纸始终挂着十几个“中文”。
+     */
+    private fun isFarEast(c: Char): Boolean {
+        val code = c.code
+        return code in 0x1100..0x11FF ||   // Hangul Jamo
+               code in 0x3000..0x303F ||   // CJK 符号与标点
+               code in 0x3130..0x318F ||   // Hangul 兼容字母
+               code in 0x3400..0x4DBF ||   // CJK Extension A
+               code in 0x4E00..0x9FFF ||   // CJK Unified
+               code in 0xA960..0xA97C ||   // Hangul
+               code in 0xAC00..0xD7A3 ||   // Hangul Syllables
+               code in 0xD7B0..0xD7FF ||   // Hangul
+               code in 0xF900..0xFAFF ||   // CJK 兼容汉字
+               code in 0xFF00..0xFFEF      // 全角字母/数字/符号
+    }
+
+    /**
+     * v1.8.3: 文档级中文噪声根除。
+     * 若最终合并文本中 FarEast 字符占比极低(<15%，与 OcrEngine.postFilter 阈值一致，
+     * 视为 OCR/文本层伪中文)，直接剔除全部 FarEast 字符，保证纯英文图纸中文数=0；
+     * 真实中文文档占比高，原样保留。用 countTextKotlin 同源口径，避免“计入却不过滤”的错配。
+     */
+    internal fun stripNoiseFarEast(text: String): String {
+        if (text.isBlank()) return text
+        val stats = countTextKotlin(text)   // (words, fe, nc, chars)
+        val fe = stats.second
+        val chars = stats.fourth
+        if (fe == 0) return text
+        val ratio = if (chars == 0) 0f else fe.toFloat() / chars.toFloat()
+        if (ratio >= 0.15f) return text      // 真实中文文档，保留
+        return text.filter { !isFarEast(it) }
     }
 
     private fun computeScale(w: Int, h: Int): Float {

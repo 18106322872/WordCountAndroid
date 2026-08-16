@@ -165,7 +165,9 @@ object FileProcessor {
                 } else ocrRes.text
                 // v1.8.2: 对 OCR+文本层合并后的最终文本再做一次中文噪声过滤，确保
                 // 1-3 个孤立 CJK（无西文词、无数字）被丢弃，覆盖 ML Kit/PDF 文本层来源。
-                val mergedText = PdfOcrEngine.filterStrongCjkNoise(mergedTextRaw)
+                // v1.8.3: 再叠加文档级 stripNoiseFarEast——旧 filter 的 CJK 判定漏掉全角/
+                // 中文标点（countTextKotlin 却计入“中文”），导致纯英文图纸中文数始终>0。
+                val mergedText = PdfOcrEngine.stripNoiseFarEast(PdfOcrEngine.filterStrongCjkNoise(mergedTextRaw))
                 val ocrStats = countTextKotlin(mergedText)
                 val mergedTag = if (mergedText != ocrRes.text) " +文本层" else ""
                 val resMap = mapOf(

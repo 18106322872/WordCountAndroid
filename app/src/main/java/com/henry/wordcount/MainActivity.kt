@@ -2438,7 +2438,10 @@ private fun addFiles(
                                     Log.d("WordCount", "PDF 合并文本层补回 $added 行 $dName")
                                     sb.toString()
                                 } else ocrRes.text
-                                val ocrStats = countTextKotlin(mergedText)
+                                // v1.8.3: 文档级中文噪声根除（与 FileProcessor 路径一致）。
+                                // 旧逻辑在“直接打开 PDF”路径从未做中文噪声过滤，且 filter 的 CJK
+                                // 判定漏掉全角/中文标点，导致纯英文图纸中文数始终>0。
+                                val ocrStats = countTextKotlin(PdfOcrEngine.stripNoiseFarEast(mergedText))
                                 val mergedTag = if (mergedText != ocrRes.text) " +文本层" else ""
                                 val resMap = mapOf(
                                     "name" to dName, "ext" to ".pdf",
