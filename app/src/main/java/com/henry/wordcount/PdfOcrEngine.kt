@@ -204,7 +204,7 @@ object PdfOcrEngine {
 
         // v1.5.99: 强引擎应与主路径合并（去重），而不是二选一。工程图往往 ML Kit 识出大字标题、
         // PaddleOCR 识出小字标注，合并后才能逼近桌面 RapidOCR 的召回。
-        val result = when {
+        var result = when {
             strong != null && primary != null -> {
                 val merged = mergeOcrTexts(primary.text, strong.text)
                 Log.d("WordCount", "PdfOcr 合并: 主路径${primary.text.length}字 + 强引擎${strong.text.length}字 -> ${merged.length}字")
@@ -213,6 +213,17 @@ object PdfOcrEngine {
             strong != null -> strong
             primary != null -> primary
             else -> null
+        }
+
+        // v1.8.1: 对最终合并结果再做一次中文噪声过滤。ML Kit 主路径同样可能把工程符号/线条
+        // 误识成孤立汉字，且合并后的文本仍可能残留 1-3 个 CJK 噪声，二次过滤确保纯英文图纸
+        // 统计行中的中文归零。
+        result = result?.let { r ->
+            val filtered = filterStrongCjkNoise(r.text)
+            if (filtered.length < r.text.length) {
+                diag.append("[二次去噪:-${r.text.length - filtered.length}字] ")
+                r.copy(text = filtered)
+            } else r
         }
 
         // v1.5.100: 记录简明诊断供 UI 显示
