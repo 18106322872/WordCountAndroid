@@ -111,11 +111,14 @@ object DwgProcessor {
                 val dxfDensity = dxfStats.fourth.toDouble() / maxOf(dxfPages ?: 1, 1)
                 dxfMojibake = (dxfCjkCount >= 200) && (dxfCommonRatio < 0.05) && (dxfDensity > 2500)
                 val dxfQualityGood = (dxfCjkCount >= 50) && (dxfCommonRatio >= 0.30) && (dxfCommonRatio < 0.98)
-                // v1.5.93: 纯英文/编号 DWG（dwg2dxf 把块炸开成大量实体→字数虚高但几乎无中文）
+                // v1.5.93 / v1.8.5: 纯英文/编号 DWG（dwg2dxf 把块炸开成大量实体→字数虚高但几乎无中文）
                 // 不应采信其膨胀的矢量文字，改用 OLE 预览 OCR（见下方 OLE 块）。对齐桌面：
                 // 桌面在 encoding_loss 时丢弃 LibreDWG 膨胀 items，改用 dwggrep + OLE 预览 OCR。
-                val dxfCjkRatioToTotal = if (dxfStats.fourth > 0) dxfCjkCount.toDouble() / dxfStats.fourth else 0.0
-                nonChineseDxf = dxfStats.fourth >= 500 && dxfCjkCount <= 5 && dxfCjkRatioToTotal < 0.01
+                // v1.8.5 修正：旧判定只用基本汉字(0x4E00-0x9FFF)计数，但 countTextKotlin 的"中文(fe)"
+                // 还包含全角/中文标点/CJK扩展/Hangul。纯英文图纸经 dwg2dxf 后可能残留少量这类字符，
+                // 导致 fe>0 但基本汉字<=5，旧判定把膨胀 DXF 误判为可用。改用 fe 与 fe 占比综合判定。
+                val dxfFeRatioToTotal = if (dxfStats.fourth > 0) dxfStats.second.toDouble() / dxfStats.fourth else 0.0
+                nonChineseDxf = dxfStats.fourth >= 500 && dxfStats.second <= 50 && dxfFeRatioToTotal < 0.01
                 // v1.5.92: DWG 结构化 DXF 是正式统计的唯一可信来源。只要 DWG→DXF 转换成功、
                 // 解析到非空文字且不是乱码，就直接采用 DXF，不再因二进制 ASCII 扫描数量
                 // 更大而回退到噪声。raw 扫描仅用于后续 CJK 恢复/兜底。
@@ -125,6 +128,12 @@ object DwgProcessor {
                 if (printedScope || dxfUsable) {
                     finalStats = dxfStats
                     finalText = dxfText
+                }
+                if (nonChineseDxf) {
+                    // v1.8.5: 丢弃膨胀 DXF 结果，避免把 raw 二进制扫描噪声作为最终字数。
+                    // 后续 OLE/OCR 路径会尝试提取可见文字；提取不到则 needsPdf 为 true，UI 显示"-"
+                    finalStats = Quadruple(0, 0, 0, 0)
+                    finalText = ""
                 }
                 Log.d("WordCount", "DWG dxf $dName: enc=${analysis.decodeMode} raw=$rawChars dxf=${dxfStats.fourth} cjk=$dxfCjkCount cr=${"%.3f".format(dxfCommonRatio)} den=${"%.0f".format(dxfDensity)} moji=$dxfMojibake pages=$dxfPages($dxfPagesReason)")
             }
