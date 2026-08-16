@@ -191,10 +191,11 @@ object PdfOcrEngine {
             runStrongOcr(context, file)?.also { diag.append("[强引擎(PaddleOCR):${it.text.length}字] ") }
         } else null
 
-        // v1.7.2: 主路径几乎无中文时，过滤强引擎里的孤立短中文噪声（工程图符号/线条误识）。
-        // 注意：仅在主路径有可观中文时才不过滤，避免误伤真实中英混合文档。
-        val strong = if (strongRaw != null && primary != null) {
-            val filtered = filterStrongCjkNoise(primary.text, strongRaw.text)
+        // v1.8.0: 过滤强引擎里的孤立短中文噪声（工程图符号/线条误识）。
+        // 不再依赖主路径是否有中文，只要强引擎出现 1-3 个孤立 CJK 字符就丢弃，避免纯英文
+        // 图纸被 PaddleOCR 的线条、剖面线、图框角标误识成汉字。
+        val strong = if (strongRaw != null) {
+            val filtered = filterStrongCjkNoise(strongRaw.text)
             if (filtered.length < strongRaw.text.length) {
                 diag.append("[去噪:-${strongRaw.text.length - filtered.length}字] ")
                 strongRaw.copy(text = filtered)
@@ -888,17 +889,14 @@ object PdfOcrEngine {
     }
 
     /**
-     * v1.7.2: 强引擎中文噪声过滤。
-     * 当 ML Kit 主路径几乎没识别出中文时（常见于纯英文图纸），PaddleOCR 容易把
-     * 工程符号、图框角标、剖面线等误识成孤立汉字。这里过滤掉强引擎结果中
-     * "短小且孤立"的 CJK 片段，保留真实中文行（≥4 字或中英混合或含数字标注）。
+     * v1.8.0: 强引擎中文噪声过滤。
+     * PaddleOCR 对纯英文工程图容易把线条、剖面线、图框角标等误识成孤立汉字
+     *（如"一"、"口"、"丁"）。这里无条件过滤掉强引擎结果中"短小孤立"的 CJK
+     * 片段：1-3 个 CJK 且没有西文词、没有数字的行全部丢弃。
+     * 真实中文行通常 CJK≥4，或中英混合，不会只有 1-3 个孤立汉字。
      */
-    private fun filterStrongCjkNoise(primary: String, strong: String): String {
-        if (primary.isBlank() || strong.isBlank()) return strong
-        val primaryCjk = primary.count { isCjkChar(it) }
-        // 主路径本身有可观中文时，不过滤，避免误伤真实中英混合文档
-        if (primaryCjk >= 3) return strong
-
+    private fun filterStrongCjkNoise(strong: String): String {
+        if (strong.isBlank()) return strong
         return strong.lines().filter { raw ->
             val t = raw.trim()
             if (t.isEmpty()) return@filter false
@@ -906,8 +904,8 @@ object PdfOcrEngine {
             if (cjk == 0) return@filter true
             val hasWesternWord = Regex("[A-Za-z]{2,}").containsMatchIn(t)
             val digits = t.count { it.isDigit() }
-            // 保留：较长中文片段 / 中英混合 / 含数字的标注（如"图1"）
-            cjk >= 4 || hasWesternWord || (cjk >= 2 && digits > 0)
+            // 丢弃：1-3 个孤立 CJK（无西文词、无数字），99% 是工程图符号误识
+            !(cjk in 1..3 && !hasWesternWord && digits == 0)
         }.joinToString("\n")
     }
 
@@ -926,13 +924,9 @@ object PdfOcrEngine {
         return -1
     }
 
-    /** 构造供 UI 显示的简明 OCR 诊断。 */
+    /** v1.8.0: 诊断说明已隐藏，仅保留空占位（避免调用方判空异常）。 */
     fun buildOcrNote(pages: Int, mergedTag: String = ""): String {
-        val err = lastPaddleInitError.takeIf { it.isNotBlank() }?.let { "($it)" } ?: ""
-        val runInfo = PaddleOcr.lastRunInfo.takeIf { it.isNotBlank() }?.let { "|$it" } ?: ""
-        val strongDiag = lastStrongDiag.takeIf { it.isNotBlank() }?.let { "|$it" } ?: ""
-        val paddle = if (lastPaddleAvailable) "可用" else "不可用"
-        return "已OCR扫描${pages}页${mergedTag} | Paddle=$paddle$err | 主${lastPrimaryChars}/强${lastStrongChars}/合${lastMergedChars}${runInfo}${strongDiag}"
+        return ""
     }
 
     /**
