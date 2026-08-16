@@ -2421,8 +2421,10 @@ private fun addFiles(
                                 // OCR 成功：对齐桌面 text_items+img_items 合并口径，
                                 // 把【可信】文本层(ktRes.text) 中 OCR 没识别到的片段补回，
                                 // 按行去重避免重复计数（Kotlin 抽取偶然抽到的清晰文字层，OCR 可能漏）。
-                                // 仅当文本层可信(非CID乱码)且有中文时才合并，避免引入噪声。
-                                val mergedText = if (ktRes.reliable && ktStats.second > 0 && ktRes.text.isNotBlank()) {
+                                // 仅当文本层可信、且有可观中文(>10)时才合并，避免引入少量 CJK 噪声。
+                                // v1.8.1: 阈值从 >0 提高到 >10，防止纯英文图纸文本层里的孤立汉字
+                                //（如图框角标、符号映射误码）被补回到 OCR 结果中。
+                                val mergedText = if (ktRes.reliable && ktStats.second > 10 && ktRes.text.isNotBlank()) {
                                     // 软去重：OCR 已识别的图片文字与 PDF 文字层常因标点/错字/换行
                                     // 差异而不完全一致，整行硬匹配会误判为“未重复”导致重复计数。
                                     // 归一化（去空白、去标点、小写）后逐行比对，只补回 OCR 真漏的片段。
