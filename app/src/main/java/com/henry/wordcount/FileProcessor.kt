@@ -152,7 +152,9 @@ object FileProcessor {
             if (ocrRes != null) {
                 // v1.5.92: 合并可信文本层，补齐 OCR 漏掉的片段（不再仅限中文，英文/编号
                 // 型 PDF 如工程图的文本层同样可补齐）。用 normKey 软去重避免重复计数。
-                val mergedText = if (ktRes.reliable && ktStats.fourth > 0 && ktRes.text.isNotBlank()) {
+                // v1.8.2: 文本层补回门限从 chars>0 提高到 fe>10，避免 PDF 文本层中的少量
+                // 孤立汉字/符号误码被补回到 OCR 结果（常见于纯英文工程图）。
+                val mergedTextRaw = if (ktRes.reliable && ktStats.second > 10 && ktRes.text.isNotBlank()) {
                     val ocrKeys = ocrRes.text.lines().map { normKey(it) }.filter { it.isNotEmpty() }.toSet()
                     val lines = ktRes.text.lines().map { it.trim() }.filter { it.length >= 3 }
                     val sb = StringBuilder(ocrRes.text)
@@ -161,6 +163,9 @@ object FileProcessor {
                     }
                     sb.toString()
                 } else ocrRes.text
+                // v1.8.2: 对 OCR+文本层合并后的最终文本再做一次中文噪声过滤，确保
+                // 1-3 个孤立 CJK（无西文词、无数字）被丢弃，覆盖 ML Kit/PDF 文本层来源。
+                val mergedText = PdfOcrEngine.filterStrongCjkNoise(mergedTextRaw)
                 val ocrStats = countTextKotlin(mergedText)
                 val mergedTag = if (mergedText != ocrRes.text) " +文本层" else ""
                 val resMap = mapOf(
