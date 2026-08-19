@@ -386,9 +386,9 @@ object DwgProcessor {
                     if ((gc == "1" || gc == "3") && curType in setOf("TEXT", "MTEXT", "ATTDEF", "ATTRIB", "MULTILEADER")) {
                         val s = value.trim()
                         if (s.isNotEmpty()) {
-                            val b = s.toByte(Charsets.ISO_8859_1)
-                            val u8 = try { String(b, Charsets.UTF_8) } catch (_: Throwable) { s }
-                            val gb = try { String(b, charset("GB18030")) } catch (_: Throwable) { s }
+                            val b = s.toByteArray(Charsets.ISO_8859_1)
+                            val u8 = try { String(b, 0, b.size, Charsets.UTF_8) } catch (_: Throwable) { s }
+                            val gb = try { String(b, 0, b.size, charset("GB18030")) } catch (_: Throwable) { s }
                             out.append(if (countOfFarEast(gb) >= countOfFarEast(u8)) gb else u8).append("\n")
                         }
                     }
