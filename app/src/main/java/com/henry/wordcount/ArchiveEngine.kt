@@ -164,6 +164,8 @@ object ArchiveEngine {
                 val rarFiles = dest.walkTopDown().filter { it.isFile }.toList()
                 val rarTotal = rarFiles.size
                 rarFiles.forEachIndexed { idx, f ->
+                    // v1.9.1: 处理前先上报已完成数，保证进入首个大文件（DWG 可能数分钟）时界面即有提示
+                    onProgress?.invoke(idx, rarTotal)
                     // v1.5.88: 保留 RAR 内相对路径，避免同名文件被覆盖/统计显示不全
                     val relName = f.relativeTo(dest).path.replace('\\', '/')
                     try { processEntry(relName, f.readBytes(), cacheDir, inner, context) } catch (_: Throwable) {}
