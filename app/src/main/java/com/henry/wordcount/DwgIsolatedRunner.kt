@@ -30,7 +30,7 @@ import kotlin.coroutines.resume
 object DwgIsolatedRunner {
 
     private const val BIND_TIMEOUT_MS = 8_000L
-    private const val CONVERT_TIMEOUT_MS = 35_000L
+    private const val CONVERT_TIMEOUT_MS = 900_000L
 
     /**
      * 在 :dwgisolated 进程执行 dwg2pdf（DWG 导出看图 / 字数 PDF 回退）。
