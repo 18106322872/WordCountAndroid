@@ -368,31 +368,31 @@ object DwgProcessor {
      *  当 DwgDxfParser 复杂结构化解析在某些真机上漏抽文字（DXF 含 3185 个 TEXT/MTEXT
      *  但 collectDxfTexts 返回空列表）时，直接按 DXF 组码 1/3 顺序对原始字节做
      *  GB18030/UTF-8 双解码抽取，覆盖 _collect_dxf_texts 漏抽的场景。 */
+    /** v1.9.3: DXF 简易 gc=1/3 兜底抽取（流式 BufferedReader，避免大 DXF OOM）。
+     *  当 DwgDxfParser 复杂结构化解析在某些真机上漏抽文字时，直接按 DXF 组码 1/3
+     *  顺序对原始字节做 GB18030/UTF-8 双解码抽取。流式处理 200MB 以下文件不爆内存。 */
     private fun extractDxfTextsSimple(path: String): String {
         return try {
-            val f = java.io.RandomAccessFile(path, "r")
-            val size = f.length()
-            if (size <= 0 || size > 200L * 1024 * 1024) { f.close(); return "" }
-            val buf = ByteArray(size.toInt())
-            f.readFully(buf); f.close()
-            val lines = String(buf, Charsets.ISO_8859_1).split("\n")
+            val f = java.io.File(path)
+            if (!f.exists() || f.length() <= 0 || f.length() > 200L * 1024 * 1024) return ""
             val out = StringBuilder()
             var curType: String? = null
-            val iMax = lines.size - 1
-            var i = 0
-            while (i < iMax) {
-                val gc = lines[i].trim()
-                val val0 = lines[i + 1]
-                i += 2
-                if (gc == "0") { curType = val0.trim(); continue }
-                if ((gc == "1" || gc == "3") && curType in setOf("TEXT", "MTEXT", "ATTDEF", "ATTRIB", "MULTILEADER")) {
-                    val s = val0.trim()
-                    if (s.isNotEmpty()) {
-                        val b = s.toByteArray(Charsets.ISO_8859_1)
-                        val u8 = try { String(b, Charsets.UTF_8) } catch (_: Throwable) { s }
-                        val gb = try { String(b, charset("GB18030")) } catch (_: Throwable) { s }
-                        out.append(if (countOfFarEast(gb) >= countOfFarEast(u8)) gb else u8).append("\n")
+            java.io.BufferedReader(java.io.InputStreamReader(java.io.FileInputStream(f), Charsets.ISO_8859_1)).use { br ->
+                var code = br.readLine()
+                while (code != null) {
+                    val value = br.readLine() ?: break
+                    val gc = code.trim()
+                    if (gc == "0") { curType = value.trim(); code = br.readLine(); continue }
+                    if ((gc == "1" || gc == "3") && curType in setOf("TEXT", "MTEXT", "ATTDEF", "ATTRIB", "MULTILEADER")) {
+                        val s = value.trim()
+                        if (s.isNotEmpty()) {
+                            val b = s.toByte(Charsets.ISO_8859_1)
+                            val u8 = try { String(b, Charsets.UTF_8) } catch (_: Throwable) { s }
+                            val gb = try { String(b, charset("GB18030")) } catch (_: Throwable) { s }
+                            out.append(if (countOfFarEast(gb) >= countOfFarEast(u8)) gb else u8).append("\n")
+                        }
                     }
+                    code = br.readLine()
                 }
             }
             out.toString()
