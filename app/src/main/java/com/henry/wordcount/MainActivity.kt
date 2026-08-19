@@ -649,7 +649,6 @@ fun WordCountApp(initialUris: List<Uri>) {
          }
      }
  }
-                    }
                 }
             }
         }
