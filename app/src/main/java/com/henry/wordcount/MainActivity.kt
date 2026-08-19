@@ -365,7 +365,7 @@ fun WordCountApp(initialUris: List<Uri>) {
     // 处理启动时从千牛/微信分享进来的文件
     androidx.compose.runtime.LaunchedEffect(Unit) {
         if (initialUris.isNotEmpty()) {
-            addFiles(context, scope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, initialUris)
+            addFiles(context, scope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, initialUris, onProgress = { name, done, total -> progressText = if (total <= 0) null else "正在统计文件$name，已统计$done/$total" })
         }
     }
 
@@ -377,7 +377,7 @@ fun WordCountApp(initialUris: List<Uri>) {
             val uris = MainActivity.pendingUris
             if (uris != null && uris.isNotEmpty() && !busy) {
                 MainActivity.pendingUris = null // 消费掉
-                addFiles(context, scope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris)
+                addFiles(context, scope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total -> progressText = if (total <= 0) null else "正在统计文件$name，已统计$done/$total" })
             }
         }
     }
