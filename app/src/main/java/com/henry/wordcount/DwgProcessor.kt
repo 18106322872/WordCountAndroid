@@ -127,8 +127,7 @@ object DwgProcessor {
         // TEXT/MTEXT 文字，而简易 gc=1/3 能补回；合并后避免全 0。
         val simpleText = extractDxfTextsSimple(dxfPath)
         if (simpleText.isNotBlank()) {
-            val mergedText = if (dxfText.isBlank()) simpleText else dxfText + "
-" + simpleText
+            val mergedText = if (dxfText.isBlank()) simpleText else dxfText + "\n" + simpleText
             val mergedStats = countTextKotlin(mergedText)
             // 简易结果明显更优（结构化抽空/漏抽）时直接替换；否则保留合并结果
             val simpleStats = countTextKotlin(simpleText)
