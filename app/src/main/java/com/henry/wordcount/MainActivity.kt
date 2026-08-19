@@ -305,10 +305,12 @@ fun WordCountApp(initialUris: List<Uri>) {
     var renameText by remember { mutableStateOf("") }
     // v1.1.1: 文档比较模式开关
     var compareMode by remember { mutableStateOf(false) }
+    // v1.9.0: 统计进度提示（与电脑版状态栏一致）
+    var progressText by remember { mutableStateOf<String?>(null) }
 
     // SAF 文件选择器（不需要任何存储权限——OpenMultipleDocuments 在所有 Android 版本上均无需授权即可使用）
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (uris.isNotEmpty()) addFiles(context, scope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris)
+        if (uris.isNotEmpty()) addFiles(context, scope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total -> progressText = "正在统计文件$name，已统计$done/$total" })
     }
 
     // v1.5.36: 文字型 PDF 选择器（仅 PDF）。用于 DWG 统计不准时，让用户手动选一份同图文字型 PDF 重新统计。
@@ -545,6 +547,13 @@ fun WordCountApp(initialUris: List<Uri>) {
                             }
                         }
                     }
+                }
+                if (progressText != null) {
+                    Text(
+                        progressText!!,
+                        color = Color.Black,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+                    )
                 }
                 LazyColumn(
                     Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp),
@@ -2087,7 +2096,8 @@ private fun addFiles(
     entries: androidx.compose.runtime.snapshots.SnapshotStateList<FileEntry>,
     busyRef: () -> Boolean,
     busySet: (Boolean) -> Unit,
-    uris: List<Uri>
+    uris: List<Uri>,
+    onProgress: ((String, Int, Int) -> Unit)? = null
 ) {
     if (busyRef()) return
         scope.launch(Dispatchers.Main) {
@@ -2132,7 +2142,7 @@ private fun addFiles(
                     val f = cf.file
                     val dName = cf.displayName
                     try {
-                        val res = ArchiveEngine.extract(f, context.cacheDir, context)
+                        val res = ArchiveEngine.extract(f, context.cacheDir, context, onProgress = { done, total -> onProgress?.invoke(dName, done, total) })
                         if (res == null) {
                             val ext = f.extension.lowercase()
                             val isSupported = ext in setOf("zip", "rar", "7z", "tar", "gz", "tgz")
@@ -2415,7 +2425,7 @@ private fun addFiles(
                             //   (更兼容, 文本/图片 PDF 均可靠渲染)，仅保留 looksLikeGarbage/isFailedChinesePdf
                             //   的 PRINT 高分辨率(这两类确需更清晰渲染)。
                             val ocrForPrintMode = looksLikeGarbage || isFailedChinesePdf
-                            val ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = ocrForPrintMode)
+                            val ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = ocrForPrintMode, onProgress = { done, total -> onProgress?.invoke(dName, done, total) })
 
                             if (ocrRes != null) {
                                 // OCR 成功：对齐桌面 text_items+img_items 合并口径，
@@ -2700,6 +2710,7 @@ private fun addFiles(
             scope.launch { snackbar.showSnackbar("处理出错：${e.message}") }
         } finally {
             busySet(false)
+            progressText = null
         }
     }
 }
