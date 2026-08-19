@@ -58,7 +58,7 @@ object DwgProcessor {
         var dxfSuccess = false
         if (dxfRes.path != null) {
             val dxfFile = File(dxfPath)
-            if (dxfFile.exists() && dxfFile.length() > 0) {
+            if (dxfFile.exists() && dxfFile.length() > 0 && isDxfComplete(dxfPath)) {
                 dxfSuccess = true
                 val analysis = DwgDxfParser.analyze(dxfPath)
                 dxfText = analysis.text
@@ -323,6 +323,25 @@ object DwgProcessor {
 
     /** v1.8.8: 仅保留与 countTextKotlin 口径一致的 FarEast 字符（含 CJK/假名/韩文/全角/中文标点）。
      *  用于 nonChineseDxf 触发时丢弃 OLE 预览 OCR 误识别的西文/数字/编号噪声。 */
+    /**
+     * v1.9.0: DXF 完整性守卫。LibreDWG 转换成功时，完整 DXF 必定以 ENDSEC/EOF 结尾；
+     * 若转换中途被杀/崩溃，会产生"几何实体已写出但 LAYOUT/文字未写、无 EOF"的半成品 DXF，
+     * 这种文件通过 length>0 检查但解析会得到 0 字 + 虚高页数，与桌面不符。现要求必须以 EOF 结尾
+     * 才视为可信，否则按转换失败处理（DXF 转换失败兜底归零显示"-"，与桌面对齐）。
+     * 只读末尾 512 字节，开销可忽略。 */
+    private fun isDxfComplete(path: String): Boolean {
+        return try {
+            val f = java.io.RandomAccessFile(path, "r")
+            val size = f.length()
+            val n = minOf(size, 512L).toInt()
+            f.seek(size - n)
+            val buf = ByteArray(n)
+            f.readFully(buf)
+            f.close()
+            val tail = String(buf, charset("UTF-8"), 0, n).trim()
+            tail.endsWith("EOF")
+        } catch (_: Throwable) { false }
+    }
     private fun keepFarEastOnly(text: String): String {
         return text.filter { it.isFarEastForDwg() }
     }
