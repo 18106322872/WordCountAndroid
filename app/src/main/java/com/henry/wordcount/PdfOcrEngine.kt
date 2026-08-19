@@ -96,7 +96,7 @@ object PdfOcrEngine {
      * @param forPrintMode v1.3.81: 为"文字型但Kotlin无法解码"的PDF使用更高渲染质量（PRINT模式+2x分辨率），
      *        提升中文 OCR 识别率。默认 false（扫描件/图片型用普通 DISPLAY 模式即可）。
      */
-    fun extractText(context: Context, file: File, forPrintMode: Boolean = false): PdfOcrResult? {
+    fun extractText(context: Context, file: File, forPrintMode: Boolean = false, onProgress: ((Int, Int) -> Unit)? = null): PdfOcrResult? {
         lastFailReason = FailReason.OK
         lastFailDetail = ""
         lastDiag = ""
@@ -119,7 +119,7 @@ object PdfOcrEngine {
         Log.d("WordCount", "PdfOcr 开始: ${file.name} (${file.length()} bytes) printMode=$forPrintMode ocrEnabled=${OcrEngine.ocrEnabled} ocrFailed=${OcrEngine.ocrFailed} strongOcr=${PaddleOcr.available} paddleErr=${lastPaddleInitError}")
 
         // 1) 系统 PdfRenderer
-        val sys = renderWithSystem(context, file, forPrintMode)
+        val sys = renderWithSystem(context, file, forPrintMode, onProgress)
         val sysDiag = lastDiag
         if (sys != null) Log.d("WordCount", "PdfOcr 路径1(Sys) 召回 ${sys.text.length} 字")
 
@@ -383,7 +383,7 @@ object PdfOcrEngine {
 
     // ══════════════════ 1) 系统 PdfRenderer ══════════════════
 
-    private fun renderWithSystem(context: Context, file: File, forPrintMode: Boolean = false): PdfOcrResult? {
+    private fun renderWithSystem(context: Context, file: File, forPrintMode: Boolean = false, onProgress: ((Int, Int) -> Unit)? = null): PdfOcrResult? {
         val diag = StringBuilder()
         val pfd = try {
             ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
@@ -411,6 +411,7 @@ object PdfOcrEngine {
             diag.append("SysRenderer: ${pageCount}页(forPrint=$forPrintMode)")
 
             for (i in 0 until limit) {
+                onProgress?.invoke(i + 1, pageCount)
                 try {
                     val page = renderer.openPage(i)
                     try {
