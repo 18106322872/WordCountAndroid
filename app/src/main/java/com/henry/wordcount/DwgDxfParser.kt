@@ -581,7 +581,7 @@ object DwgDxfParser {
         val textChars = text.length
         // v1.5.58: 大文件跳过整文件多编码兜底——recover 会叠加 GBK/GB18030/UTF-8/latin1
         //   四份大 String，是 OOM 主因；且大文件结构化解析本就能拿到中文，兜底价值低
-        val rawRecovered = if (raw.size <= 25 * 1024 * 1024) recoverCjkFromRawDxf(raw) else ""
+        val rawRecovered = if (raw.size <= 50 * 1024 * 1024) recoverCjkFromRawDxf(raw) else ""
         val rawCjk = cjkCountOf(rawRecovered)
         val rawCommon = commonCountOf(rawRecovered)
         val rawCommonRatio = if (rawCjk > 0) rawCommon.toDouble() / rawCjk else 0.0
