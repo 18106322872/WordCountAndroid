@@ -123,17 +123,24 @@ object DwgProcessor {
                 // 不可采信（nonChineseDxf 为 true 时排除），改用 OLE 预览 OCR + 原始字节扫描。
                 val dxfUsable = dxfStats.fourth > 0 && !dxfMojibake && !nonChineseDxf
         // v1.9.2: DwgDxfParser 复杂结构化在部分真机上漏抽文字，加 gc=1/3 简易抽取覆盖
-        if (dxfText.isBlank() || dxfStats.fourth == 0) {
-            val simpleText = extractDxfTextsSimple(dxfPath)
-            if (simpleText.isNotBlank()) {
-                val simpleStats = countTextKotlin(simpleText)
-                if (simpleStats.fourth > dxfStats.fourth) {
-                    dxfText = simpleText
-                    dxfStats = simpleStats
-                    dxfPagesReason = (dxfPagesReason ?: "") + "·v1.9.2简易抽取"
-                    Log.d("WordCount", "DWG dxf 简易抽取覆盖 $dName: chars=${simpleStats.fourth} fe=${simpleStats.second} nc=${simpleStats.third}")
-                }
+        // v1.9.5: 结构化解析与简易流式抽取合并，取并集。部分真机上结构化解析会漏抽
+        // TEXT/MTEXT 文字，而简易 gc=1/3 能补回；合并后避免全 0。
+        val simpleText = extractDxfTextsSimple(dxfPath)
+        if (simpleText.isNotBlank()) {
+            val mergedText = if (dxfText.isBlank()) simpleText else dxfText + "
+" + simpleText
+            val mergedStats = countTextKotlin(mergedText)
+            // 简易结果明显更优（结构化抽空/漏抽）时直接替换；否则保留合并结果
+            val simpleStats = countTextKotlin(simpleText)
+            if (dxfStats.fourth == 0 || simpleStats.fourth > dxfStats.fourth * 2) {
+                dxfText = simpleText
+                dxfStats = simpleStats
+            } else {
+                dxfText = mergedText
+                dxfStats = mergedStats
             }
+            dxfPagesReason = (dxfPagesReason ?: "") + "·v1.9.5简易抽取"
+            Log.d("WordCount", "DWG dxf 简易抽取 $dName: simpleChars=${simpleStats.fourth} mergedChars=${mergedStats.fourth} structChars=${dxfStats.fourth}")
         }
                 if (printedScope || dxfUsable) {
                     finalStats = dxfStats
@@ -282,13 +289,13 @@ object DwgProcessor {
             finalStats = Quadruple(0, 0, 0, 0)
             finalText = ""
         }
-        // v1.9.2: DXF 转换成功但最终完全抽不出文字（含简易兜底也无效），归零显示"-"避免
-        // 显示"0字+错误页数"误导。需求：与桌面"ERR/编码混乱无法提取"语义一致。
+        // v1.9.5: DXF 转换成功但完全抽不出文字时，归零字数但保留图框页数；
+        // 需求改为"只清字数不清页数"，避免用户看到页数 1 与真实图纸差异过大。
         if (dxfSuccess && finalStats.fourth == 0 && finalStats.first <= 3 && dxfText.isBlank()) {
-            Log.d("WordCount", "DWG DXF抽空→归零显示-(无文字) $dName: pages=$dxfPages($dxfPagesReason)")
+            Log.d("WordCount", "DWG DXF抽空→归零字数保留页数(无文字) $dName: pages=$dxfPages($dxfPagesReason)")
             finalStats = Quadruple(0, 0, 0, 0)
             finalText = ""
-            dxfPages = null  // 让 estimatePages 兜底 1，不再显示 LibreDWG 错误帧数
+            // dxfPages 保留，让 UI 仍显示 LibreDWG 估算图框数
         }
         // ── 回退：栅格化/稀疏/字数极少时置 needsPdf ──
         val framesKnown = (dxfPages != null) && (dxfPages >= 1)
@@ -383,7 +390,7 @@ object DwgProcessor {
                     val value = br.readLine() ?: break
                     val gc = code.trim()
                     if (gc == "0") { curType = value.trim(); code = br.readLine(); continue }
-                    if ((gc == "1" || gc == "3") && curType in setOf("TEXT", "MTEXT", "ATTDEF", "ATTRIB", "MULTILEADER")) {
+                    if ((gc in setOf("1", "3", "7", "9", "304", "302")) && curType in setOf("TEXT", "MTEXT", "ATTDEF", "ATTRIB", "MULTILEADER")) {
                         val s = value.trim()
                         if (s.isNotEmpty()) {
                             val b = s.toByteArray(Charsets.ISO_8859_1)
