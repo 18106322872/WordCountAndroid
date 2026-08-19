@@ -623,9 +623,32 @@ fun WordCountApp(initialUris: List<Uri>) {
                         )
                     }
                     if (busy) item {
-                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator()
-                        }
+     // v1.9.3: 去掉转圈，改成图3样式大字+进度条+文字（progressText 由 addFiles onProgress 维护）
+     val ptext = progressText ?: "正在统计文件…"
+     val (cur, total) = run {
+         val mm = Regex("(\\d+)/(\\d+)").find(ptext)
+         if (mm != null) (mm.groupValues[1].toInt() to mm.groupValues[2].toInt()) else (0 to 0)
+     }
+     val ratio = if (total > 0) cur.toFloat() / total else 0f
+     Column(
+         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+         horizontalAlignment = Alignment.CenterHorizontally
+     ) {
+         Text(
+             text = ptext,
+             color = Color.Black,
+             fontSize = androidx.compose.ui.unit.TextUnit(14f, androidx.compose.ui.unit.TextUnitType.Sp)
+         )
+         if (total > 0) {
+             Spacer(Modifier.height(4.dp))
+             LinearProgressIndicator(
+                 progress = { ratio.coerceIn(0f, 1f) },
+                 modifier = Modifier.fillMaxWidth().height(6.dp),
+                 color = Color(0xFF1565C0)
+             )
+         }
+     }
+ }
                     }
                 }
             }
@@ -2170,7 +2193,10 @@ private fun addFiles(
                     val f = cf.file
                     val dName = cf.displayName
                     try {
-                        val res = ArchiveEngine.extract(f, context.cacheDir, context, onProgress = { done, total -> onProgress?.invoke(dName, done, total) })
+                        // v1.9.3: onProgress 在 IO 线程被 invoke，更新 Compose State 需切到 Main 线程
+                        val res = ArchiveEngine.extract(f, context.cacheDir, context, onProgress = { done, total ->
+                            scope.launch(Dispatchers.Main) { onProgress?.invoke(dName, done, total) }
+                        })
                         if (res == null) {
                             val ext = f.extension.lowercase()
                             val isSupported = ext in setOf("zip", "rar", "7z", "tar", "gz", "tgz")
@@ -2453,7 +2479,9 @@ private fun addFiles(
                             //   (更兼容, 文本/图片 PDF 均可靠渲染)，仅保留 looksLikeGarbage/isFailedChinesePdf
                             //   的 PRINT 高分辨率(这两类确需更清晰渲染)。
                             val ocrForPrintMode = looksLikeGarbage || isFailedChinesePdf
-                            val ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = ocrForPrintMode, onProgress = { done, total -> onProgress?.invoke(dName, done, total) })
+                            val ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = ocrForPrintMode, onProgress = { done, total ->
+                                scope.launch(Dispatchers.Main) { onProgress?.invoke(dName, done, total) }
+                            })
 
                             if (ocrRes != null) {
                                 // OCR 成功：对齐桌面 text_items+img_items 合并口径，
