@@ -30,9 +30,9 @@ android {
 
         targetSdk 34
 
-        versionCode 250
+        versionCode 251
 
-        versionName '1.9.0'
+        versionName '1.9.1'
 
 
 
