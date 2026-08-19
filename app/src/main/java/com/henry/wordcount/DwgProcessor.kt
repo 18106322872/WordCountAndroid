@@ -121,36 +121,40 @@ object DwgProcessor {
                 // 更大而回退到噪声。raw 扫描仅用于后续 CJK 恢复/兜底。
                 // v1.5.93: 纯英文/编号 DWG 的 DXF 矢量文字是 dwg2dxf 块炸开的膨胀结果，
                 // 不可采信（nonChineseDxf 为 true 时排除），改用 OLE 预览 OCR + 原始字节扫描。
-                val dxfUsable = dxfStats.fourth > 0 && !dxfMojibake && !nonChineseDxf
+                val dxfUsable = dxfStats.fourth > 0 && !dxfMojibake
         // v1.9.2: DwgDxfParser 复杂结构化在部分真机上漏抽文字，加 gc=1/3 简易抽取覆盖
         // v1.9.5: 结构化解析与简易流式抽取合并，取并集。部分真机上结构化解析会漏抽
         // TEXT/MTEXT 文字，而简易 gc=1/3 能补回；合并后避免全 0。
         val simpleText = extractDxfTextsSimple(dxfPath)
         if (simpleText.isNotBlank()) {
-            val mergedText = if (dxfText.isBlank()) simpleText else dxfText + "\n" + simpleText
-            val mergedStats = countTextKotlin(mergedText)
-            // 简易结果明显更优（结构化抽空/漏抽）时直接替换；否则保留合并结果
             val simpleStats = countTextKotlin(simpleText)
-            if (dxfStats.fourth == 0 || simpleStats.fourth > dxfStats.fourth * 2) {
+            // v1.9.6: nonChineseDxf 时结构化解析的 INSERT 块展开会导致编号膨胀，
+            // 改用简易抽取（不展开 INSERT）作为主结果，与桌面版 text 口径一致。
+            if (nonChineseDxf) {
                 dxfText = simpleText
                 dxfStats = simpleStats
             } else {
-                dxfText = mergedText
-                dxfStats = mergedStats
+                val mergedText = if (dxfText.isBlank()) simpleText else dxfText + "\n" + simpleText
+                val mergedStats = countTextKotlin(mergedText)
+                // 简易结果明显更优（结构化抽空/漏抽）时直接替换；否则保留合并结果
+                if (dxfStats.fourth == 0 || simpleStats.fourth > dxfStats.fourth * 2) {
+                    dxfText = simpleText
+                    dxfStats = simpleStats
+                } else {
+                    dxfText = mergedText
+                    dxfStats = mergedStats
+                }
             }
-            dxfPagesReason = (dxfPagesReason ?: "") + "·v1.9.5简易抽取"
-            Log.d("WordCount", "DWG dxf 简易抽取 $dName: simpleChars=${simpleStats.fourth} mergedChars=${mergedStats.fourth} structChars=${dxfStats.fourth}")
+            dxfPagesReason = (dxfPagesReason ?: "") + "·v1.9.6简易抽取"
+            Log.d("WordCount", "DWG dxf 简易抽取 $dName: simpleChars=${simpleStats.fourth} nonChineseDxf=$nonChineseDxf structChars=${dxfStats.fourth}")
         }
                 if (printedScope || dxfUsable) {
                     finalStats = dxfStats
                     finalText = dxfText
                 }
-                if (nonChineseDxf) {
-                    // v1.8.5: 丢弃膨胀 DXF 结果，避免把 raw 二进制扫描噪声作为最终字数。
-                    // 后续 OLE/OCR 路径会尝试提取可见文字；提取不到则 needsPdf 为 true，UI 显示"-"
-                    finalStats = Quadruple(0, 0, 0, 0)
-                    finalText = ""
-                }
+                // v1.9.6: 不再对 nonChineseDxf 清零。纯英文/编号 DWG 的字数
+                // 应保留（与桌面版一致），仅由简易抽取避免 INSERT 块展开膨胀。
+                // OLE/OCR 路径仅在 DXF 无文字时兜底。
                 Log.d("WordCount", "DWG dxf $dName: enc=${analysis.decodeMode} raw=$rawChars dxf=${dxfStats.fourth} cjk=$dxfCjkCount cr=${"%.3f".format(dxfCommonRatio)} den=${"%.0f".format(dxfDensity)} moji=$dxfMojibake pages=$dxfPages($dxfPagesReason)")
             }
         }
@@ -211,7 +215,9 @@ object DwgProcessor {
         // （含中文 fe 与编号 nc），缺失时回退原始字节 CJK 扫描。仅在 recovery 尚未成功时介入，
         // 避免覆盖已成功的栅格化/乱码中文恢复结果（如水雾等中文充足图纸）。
         var oleApplied = false
-        if ((nonChineseDxf || encodingLoss) && !recoverySucceeded && !oleApplied) {
+        // v1.9.6: nonChineseDxf 且 DXF 已有文字时跳过 OLE（DXF 简易抽取已可靠），
+        // 仅在 DXF 无文字时才尝试 OLE 兜底。
+        if ((encodingLoss || (nonChineseDxf && finalStats.fourth == 0)) && !recoverySucceeded && !oleApplied) {
             try {
                 val oleRes = DwgOleExtractor.extractOleText(dxfPath)
                 if (oleRes.text.isNotBlank()) {
@@ -382,6 +388,7 @@ object DwgProcessor {
             val f = java.io.File(path)
             if (!f.exists() || f.length() <= 0 || f.length() > 200L * 1024 * 1024) return ""
             val out = StringBuilder()
+            val seen = HashSet<String>()  // v1.9.6: 行级去重，防止块炸开编号膨胀
             var curType: String? = null
             java.io.BufferedReader(java.io.InputStreamReader(java.io.FileInputStream(f), Charsets.ISO_8859_1)).use { br ->
                 var code = br.readLine()
@@ -395,7 +402,10 @@ object DwgProcessor {
                             val b = s.toByteArray(Charsets.ISO_8859_1)
                             val u8 = try { String(b, 0, b.size, Charsets.UTF_8) } catch (_: Throwable) { s }
                             val gb = try { String(b, 0, b.size, charset("GB18030")) } catch (_: Throwable) { s }
-                            out.append(if (countOfFarEast(gb) >= countOfFarEast(u8)) gb else u8).append("\n")
+                            val decoded = if (countOfFarEast(gb) >= countOfFarEast(u8)) gb else u8
+                            if (seen.add(decoded)) {
+                                out.append(decoded).append("\n")
+                            }
                         }
                     }
                     code = br.readLine()

@@ -622,33 +622,6 @@ fun WordCountApp(initialUris: List<Uri>) {
                             }
                         )
                     }
-                    if (busy) item {
-     // v1.9.3: 去掉转圈，改成图3样式大字+进度条+文字（progressText 由 addFiles onProgress 维护）
-     val ptext = progressText ?: "正在统计文件…"
-     val (cur, total) = run {
-         val mm = Regex("(\\d+)/(\\d+)").find(ptext)
-         if (mm != null) (mm.groupValues[1].toInt() to mm.groupValues[2].toInt()) else (0 to 0)
-     }
-     val ratio = if (total > 0) cur.toFloat() / total else 0f
-     Column(
-         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-         horizontalAlignment = Alignment.CenterHorizontally
-     ) {
-         Text(
-             text = ptext,
-             color = Color.Black,
-             fontSize = androidx.compose.ui.unit.TextUnit(14f, androidx.compose.ui.unit.TextUnitType.Sp)
-         )
-         if (total > 0) {
-             Spacer(Modifier.height(4.dp))
-             LinearProgressIndicator(
-                 progress = { ratio.coerceIn(0f, 1f) },
-                 modifier = Modifier.fillMaxWidth().height(6.dp),
-                 color = Color(0xFF1565C0)
-             )
-         }
-     }
- }
                 }
             }
         }
