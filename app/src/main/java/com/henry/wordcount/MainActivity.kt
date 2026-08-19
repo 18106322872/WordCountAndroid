@@ -310,7 +310,7 @@ fun WordCountApp(initialUris: List<Uri>) {
 
     // SAF 文件选择器（不需要任何存储权限——OpenMultipleDocuments 在所有 Android 版本上均无需授权即可使用）
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (uris.isNotEmpty()) addFiles(context, scope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total -> progressText = "正在统计文件$name，已统计$done/$total" })
+        if (uris.isNotEmpty()) addFiles(context, scope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total -> progressText = if (total <= 0) null else "正在统计文件$name，已统计$done/$total" })
     }
 
     // v1.5.36: 文字型 PDF 选择器（仅 PDF）。用于 DWG 统计不准时，让用户手动选一份同图文字型 PDF 重新统计。
@@ -2710,7 +2710,9 @@ private fun addFiles(
             scope.launch { snackbar.showSnackbar("处理出错：${e.message}") }
         } finally {
             busySet(false)
-            progressText = null
+            // v1.9.1: addFiles 为顶层函数，progressText 属 Composable 作用域，
+            //   统计结束用 total<=0 语义通知调用方清除进度文本。
+            onProgress?.invoke("", 0, 0)
         }
     }
 }
