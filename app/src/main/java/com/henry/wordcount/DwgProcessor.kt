@@ -338,7 +338,7 @@ object DwgProcessor {
             val buf = ByteArray(n)
             f.readFully(buf)
             f.close()
-            val tail = String(buf, charset("UTF-8"), 0, n).trim()
+            val tail = String(buf, Charsets.UTF_8).trim()
             tail.endsWith("EOF")
         } catch (_: Throwable) { false }
     }
