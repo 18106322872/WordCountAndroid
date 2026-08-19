@@ -50,19 +50,19 @@ object ArchiveEngine {
 
     /** cacheDir 用于解包内层文件到临时文件。返回 null 表示不支持或解析失败。
      *  context 参数用于内层图片/PDF 的 OCR 统计。 */
-    suspend fun extract(file: File, cacheDir: File, context: Context? = null): ArchiveResult? {
+    suspend fun extract(file: File, cacheDir: File, context: Context? = null, onProgress: ((Int, Int) -> Unit)? = null): ArchiveResult? {
         return try {
             val ext = file.extension.lowercase()
             when {
-                ext == "zip" || (ext.isBlank() && isZipMagic(file)) -> fromZipCommonsCompress(file, cacheDir, context)
-                ext == "rar" || (ext.isBlank() && isRarMagic(file)) -> fromRar(file, cacheDir, context)
+                ext == "zip" || (ext.isBlank() && isZipMagic(file)) -> fromZipCommonsCompress(file, cacheDir, context, onProgress)
+                ext == "rar" || (ext.isBlank() && isRarMagic(file)) -> fromRar(file, cacheDir, context, onProgress)
                 ext in setOf("gz", "tgz") -> fromGzip(file, cacheDir, context)
                 ext == "tar" || (ext.isBlank() && isTarMagic(file)) -> fromTarDirect(file, cacheDir, context)
                 ext == "7z" -> fromSevenZip(file, cacheDir, context)
                 else -> {
                     // 兜底：按 magic bytes 再试一次
-                    if (isZipMagic(file)) fromZipCommonsCompress(file, cacheDir, context)
-                    else if (isRarMagic(file)) fromRar(file, cacheDir, context)
+                    if (isZipMagic(file)) fromZipCommonsCompress(file, cacheDir, context, onProgress)
+                    else if (isRarMagic(file)) fromRar(file, cacheDir, context, onProgress)
                     else if (isGzipMagic(file)) fromGzip(file, cacheDir, context)
                     else null
                 }
@@ -119,12 +119,16 @@ object ArchiveEngine {
     }
 
     // ──────────────────── ZIP (commons-compress) ────────────────────
-    private suspend fun fromZipCommonsCompress(file: File, cacheDir: File, context: Context?): ArchiveResult {
+    private suspend fun fromZipCommonsCompress(file: File, cacheDir: File, context: Context?, onProgress: ((Int, Int) -> Unit)? = null): ArchiveResult {
         val inner = mutableListOf<InnerResult>()
         org.apache.commons.compress.archivers.zip.ZipFile(file).use { zis ->
             val entries = zis.entries
+            val zipTotal = zis.entries.toList().size
+            var zipDone = 0
             while (entries.hasMoreElements()) {
                 val entry = entries.nextElement() as ZipArchiveEntry
+                zipDone++
+                onProgress?.invoke(zipDone, zipTotal)
                 if (entry.isDirectory) continue
                 val bytes = zis.getInputStream(entry)?.readBytes() ?: continue
                 processEntry(entry.name, bytes, cacheDir, inner, context)
@@ -143,7 +147,7 @@ object ArchiveEngine {
     }
 
     // ──────────────────── RAR (unrar5j，支持 RAR4/RAR5) ────────────────────
-    private suspend fun fromRar(file: File, cacheDir: File, context: Context?): ArchiveResult? {
+    private suspend fun fromRar(file: File, cacheDir: File, context: Context?, onProgress: ((Int, Int) -> Unit)? = null): ArchiveResult? {
         val inner = mutableListOf<InnerResult>()
         val dest = File(cacheDir, "rar_${System.currentTimeMillis()}")
         dest.mkdirs()
@@ -157,10 +161,13 @@ object ArchiveEngine {
                 if ((result.totalFiles ?: 0) > result.successCount) {
                     Log.w("WordCount", "RAR 部分解压: ${file.name} total=${result.totalFiles} success=${result.successCount}")
                 }
-                dest.walkTopDown().filter { it.isFile }.forEach { f ->
+                val rarFiles = dest.walkTopDown().filter { it.isFile }.toList()
+                val rarTotal = rarFiles.size
+                rarFiles.forEachIndexed { idx, f ->
                     // v1.5.88: 保留 RAR 内相对路径，避免同名文件被覆盖/统计显示不全
                     val relName = f.relativeTo(dest).path.replace('\\', '/')
                     try { processEntry(relName, f.readBytes(), cacheDir, inner, context) } catch (_: Throwable) {}
+                    onProgress?.invoke(idx + 1, rarTotal)
                 }
                 Log.d("WordCount", "RAR processed ${file.name}: innerFiles=${inner.size}")
                 aggregate(inner)
