@@ -290,10 +290,6 @@ object DwgProcessor {
             finalText = ""
             dxfPages = null  // 让 estimatePages 兜底 1，不再显示 LibreDWG 错误帧数
         }
-            Log.d("WordCount", "DWG 转换失败→归零显示-(无可靠来源) $dName: rawWords=${finalStats.first} fe=${finalStats.second} nc=${finalStats.third}")
-            finalStats = Quadruple(0, 0, 0, 0)
-            finalText = ""
-        }
         // ── 回退：栅格化/稀疏/字数极少时置 needsPdf ──
         val framesKnown = (dxfPages != null) && (dxfPages >= 1)
         val framesVal4 = if (framesKnown) dxfPages!! else 1
