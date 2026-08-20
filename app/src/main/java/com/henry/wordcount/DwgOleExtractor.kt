@@ -43,7 +43,8 @@ object DwgOleExtractor {
     private const val MAX_OCR_TEXT_CHARS = 12000
 
     /**
-     * 从 DXF 中抽取所有 OLE2FRAME 预览位图的 OCR 文本。
+     * 从 DXF 中抽取所有 OLE2FRAME 嵌入对象的文本。
+     * 顺序：① office 嵌入（xlsx/docx/pptx Package 流 → ZIP → 文本）；② 预览位图 OCR。
      * @param dxfPath dwg→dxf 转换产物路径（不存在时直接返回空，绝不影响主流程）
      */
     fun extractOleText(dxfPath: String, maxBitmaps: Int = MAX_BITMAPS_PER_FILE): OleExtractResult {
@@ -57,10 +58,28 @@ object DwgOleExtractor {
             var bitmapsOcred = 0
 
             for (blob in blobs) {
-                if (bitmapsOcred >= maxBitmaps) break
                 if (allLines.size >= MAX_OCR_TEXT_CHARS) break
                 try {
                     val cfb = Cfb(blob)
+                    // v1.9.9: 先尝试 Office Package 抽取（xlsx/docx/pptx 直接抽文字，比 OCR 准且快得多，
+                    // 对齐桌面 cad_ole_ocr.py 的 office 优先路径）。仅在 office 流缺失/损坏时回退 OCR。
+                    val officeText = extractOfficeTextFromCfb(cfb)
+                    var officeGot = false
+                    if (officeText != null && officeText.isNotBlank()) {
+                        val lines = officeText.lines().map { it.trim() }.filter { it.length >= 1 }
+                        if (lines.isNotEmpty()) {
+                            val fragSet = lines.toSet()
+                            if (acceptedFragSets.none { jaccard(it, fragSet) >= 0.9 }) {
+                                acceptedFragSets.add(fragSet)
+                                for (ln in lines) allLines.add(ln)
+                                officeGot = true
+                            } else {
+                                officeGot = true  // 算作识别过，但内容重复
+                            }
+                        }
+                    }
+                    if (officeGot) continue  // office 路径成功，跳过该 blob 的 OCR
+                    if (bitmapsOcred >= maxBitmaps) continue
                     for (sname in PRES_NAMES) {
                         if (bitmapsOcred >= maxBitmaps) break
                         if (allLines.size >= MAX_OCR_TEXT_CHARS) break
@@ -85,6 +104,169 @@ object DwgOleExtractor {
         } catch (e: Throwable) {
             Log.w(TAG, "DwgOleExtractor.extractOleText 失败: ${e.message}")
             OleExtractResult("", 0, 0)
+        }
+    }
+
+    /**
+     * v1.9.9: 直接从 DWG 二进制扫描 CFB（OLE2 复合文档）—— LibreDWG→DXF 在 Android 上经常
+     * 不保留 OLE2FRAME 实体，导致 dxfPath 路径拿不到 OLE。直接扫 DWG 文件二进制可补救此情况，
+     * 也能在 dwg2dxf 转换失败时（31003-31035 现象）作为 OLE 兜底来源。
+     */
+    fun extractOleTextFromDwg(dwgPath: String, maxScans: Int = 64): OleExtractResult {
+        return try {
+            val file = File(dwgPath)
+            if (!file.exists() || file.length() < 1024L) return OleExtractResult("", 0, 0)
+            val size = file.length().toInt()
+            val buf = ByteArray(size)
+            val nRead = try { java.io.FileInputStream(file).use { it.read(buf) } } catch (e: Throwable) { return OleExtractResult("", 0, 0) }
+            if (nRead < 512) return OleExtractResult("", 0, 0)
+
+            val acceptedFragSets = mutableListOf<Set<String>>()
+            val allLines = LinkedHashSet<String>()
+            var cfbCount = 0
+            var i = 0
+            val end = nRead - 8
+            while (i < end && cfbCount < maxScans && allLines.size < MAX_OCR_TEXT_CHARS) {
+                var j = i
+                var found = -1
+                while (j < end) {
+                    if (buf[j] == 0xD0.toByte() && buf[j+1] == 0xCF.toByte() && buf[j+2] == 0x11.toByte() && buf[j+3] == 0xE0.toByte()
+                        && buf[j+4] == 0xA1.toByte() && buf[j+5] == 0xB1.toByte() && buf[j+6] == 0x1A.toByte() && buf[j+7] == 0xE1.toByte()) {
+                        found = j; break
+                    }
+                    j++
+                }
+                if (found < 0) break
+                // 尝试解析该 CFB
+                val slice = buf.copyOfRange(found, nRead)
+                try {
+                    val cfb = Cfb(slice)
+                    val officeText = extractOfficeTextFromCfb(cfb)
+                    var officeGot = false
+                    if (officeText != null && officeText.isNotBlank()) {
+                        val lines = officeText.lines().map { it.trim() }.filter { it.length >= 1 }
+                        if (lines.isNotEmpty()) {
+                            val fragSet = lines.toSet()
+                            if (acceptedFragSets.none { jaccard(it, fragSet) >= 0.9 }) {
+                                acceptedFragSets.add(fragSet)
+                                for (ln in lines) allLines.add(ln)
+                                officeGot = true
+                            } else { officeGot = true }
+                        }
+                    }
+                    if (officeGot) { cfbCount++; i = found + 512; continue }
+                    // 回退 OCR（限制每次只 OCR 1 张图，避免长耗时）
+                    for (sname in PRES_NAMES) {
+                        val stream = cfb.getStream(sname) ?: continue
+                        val (bmp, _) = findBitmap(stream) ?: continue
+                        val text = ocrBitmap(bmp) ?: continue
+                        if (text.isBlank()) continue
+                        val lines = text.lines().map { it.trim() }.filter { it.length >= 2 }
+                        if (lines.isEmpty()) continue
+                        val fragSet = lines.toSet()
+                        if (acceptedFragSets.any { jaccard(it, fragSet) >= 0.9 }) break
+                        acceptedFragSets.add(fragSet)
+                        for (ln in lines) allLines.add(ln)
+                        break  // 每 blob 仅 OCR 第一张图，避免超时
+                    }
+                    cfbCount++
+                    i = found + 512
+                } catch (e: Throwable) {
+                    // 不是合法 CFB，跳过当前 magic 位置继续
+                    i = found + 1
+                }
+            }
+            OleExtractResult(allLines.joinToString("\n"), cfbCount, 0)
+        } catch (e: Throwable) {
+            Log.w(TAG, "DwgOleExtractor.extractOleTextFromDwg 失败: ${e.message}")
+            OleExtractResult("", 0, 0)
+        }
+    }
+
+    // ZIP magic
+    private val ZIP_MAGIC = byteArrayOf(0x50.toByte(), 0x4B.toByte(), 0x03.toByte(), 0x04.toByte())
+    // Office 包内可能含文本的 XML 路径前缀
+    private val OFFICE_XML_HINTS = listOf(
+        "sharedstrings.xml",   // xlsx
+        "document.xml",        // docx
+        "slides/slide",        // pptx slides
+        "noteslide",           // pptx notes
+        "comments.xml"         // xlsx/docx comments
+    )
+
+    /**
+     * v1.9.9: 从 CFB 内抽取 Office Package 流（xlsx/docx/pptx）→ 解 ZIP → 抽文本。
+     * 对齐桌面 cad_ole_ocr.py 的 office 优先路径。无 office 流或 ZIP 损坏时返回 null。
+     */
+    private fun extractOfficeTextFromCfb(cfb: Cfb): String? {
+        // Office Package 流名（CFB 内顶层流，名称大小写可能不同）
+        val pkgBytes = cfb.getStream("Package") ?: cfb.getStream("package")
+            ?: cfb.getStream("Contents") ?: cfb.getStream("CONTENTS")
+            ?: cfb.getStream("CONTENTS\u0000") ?: return null
+        if (pkgBytes.size < 4) return null
+        if (pkgBytes[0] != ZIP_MAGIC[0] || pkgBytes[1] != ZIP_MAGIC[1] ||
+            pkgBytes[2] != ZIP_MAGIC[2] || pkgBytes[3] != ZIP_MAGIC[3]) return null
+        return extractTextFromZip(pkgBytes)
+    }
+
+    /**
+     * 解 ZIP 字节，扫所有 entry 名匹配 office 文本 entry 的 XML 内容，用正则提取 `<...t...>([^<]+)</...t...>` 标签。
+     * 单 entry 文本超 50000 字截断（防御性），整 ZIP 总文本超 MAX_OCR_TEXT_CHARS 截断。
+     */
+    private fun extractTextFromZip(zipBytes: ByteArray): String? {
+        return try {
+            val out = LinkedHashSet<String>()
+            val maxTotal = MAX_OCR_TEXT_CHARS
+            java.util.zip.ZipInputStream(java.io.ByteArrayInputStream(zipBytes)).use { zis ->
+                var ent = zis.nextEntry
+                while (ent != null) {
+                    val name = ent.name.lowercase()
+                    val isOfficeXml = OFFICE_XML_HINTS.any { name.contains(it) }
+                    if (isOfficeXml && !ent.isDirectory) {
+                        val raw = zis.readBytes()
+                        val text = extractTextFromOfficeXml(raw)
+                        if (!text.isNullOrBlank()) {
+                            for (ln in text.lines().map { it.trim() }.filter { it.isNotEmpty() }) {
+                                if (out.size >= maxTotal) break
+                                out.add(ln)
+                            }
+                        }
+                    }
+                    ent = zis.nextEntry
+                }
+            }
+            if (out.isEmpty()) null else out.joinToString("\n")
+        } catch (e: Throwable) {
+            Log.d(TAG, "DwgOleExtractor.extractTextFromZip 失败: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 从 Office XML 字节中抽所有 `<w:t>...</w:t>`、`<t>...</t>`、`<a:t>...</a:t>` 等文本标签内容。
+     * 用宽匹配 regex：`<[a-zA-Z0-9_:]+t[^>]*>([^<]+)</[a-zA-Z0-9_:]+t>` 与简单 `<t>([^<]+)</t>`。
+     */
+    private fun extractTextFromOfficeXml(xmlBytes: ByteArray): String? {
+        return try {
+            val xml = String(xmlBytes, Charsets.UTF_8)
+            val sb = StringBuilder()
+            // 1) 任意带前缀的 <...:t...>...</...:t>（docx/pptx 标准）
+            val re1 = Regex("<[A-Za-z0-9_:]+t[^>]*>([^<]+)</[A-Za-z0-9_:]+t>")
+            for (m in re1.findAll(xml)) {
+                val v = m.groupValues[1].trim()
+                if (v.isNotEmpty()) sb.append(v).append('\n')
+            }
+            // 2) 简单 <t>...</t>（xlsx sharedStrings）
+            if (sb.isEmpty()) {
+                val re2 = Regex("<t[^>]*>([^<]+)</t>")
+                for (m in re2.findAll(xml)) {
+                    val v = m.groupValues[1].trim()
+                    if (v.isNotEmpty()) sb.append(v).append('\n')
+                }
+            }
+            if (sb.isEmpty()) null else sb.toString()
+        } catch (e: Throwable) {
+            null
         }
     }
 

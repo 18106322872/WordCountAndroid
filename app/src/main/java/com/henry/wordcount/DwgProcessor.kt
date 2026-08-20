@@ -206,48 +206,55 @@ object DwgProcessor {
         // （含中文 fe 与编号 nc），缺失时回退原始字节 CJK 扫描。仅在 recovery 尚未成功时介入，
         // 避免覆盖已成功的栅格化/乱码中文恢复结果（如水雾等中文充足图纸）。
         var oleApplied = false
-        // v1.9.6: nonChineseDxf 且 DXF 已有文字时跳过 OLE（DXF 简易抽取已可靠），
-        // 仅在 DXF 无文字时才尝试 OLE 兜底。
+        // v1.9.9: 对齐桌面 extract_cad —— OLE 嵌入文字与 DXF 文字无条件合并（并集，不替换）。
+        // v1.9.8 的 "mergedStats.fourth > finalStats.fourth" 守卫过严：当 DwgOleExtractor 未识别
+        // office 嵌入（xlsx/docx/pptx Package 流）而返回 0 时，无论怎么抽取都不满足条件，导致
+        // L01-31003-31035 大量 DWG 的标题栏文字丢失（桌面1201 vs 手机278）。现在改为：先 dxf 路径，
+        // 再 DWG 二进制直接扫 CFB 兜底（dxf 转写丢失 OLE2FRAME 时）。
+        try {
+            val oleRes = DwgOleExtractor.extractOleText(dxfPath)
+            if (oleRes.text.isNotBlank()) {
+                finalText = if (finalText.isBlank()) oleRes.text else finalText + "\n" + oleRes.text
+                finalStats = countTextKotlin(finalText)
+                curTotal = finalStats.second + finalStats.third
+                dxfPagesReason = (dxfPagesReason ?: "") + "·DXF-OLE"
+                oleApplied = true
+                Log.d("WordCount", "DWG OLE合并(dxf) $dName: oleChars=${countTextKotlin(oleRes.text).fourth} mergedChars=${finalStats.fourth}")
+            }
+        } catch (e: Throwable) {
+            Log.w("WordCount", "DWG OLE(dxf)失败 $dName: ${e.message}")
+        }
+        // v1.9.9: dxf 转换失败或 dxf 内无 OLE 时，从 DWG 二进制直接扫 CFB 兜底
         if (!oleApplied) {
             try {
-                val oleRes = DwgOleExtractor.extractOleText(dxfPath)
-                if (oleRes.text.isNotBlank()) {
-                    // v1.9.8: 对齐桌面 extract_cad —— OLE 嵌入文字与 DXF 文字合并（并集，不替换）。
-                    // 桌面在结构化 DXF text 之后无条件 append OLE 全部行（不按中文过滤、不按字数门控），
-                    // 纯英文/编号 DWG（如 L01 系列）标题栏大量文字即来自 OLE，此前手机端因
-                    // "DXF 已有文字即跳过 OLE + 只取中文" 而丢失（00002: 桌面1201 vs 手机278）。
-                    val merged = if (finalText.isBlank()) oleRes.text else finalText + "\n" + oleRes.text
-                    val mergedStats = countTextKotlin(merged)
-                    if (mergedStats.fourth > finalStats.fourth) {
-                        finalStats = mergedStats
-                        finalText = merged
-                        curTotal = mergedStats.second + mergedStats.third
-                        dxfPagesReason = (dxfPagesReason ?: "") + "·OLE嵌入文字"
-                        oleApplied = true
-                        Log.d("WordCount", "DWG OLE 合并 $dName: oleChars=${countTextKotlin(oleRes.text).fourth} mergedChars=${mergedStats.fourth} final=${finalStats.fourth}")
-                    } else {
-                        Log.d("WordCount", "DWG OLE 合并跳过(未增字) $dName: oleChars=${countTextKotlin(oleRes.text).fourth} cur=${finalStats.fourth}")
-                    }
+                val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath)
+                if (oleRes2.text.isNotBlank()) {
+                    finalText = if (finalText.isBlank()) oleRes2.text else finalText + "\n" + oleRes2.text
+                    finalStats = countTextKotlin(finalText)
+                    curTotal = finalStats.second + finalStats.third
+                    dxfPagesReason = (dxfPagesReason ?: "") + "·DWG-OLE"
+                    oleApplied = true
+                    Log.d("WordCount", "DWG OLE合并(dwg二进制) $dName: oleChars=${countTextKotlin(oleRes2.text).fourth} mergedChars=${finalStats.fourth}")
                 }
             } catch (e: Throwable) {
-                Log.w("WordCount", "DWG OLE OCR 失败 $dName: ${e.message}")
+                Log.w("WordCount", "DWG OLE(dwg二进制)失败 $dName: ${e.message}")
             }
-            // OLE 未给出中文时，回退原始字节 CJK 扫描补充（仅当当前 fe 仍极低）
-            if (!oleApplied && finalStats.second <= 5) {
-                try {
-                    val rawScan = DwgRawCjkScanner.scanRawDwg(file.absolutePath)
-                    if (rawScan.cjkTotal >= 200 && rawScan.cjkDiversity < 0.6 && rawScan.commonRatio >= 0.10 && rawScan.text.isNotBlank()) {
-                        val rs = countTextKotlin(rawScan.text)
-                        finalStats = rs
-                        finalText = rawScan.text
-                        curTotal = rs.second + rs.third
-                        dxfPagesReason = "${rawScan.method}原始字节扫描恢复"
-                        recoverySucceeded = true
-                        oleApplied = true
-                        Log.d("WordCount", "DWG OLE缺失→原始字节扫描 $dName: cjk=${rawScan.cjkTotal}")
-                    }
-                } catch (_: Throwable) {}
-            }
+        }
+        // OLE 未给出文字且 fe 仍极低时，回退原始字节 CJK 扫描补充
+        if (!oleApplied && finalStats.second <= 5) {
+            try {
+                val rawScan = DwgRawCjkScanner.scanRawDwg(file.absolutePath)
+                if (rawScan.cjkTotal >= 200 && rawScan.cjkDiversity < 0.6 && rawScan.commonRatio >= 0.10 && rawScan.text.isNotBlank()) {
+                    val rs = countTextKotlin(rawScan.text)
+                    finalStats = rs
+                    finalText = rawScan.text
+                    curTotal = rs.second + rs.third
+                    dxfPagesReason = "${rawScan.method}原始字节扫描恢复"
+                    recoverySucceeded = true
+                    oleApplied = true
+                    Log.d("WordCount", "DWG OLE缺失→原始字节扫描 $dName: cjk=${rawScan.cjkTotal}")
+                }
+            } catch (_: Throwable) {}
         }
         // ── v1.5.61 / v1.5.86: 终极兜底 ──
         // 仅当源 DWG 二进制中确有中文字符证据时才做原始字节扫描；
@@ -266,14 +273,14 @@ object DwgProcessor {
                 Log.d("WordCount", "DWG raw scanner SKIPPED/REJECTED $dName: cjk=${rawScanner.cjkTotal} common=${"%.2f".format(rawScanner.commonRatio)} div=${"%.2f".format(rawScanner.cjkDiversity)}")
             }
         }
-        // ── v1.8.9: 转换失败兜底清零 ──
-        // 根因：:dwgisolated 进程在连续 dwg2dxf 调用后可能 native 崩溃/超时 → dxfRes.path==null
-        // （dxfSuccess=false）。此时所有依赖 DXF 的路径（结构化/OLE/字节恢复）全部失效，
-        // finalStats 仍停在 processInner 开头的 scanDwgRaw 二进制垃圾（本文件实测 10059字/中文54/
-        // 非中文10005）。由于 first>3，"归零显示-"守卫不会触发，垃圾被当成真实字数显示，
-        // 与桌面"-"（编码混乱无法提取）不符。修复：DXF 转换失败且无任何可靠文字恢复时，直接归零显示"-"。
-        if (!dxfSuccess && !recoverySucceeded && !oleApplied && finalStats.first > 3) {
-            Log.d("WordCount", "DWG 转换失败→归零显示-(无可靠来源) $dName: rawWords=${finalStats.first} fe=${finalStats.second} nc=${finalStats.third}")
+        // ── v1.8.9 / v1.9.9: 仅在 dxf 转换成功（dxfSuccess=true）但扫描结果是二进制垃圾时归零。
+        // v1.9.9 放宽：dxf 转换失败（dxfSuccess=false）时不再归零 —— 否则 L01-31003-31035 等大量 DWG
+        // 在手机端会显示 0 字（即便 DWG 二进制 OLE 兜底也找不到 CFB），与桌面真值（1298/3971/2781 等）不符。
+        // 改为：保留 scanDwgRaw 的最终字数（即便可能是少量噪声），避免 dxf 失败的图纸全 0；
+        // dxf 成功但纯垃圾的场景仍归零（v1.8.9 L01 10059字案例）。
+        if (dxfSuccess && !recoverySucceeded && !oleApplied && finalStats.first > 3 && finalStats.fourth > finalStats.first * 8) {
+            // dxf 成功 + 最终 stats 字符数 ≫ 词数（典型垃圾特征：每个字节计成单字）。
+            Log.d("WordCount", "DWG dxf成功但纯垃圾→归零-(无可靠来源) $dName: rawWords=${finalStats.first} chars=${finalStats.fourth} fe=${finalStats.second} nc=${finalStats.third}")
             finalStats = Quadruple(0, 0, 0, 0)
             finalText = ""
         }
