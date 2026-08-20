@@ -80,6 +80,7 @@ import androidx.compose.foundation.verticalScroll
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.withContext
 import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
@@ -294,6 +295,7 @@ fun WordCountApp(initialUris: List<Uri>) {
         "1.0.26"
     }
     val scope = rememberCoroutineScope()
+    val workScope = remember { ProcessLifecycleOwner.get().lifecycleScope }
     val snackbar = remember { SnackbarHostState() }
 
     val entries = remember { mutableStateListOf<FileEntry>() }
@@ -310,7 +312,7 @@ fun WordCountApp(initialUris: List<Uri>) {
 
     // SAF 文件选择器（不需要任何存储权限——OpenMultipleDocuments 在所有 Android 版本上均无需授权即可使用）
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (uris.isNotEmpty()) addFiles(context, scope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total -> progressText = if (total <= 0) null else "正在统计文件$name，已统计$done/$total" })
+        if (uris.isNotEmpty()) addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total -> progressText = if (total <= 0) null else "正在统计文件$name，已统计$done/$total" })
     }
 
     // v1.5.36: 文字型 PDF 选择器（仅 PDF）。用于 DWG 统计不准时，让用户手动选一份同图文字型 PDF 重新统计。
@@ -365,7 +367,7 @@ fun WordCountApp(initialUris: List<Uri>) {
     // 处理启动时从千牛/微信分享进来的文件
     androidx.compose.runtime.LaunchedEffect(Unit) {
         if (initialUris.isNotEmpty()) {
-            addFiles(context, scope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, initialUris, onProgress = { name, done, total -> progressText = if (total <= 0) null else "正在统计文件$name，已统计$done/$total" })
+            addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, initialUris, onProgress = { name, done, total -> progressText = if (total <= 0) null else "正在统计文件$name，已统计$done/$total" })
         }
     }
 
@@ -377,7 +379,7 @@ fun WordCountApp(initialUris: List<Uri>) {
             val uris = MainActivity.pendingUris
             if (uris != null && uris.isNotEmpty() && !busy) {
                 MainActivity.pendingUris = null // 消费掉
-                addFiles(context, scope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total -> progressText = if (total <= 0) null else "正在统计文件$name，已统计$done/$total" })
+                addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total -> progressText = if (total <= 0) null else "正在统计文件$name，已统计$done/$total" })
             }
         }
     }
@@ -548,14 +550,6 @@ fun WordCountApp(initialUris: List<Uri>) {
                         }
                     }
                 }
-                if (progressText != null) {
-                    // v1.9.2: 大字进度 + 进度条效果（文字内容与电脑版状态栏一致：
-                    // "正在统计文件XXX，已统计X/XX"），仅展示样式提升观感。
-                    val ptext = progressText!!
-                    val (cur, total) = run {
-                        val m = Regex("(\\d+)/(\\d+)").find(ptext)
-                        if (m != null) (m.groupValues[1].toInt() to m.groupValues[2].toInt()) else (0 to 0)
-                    }
                     val ratio = if (total > 0) cur.toFloat() / total else 0f
                     Column(
                         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
@@ -621,6 +615,44 @@ fun WordCountApp(initialUris: List<Uri>) {
                                 hiddenSelected[k] = !(hiddenSelected[k] ?: true)
                             }
                         )
+                    }
+                }
+                    // v1.9.8: 进度指示器移到列表内部、位于已完成条目之后，
+                    // 避免被第一个文件结果挡住，第二个及以后文件也能看到进度。
+                    if (progressText != null) {
+                        item(key = "__progress__") {
+                            val ptext = progressText!!
+                            val (cur, total) = run {
+                                val m = Regex("(\\d+)/(\\d+)").find(ptext)
+                                if (m != null) (m.groupValues[1].toInt() to m.groupValues[2].toInt()) else (0 to 0)
+                            }
+                            val ratio = if (total > 0) cur.toFloat() / total else 0f
+                            Column(
+                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                if (total > 0) {
+                                    Text(
+                                        text = "${cur}/${total}",
+                                        color = Color(0xFF1565C0),
+                                        fontSize = androidx.compose.ui.unit.TextUnit(28f, androidx.compose.ui.unit.TextUnitType.Sp),
+                                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                                    )
+                                    Spacer(Modifier.height(6.dp))
+                                    LinearProgressIndicator(
+                                        progress = { ratio.coerceIn(0f, 1f) },
+                                        modifier = Modifier.fillMaxWidth().height(8.dp),
+                                        color = Color(0xFF1565C0)
+                                    )
+                                    Spacer(Modifier.height(4.dp))
+                                }
+                                Text(
+                                    text = ptext,
+                                    color = Color.Black,
+                                    fontSize = androidx.compose.ui.unit.TextUnit(13f, androidx.compose.ui.unit.TextUnitType.Sp)
+                                )
+                            }
+                        }
                     }
                 }
             }

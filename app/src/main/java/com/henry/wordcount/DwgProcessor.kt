@@ -128,22 +128,13 @@ object DwgProcessor {
         val simpleText = extractDxfTextsSimple(dxfPath)
         if (simpleText.isNotBlank()) {
             val simpleStats = countTextKotlin(simpleText)
-            // v1.9.6: nonChineseDxf 时结构化解析的 INSERT 块展开会导致编号膨胀，
-            // 改用简易抽取（不展开 INSERT）作为主结果，与桌面版 text 口径一致。
-            if (nonChineseDxf) {
+            // v1.9.8: 主路径用结构化 DXF 文字（与桌面 ezdxf _collect_dxf_texts 口径一致：
+            // INSERT 展开 + 图层可见性过滤）。简易 gc=1/3 抽取仅作『结构化抽空』兜底，
+            // 不与结构化合并（两者都直接读模型空间 TEXT/MTEXT，合并会让同一段文字被计两次）。
+            // 仅当结构化抽空(0字)或明显漏抽(简易>2倍)时才回退到简易抽取，避免编号膨胀/重复计。
+            if (dxfStats.fourth == 0 || simpleStats.fourth > dxfStats.fourth * 2) {
                 dxfText = simpleText
                 dxfStats = simpleStats
-            } else {
-                val mergedText = if (dxfText.isBlank()) simpleText else dxfText + "\n" + simpleText
-                val mergedStats = countTextKotlin(mergedText)
-                // 简易结果明显更优（结构化抽空/漏抽）时直接替换；否则保留合并结果
-                if (dxfStats.fourth == 0 || simpleStats.fourth > dxfStats.fourth * 2) {
-                    dxfText = simpleText
-                    dxfStats = simpleStats
-                } else {
-                    dxfText = mergedText
-                    dxfStats = mergedStats
-                }
             }
             dxfPagesReason = (dxfPagesReason ?: "") + "·v1.9.6简易抽取"
             Log.d("WordCount", "DWG dxf 简易抽取 $dName: simpleChars=${simpleStats.fourth} nonChineseDxf=$nonChineseDxf structChars=${dxfStats.fourth}")
@@ -217,33 +208,25 @@ object DwgProcessor {
         var oleApplied = false
         // v1.9.6: nonChineseDxf 且 DXF 已有文字时跳过 OLE（DXF 简易抽取已可靠），
         // 仅在 DXF 无文字时才尝试 OLE 兜底。
-        if ((encodingLoss || (nonChineseDxf && finalStats.fourth == 0)) && !recoverySucceeded && !oleApplied) {
+        if (!oleApplied) {
             try {
                 val oleRes = DwgOleExtractor.extractOleText(dxfPath)
                 if (oleRes.text.isNotBlank()) {
-                    val oleStatsRaw = countTextKotlin(oleRes.text)
-                    // v1.8.8: nonChineseDxf 说明 DXF 矢量文字已被块炸开编号污染、不可靠。
-                    // OLE 预览 OCR 同样可能把预览图里的块炸开编号识别成大量非中文"单词"，
-                    // 不能当真字计入。因此 nonChineseDxf 触发时只取 OLE 结果中的真实中文
-                    // (FarEast 字符)，丢弃全部西文/数字/编号；正常图纸仍采用完整 OLE 结果。
-                    val (oleText, oleStats) = if (nonChineseDxf) {
-                        val cjkOnly = keepFarEastOnly(oleRes.text)
-                        val cjkStats = countTextKotlin(cjkOnly)
-                        Pair(cjkOnly, cjkStats)
-                    } else {
-                        Pair(oleRes.text, oleStatsRaw)
-                    }
-
-                    if (oleStats.fourth > 0 && (!nonChineseDxf || oleStats.second > 0)) {
-                        finalStats = oleStats
-                        finalText = oleText
-                        curTotal = oleStats.second + oleStats.third
-                        dxfPagesReason = "OLE预览OCR(对象${oleRes.objects}/位图${oleRes.bitmapsOcred})"
-                        recoverySucceeded = true
+                    // v1.9.8: 对齐桌面 extract_cad —— OLE 嵌入文字与 DXF 文字合并（并集，不替换）。
+                    // 桌面在结构化 DXF text 之后无条件 append OLE 全部行（不按中文过滤、不按字数门控），
+                    // 纯英文/编号 DWG（如 L01 系列）标题栏大量文字即来自 OLE，此前手机端因
+                    // "DXF 已有文字即跳过 OLE + 只取中文" 而丢失（00002: 桌面1201 vs 手机278）。
+                    val merged = if (finalText.isBlank()) oleRes.text else finalText + "\n" + oleRes.text
+                    val mergedStats = countTextKotlin(merged)
+                    if (mergedStats.fourth > finalStats.fourth) {
+                        finalStats = mergedStats
+                        finalText = merged
+                        curTotal = mergedStats.second + mergedStats.third
+                        dxfPagesReason = (dxfPagesReason ?: "") + "·OLE嵌入文字"
                         oleApplied = true
-                        Log.d("WordCount", "DWG OLE OCR 采用 $dName: nonChineseDxf=$nonChineseDxf rawFe=${oleStatsRaw.second} rawNc=${oleStatsRaw.third} keptFe=${oleStats.second} keptNc=${oleStats.third}")
+                        Log.d("WordCount", "DWG OLE 合并 $dName: oleChars=${countTextKotlin(oleRes.text).fourth} mergedChars=${mergedStats.fourth} final=${finalStats.fourth}")
                     } else {
-                        Log.d("WordCount", "DWG OLE OCR 拒用(纯编号噪声) $dName: nonChineseDxf=$nonChineseDxf rawFe=${oleStatsRaw.second} rawNc=${oleStatsRaw.third}")
+                        Log.d("WordCount", "DWG OLE 合并跳过(未增字) $dName: oleChars=${countTextKotlin(oleRes.text).fourth} cur=${finalStats.fourth}")
                     }
                 }
             } catch (e: Throwable) {

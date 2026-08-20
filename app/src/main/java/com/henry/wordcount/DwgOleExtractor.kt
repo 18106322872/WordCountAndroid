@@ -39,8 +39,8 @@ object DwgOleExtractor {
         "310", "311", "312", "313", "314", "315", "316", "317", "318", "319"
     )
     private val PRES_NAMES = listOf("CONTENTS", "OlePres000", "OlePres001", "OlPres000", "OlePres")
-    private const val MAX_BITMAPS_PER_FILE = 4
-    private const val MAX_OCR_TEXT_CHARS = 3000
+    private const val MAX_BITMAPS_PER_FILE = 20
+    private const val MAX_OCR_TEXT_CHARS = 12000
 
     /**
      * 从 DXF 中抽取所有 OLE2FRAME 预览位图的 OCR 文本。

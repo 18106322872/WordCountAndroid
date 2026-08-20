@@ -87,10 +87,16 @@ object DwgDxfParser {
         val diag: String = ""
     )
 
-    /** DXF 作用域：模型空间实体 + 块定义表（块名 → 块内实体） */
+    /** 图层可见性信息（端口桌面 ezdxf layer 判定） */
+    private data class LayerInfo(val plot: Boolean, val on: Boolean, val frozen: Boolean)
+
+    /** DXF 作用域：模型空间实体 + 块定义表（块名 → 块内实体） + 图层可见性 + XREF 块集合 */
     private data class DxfScopes(
         val ms: List<DxfEntity>,
-        val blocks: LinkedHashMap<String, MutableList<DxfEntity>>
+        val blocks: LinkedHashMap<String, MutableList<DxfEntity>>,
+        val layers: Map<String, LayerInfo> = emptyMap(),
+        val xrefBlocks: Set<String> = emptySet(),
+        val hasOle2Frame: Boolean = false
     )
 
     /** ezdxf 口径下不算「顶层实体」的从属记录：POLYLINE 的顶点、INSERT 的属性、序列结束符 */
@@ -300,8 +306,12 @@ object DwgDxfParser {
             blockCache[name] = res // 先占位，防块循环引用死递归
             val blk = scopes.blocks[name] ?: return res
             for (be in blk) {
+                if (!isEntityVisible(be)) continue
+                if (!isLayerVisible(layerOf(be), scopes.layers)) continue
                 if (be.type == "INSERT") {
-                    res.addAll(blockTexts(be.values(2).firstOrNull()?.trim() ?: "", depth + 1))
+                    val bname = be.values(2).firstOrNull()?.trim() ?: ""
+                    if (isXrefBlock(bname, scopes.xrefBlocks, scopes.hasOle2Frame)) continue
+                    res.addAll(blockTexts(bname, depth + 1))
                     for (a in be.attribs) {
                         val s = textOf(a, enc)
                         if (s.isNotBlank()) res.add(s)
@@ -323,8 +333,11 @@ object DwgDxfParser {
 
         for (space in spaces) {
             for (e in space) {
+                if (!isEntityVisible(e)) continue
+                if (!isLayerVisible(layerOf(e), scopes.layers)) continue
                 if (e.type == "INSERT") {
                     val bname = e.values(2).firstOrNull()?.trim() ?: ""
+                    if (isXrefBlock(bname, scopes.xrefBlocks, scopes.hasOle2Frame)) continue
                     out.addAll(blockTexts(bname, 0))
                     for (a in e.attribs) {
                         val s = textOf(a, enc)
@@ -356,14 +369,75 @@ object DwgDxfParser {
      * ENTITIES 段 == 桌面 doc.modelspace()（LibreDWG 不写组码 67）；
      * BLOCKS 段每个 BLOCK…ENDBLK 是一个块定义，其中 *Paper_SpaceN 就是各图纸布局。
      */
+    // ───────────────────────────── 图层可见性 / XREF 过滤（端口桌面 ezdxf _collect_dxf_texts） ─────────────────────────────
+    // v1.9.8：桌面版 _collect_dxf_texts 会剔除「不可打印/关闭/冻结」图层、不可见实体、
+    // 以及外部参照(XREF)块，避免把图纸上实际不显示的内容计入字数（如全铜外形图从 914→~200）。
+    // 手机端此前无此过滤，与桌面口径不一致；此处补齐，使抽文字数与桌面严格对齐。
+
+    private fun layerOf(e: DxfEntity): String {
+        for ((c, v) in e.items) if (c == 8) return v.trim()
+        return ""
+    }
+
+    private fun isLayerVisible(layerName: String, layers: Map<String, LayerInfo>): Boolean {
+        if (layerName.isEmpty()) return true
+        val L = layers[layerName] ?: return true
+        if (!L.plot) return false
+        return L.on && !L.frozen
+    }
+
+    private fun isXrefBlock(name: String, xrefBlocks: Set<String>, hasOle2Frame: Boolean): Boolean {
+        if (name.isEmpty()) return false
+        val bn = name.uppercase()
+        if ("XREF" in bn) return true
+        if (name in xrefBlocks) {
+            // v1.8.33：含 OLE2FRAME 的封面/目录/说明页，标题栏带 xref_path 但 PDF 字数包含它，
+            // 仅当块名像标题栏时才允许展开（与桌面一致）；其余参照图一律过滤。
+            if (hasOle2Frame && ("TITLE BLOCK" in bn || "TITLEBLOCK" in bn)) return false
+            return true
+        }
+        return false
+    }
+
+    private fun isEntityVisible(e: DxfEntity): Boolean {
+        // 不可见标志：组码 60 的 bit 0x01
+        for ((c, v) in e.items) {
+            if (c == 60) {
+                val inv = v.trim().toIntOrNull() ?: 0
+                if (inv and 0x01 != 0) return false
+            }
+        }
+        // ATTRIB 隐藏标志：组码 70 的 bit 0x01
+        if (e.type == "ATTRIB") {
+            for ((c, v) in e.items) {
+                if (c == 70) {
+                    val fl = v.trim().toIntOrNull() ?: 0
+                    if (fl and 0x01 != 0) return false
+                }
+            }
+        }
+        return true
+    }
+
     private fun parseAllSections(lines: List<String>): DxfScopes {
         val ms = mutableListOf<DxfEntity>()
         val blocks = LinkedHashMap<String, MutableList<DxfEntity>>()
+        val layers = LinkedHashMap<String, LayerInfo>()
+        val xrefBlocks = mutableSetOf<String>()
         var section: String? = null
         var curEnt: DxfEntity? = null
         var curList: MutableList<DxfEntity>? = null
         var curBlock: String? = null
         var awaitingName = false
+        // BLOCK 头字段（xref 判定）
+        var curBlockFlags = 0
+        var curBlockXref = ""
+        // TABLES / LAYER 解析
+        var tableAwaiting = false
+        var inLayerTable = false
+        var curLayerName: String? = null
+        var curLayerFlags = 0
+        var curLayerPlot = 1
         val n = lines.size
         var i = 0
         while (i < n - 1) {
@@ -392,11 +466,15 @@ object DwgDxfParser {
             } else if (section == "BLOCKS") {
                 if (code == "0") {
                     when (vs) {
-                        "BLOCK" -> { curBlock = null; awaitingName = true; curList = mutableListOf(); curEnt = null }
+                        "BLOCK" -> { curBlock = null; awaitingName = true; curList = mutableListOf(); curEnt = null; curBlockFlags = 0; curBlockXref = "" }
                         "ENDBLK" -> {
                             val nm = curBlock
-                            if (nm != null) blocks[nm] = curList ?: mutableListOf()
-                            curBlock = null; curList = null; curEnt = null; awaitingName = false
+                            if (nm != null) {
+                                blocks[nm] = curList ?: mutableListOf()
+                                // v1.9.8：flags 0x04 (xref-dependent) 视为外部参照块
+                                if (curBlockFlags and 0x04 != 0) xrefBlocks.add(nm)
+                            }
+                            curBlock = null; curList = null; curEnt = null; awaitingName = false; curBlockFlags = 0; curBlockXref = ""
                         }
                         else -> {
                             val e = DxfEntity(vs); curEnt = e; curList?.add(e)
@@ -404,13 +482,48 @@ object DwgDxfParser {
                     }
                 } else if (code == "2" && awaitingName && curEnt == null) {
                     curBlock = vs; awaitingName = false
+                } else if (curEnt == null && curBlock != null && !awaitingName) {
+                    // BLOCK 头字段（flags / xref 路径），位于第一个实体之前
+                    if (code == "70") curBlockFlags = vs.toIntOrNull() ?: 0
+                    else if (code == "1") curBlockXref = vs
                 } else {
                     val ci = code.toIntOrNull()
                     if (ci != null) curEnt?.items?.add(ci to value)
                 }
+            } else if (section == "TABLES") {
+                if (code == "0") {
+                    when (vs) {
+                        "TABLE" -> { tableAwaiting = true; inLayerTable = false; curLayerName = null }
+                        "LAYER" -> {
+                            if (curLayerName != null) {
+                                layers[curLayerName] = LayerInfo(curLayerPlot == 1, (curLayerFlags and 0x10) == 0, (curLayerFlags and 0x01) != 0)
+                            }
+                            curLayerName = null; curLayerFlags = 0; curLayerPlot = 1
+                        }
+                        "ENDTAB" -> {
+                            if (curLayerName != null) {
+                                layers[curLayerName] = LayerInfo(curLayerPlot == 1, (curLayerFlags and 0x10) == 0, (curLayerFlags and 0x01) != 0)
+                            }
+                            inLayerTable = false; curLayerName = null
+                        }
+                    }
+                } else if (code == "2" && tableAwaiting) {
+                    inLayerTable = (vs == "LAYER")
+                    tableAwaiting = false
+                } else if (inLayerTable) {
+                    if (code == "2" && curLayerName == null) curLayerName = vs
+                    else if (code == "70") curLayerFlags = vs.toIntOrNull() ?: 0
+                    else if (code == "290") curLayerPlot = vs.toIntOrNull() ?: 1
+                }
             }
         }
-        return DxfScopes(ms, blocks)
+        // OLE2FRAME 检测（用于 XREF 标题栏例外）
+        var hasOle2 = false
+        for (e in ms) if (e.type == "OLE2FRAME") { hasOle2 = true; break }
+        if (!hasOle2) {
+            for (blk in blocks.values) for (e in blk) if (e.type == "OLE2FRAME") { hasOle2 = true; break }
+        }
+        return DxfScopes(ms, blocks, layers, xrefBlocks, hasOle2)
     }
 
     /**
