@@ -156,6 +156,45 @@ object PythonEngine {
         }
     }
 
+    /**
+     * v1.9.11: DWG/DXF 结构化统计（对齐桌面 wordcount.py 的 ezdxf 提取，逐字节同源）。
+     * 返回 cad_core.extract_dxf_json 的 JSON 字符串：
+     *   {"items":[...],"pages":N,"pages_reason":"...","needs_pdf":bool,"encoder_garbled":bool}
+     *
+     * @param dxfPath dwg2dxf 已转换好的 DXF 路径（可能含 LibreDWG 结构缺陷，Python 端 sanitize 修复）
+     * @param dwgPath 原始 DWG 路径（可空，用于中文丢失时的 GBK/UTF-16 字节扫描恢复）
+     */
+    fun extractCadDxf(context: Context, dxfPath: String, dwgPath: String?): String {
+        return withRetry(context) {
+            val py = Python.getInstance()
+            val mod = py.getModule("cad_core")
+            val s = if (dwgPath != null)
+                mod.callAttr("extract_dxf_json", dxfPath, dwgPath).toString()
+            else
+                mod.callAttr("extract_dxf_json", dxfPath).toString()
+            s
+        }
+    }
+
+    /** v1.9.11: 用桌面同源 count_items 对 items 计数，返回 JSON {"fe","nc","chars","words"} */
+    fun countCadItems(context: Context, items: List<String>): String {
+        return withRetry(context) {
+            val py = Python.getInstance()
+            val mod = py.getModule("cad_core")
+            mod.callAttr("count_items_json", items).toString()
+        }
+    }
+
+    /** v1.9.11: 提取 DXF 内 OLE2FRAME 的 office 嵌入文字（xlsx/docx/pptx，桌面 cad_ole_ocr 同源）。
+     *  返回 JSON {"joined":str,"ole_count":N,"unique_objects":N} */
+    fun extractOleOffice(context: Context, dxfPath: String): String {
+        return withRetry(context) {
+            val py = Python.getInstance()
+            val mod = py.getModule("cad_core")
+            mod.callAttr("extract_ole_office_json", dxfPath).toString()
+        }
+    }
+
     fun countText(context: Context, text: String, name: String): Map<*, *> {
         return withRetry(context) {
             val py = Python.getInstance()

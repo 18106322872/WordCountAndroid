@@ -111,6 +111,7 @@
         <service
             android:name=".DwgIsolatedService"
             android:process=":dwgisolated"
+            android:foregroundServiceType="dataSync"
             android:exported="false" />
 
         <!-- v1.9.10: 前台占位 service，仅用于让 MainActivity 切后台时进程保持前台优先级，

@@ -1,7 +1,11 @@
 package com.henry.wordcount
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
@@ -9,6 +13,8 @@ import android.os.Looper
 import android.os.Message
 import android.os.Messenger
 import android.util.Log
+import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import java.io.File
 
 /**
@@ -34,6 +40,38 @@ class DwgIsolatedService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder = messenger.binder
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // v1.9.11: 前台化本进程。切后台时 Android 14+ 会冻结 cached 进程；主进程的
+        // 前台 service 不会提升 :dwgisolated 子进程的优先级，导致 dwg2dxf native 调用卡死。
+        // 这里在转换开始前（startService 时 app 必在前台）让本进程自己 startForeground，
+        // 保证整个转换期间 :dwgisolated 处于前台优先级，不被冻结/杀。
+        startForegroundCompat()
+        return START_NOT_STICKY
+    }
+
+    private fun startForegroundCompat() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val nm = getSystemService(NotificationManager::class.java)
+                val ch = NotificationChannel(CHANNEL_ID, "DWG转换中", NotificationManager.IMPORTANCE_LOW)
+                ch.setShowBadge(false)
+                ch.description = "后台持续进行 DWG 转换"
+                nm.createNotificationChannel(ch)
+            }
+            val noti: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.stat_notify_sync)
+                .setContentTitle("WordCount 正在处理")
+                .setContentText("DWG 转换进行中")
+                .setOngoing(true)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setCategory(NotificationCompat.CATEGORY_SERVICE)
+                .build()
+            startForeground(NOTI_ID, noti)
+        } catch (e: Throwable) {
+            Log.w("DwgIsolated", "startForeground 失败(忽略): ${e.message}")
+        }
+    }
 
     private inner class IncomingHandler : Handler(Looper.getMainLooper()) {
         override fun handleMessage(msg: Message) {
@@ -109,5 +147,7 @@ class DwgIsolatedService : Service() {
         const val KEY_RC = "rc"
         const val KEY_DIAG = "diag"
         const val KEY_PATH = "path"
+        const val CHANNEL_ID = "wordcount_dwg_convert"
+        const val NOTI_ID = 200
     }
 }

@@ -1,6 +1,7 @@
 package com.henry.wordcount
 import android.content.Context
 import android.util.Log
+import org.json.JSONObject
 import java.io.File
 /**
  * DWG 文件完整统计处理器。
@@ -40,6 +41,72 @@ object DwgProcessor {
         }
     }
     private suspend fun processInner(context: Context, file: File, dName: String): DwgProcessResult {
+        // ── v1.9.11: 主路径改为 Python cad_core（ezdxf 同源，与桌面 wordcount.py 逐字节对齐）──
+        val pyDxfPath = "${file.parent}/${file.nameWithoutExtension}.dxf"
+        try {
+            val pyDxfRes = DwgIsolatedRunner.convertToDxf(context, file.absolutePath, pyDxfPath)
+            if (pyDxfRes.path != null) {
+                val pyDxfFile = File(pyDxfPath)
+                if (pyDxfFile.exists() && pyDxfFile.length() > 0 && isDxfComplete(pyDxfPath)) {
+                    val pyJson = PythonEngine.extractCadDxf(context, pyDxfPath, file.absolutePath)
+                    val obj = JSONObject(pyJson)
+                    val arr = obj.getJSONArray("items")
+                    val items = ArrayList<String>(arr.length())
+                    for (i in 0 until arr.length()) items.add(arr.getString(i))
+                    val pyPages = if (obj.has("pages") && !obj.isNull("pages")) obj.getInt("pages") else 1
+                    val pyPagesReason = obj.optString("pages_reason")
+                    val pyNeedsPdf = obj.optBoolean("needs_pdf", false)
+                    // OLE 合并：office 嵌入文字走 Python（与桌面 cad_ole_ocr 同源）；位图 OLE 兜底走 Kotlin ML Kit OCR
+                    val allItems = ArrayList(items)
+                    val oleMarks = ArrayList<String>()
+                    var oleOfficeOk = false
+                    try {
+                        val oleJson = PythonEngine.extractOleOffice(context, pyDxfPath)
+                        val oo = JSONObject(oleJson)
+                        val joined = oo.optString("joined", "")
+                        if (joined.isNotBlank()) {
+                            for (ln in joined.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
+                            oleMarks.add("OLE-office")
+                            oleOfficeOk = true
+                        }
+                    } catch (e: Throwable) {
+                        Log.w("WordCount", "DWG OLE-office(Python)失败 $dName: ${e.message}")
+                    }
+                    if (!oleOfficeOk) {
+                        try {
+                            val oleRes = DwgOleExtractor.extractOleText(pyDxfPath)
+                            if (oleRes.text.isNotBlank()) {
+                                for (ln in oleRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
+                                oleMarks.add("OLE-ocr")
+                            }
+                        } catch (_: Throwable) {}
+                        try {
+                            val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath)
+                            if (oleRes2.text.isNotBlank()) {
+                                for (ln in oleRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
+                                oleMarks.add("DWG-OLE-ocr")
+                            }
+                        } catch (_: Throwable) {}
+                    }
+                    var pyWords = 0; var pyFe = 0; var pyNc = 0; var pyChars = 0
+                    try {
+                        val co = JSONObject(PythonEngine.countCadItems(context, allItems))
+                        pyWords = co.optInt("words", 0); pyFe = co.optInt("fe", 0)
+                        pyNc = co.optInt("nc", 0); pyChars = co.optInt("chars", 0)
+                    } catch (e2: Throwable) {
+                        Log.w("WordCount", "DWG Python count 失败→Kotlin $dName: ${e2.message}")
+                        val kt = countTextKotlin(allItems.joinToString("\n"))
+                        pyWords = kt.first; pyFe = kt.second; pyNc = kt.third; pyChars = kt.fourth
+                    }
+                    val pyReason = (pyPagesReason ?: "") + (if (oleMarks.isNotEmpty()) "·" + oleMarks.joinToString("·") else "")
+                    Log.d("WordCount", "DWG Python主路径 $dName: words=$pyWords fe=$pyFe nc=$pyNc chars=$pyChars pages=$pyPages($pyReason)")
+                    return DwgProcessResult(pyWords, pyFe, pyNc, pyChars, pyPages, pyReason, pyNeedsPdf, pyReason, null, allItems.joinToString("\n"))
+                }
+            }
+        } catch (e: Throwable) {
+            Log.w("WordCount", "DWG Python主路径失败→回退Kotlin $dName: ${e.javaClass.simpleName}: ${e.message}")
+        }
+        // ── 回退：原 Kotlin 解析链（保留）──
         // ── 兜底层：原始二进制扫描（保留为回退） ──
         val rawText = scanDwgRaw(file.absolutePath)
         var finalStats = countTextKotlin(rawText)

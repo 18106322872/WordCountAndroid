@@ -30,9 +30,9 @@ android {
 
         targetSdk 34
 
-        versionCode 260
+        versionCode 261
 
-        versionName '1.9.10'
+        versionName '1.9.11'
 
 
 
@@ -60,13 +60,19 @@ android {
 
                     install "pdfminer.six"
 
-                    // 注：已移除 python-docx / openpyxl / python-pptx / ezdxf（均硬依赖 lxml）
-
-                    //   Android 端 docx/xlsx/pptx 全部由 Kotlin OoXmlEngine 处理，不经过 Python
+                    // 注：已移除 python-docx / openpyxl / python-pptx（Android 端 docx/xlsx/pptx 全部由 Kotlin OoXmlEngine 处理）
 
                     install "pillow"
 
                     install "olefile"
+
+                    // v1.9.11: DWG 统计对齐桌面版——引入 ezdxf（结构化 DXF 解析，与桌面 wordcount.py 同源）。
+                    //   ezdxf 硬依赖 lxml（Chaquopy 仓库有 cp310 Android wheel，5.3.0）+ numpy（1.26.2）+ fonttools(纯Py)。
+                    install "lxml"
+
+                    install "numpy"
+
+                    install "ezdxf==1.4.4"
 
                     // 注：pymupdf(fitz) / rapidocr 在 Chaquopy 无 Android wheel，不可用
 

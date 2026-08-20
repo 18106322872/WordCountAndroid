@@ -96,7 +96,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq autoconf automake libtool texinfo pkg-config
           cd /tmp
-          TAG=$(curl -fsSL https://api.github.com/repos/LibreDWG/libredwg/releases/latest | python3 -c "import sys,json;print(json.load(sys.stdin)['tag_name'])")
+          # v1.9.11: 固定 LibreDWG 0.14.8583（与桌面版 dwg2dxf 0.14 同系，已验证可正确转出
+          # L01 系列 XREF DWG）。此前用 releases/latest 每次构建拉到不同版本，行为漂移。
+          TAG="0.14.8583"
           echo "LibreDWG tag=$TAG"
           rm -rf libredwg && git clone --depth 1 --branch "$TAG" --recursive https://github.com/LibreDWG/libredwg.git libredwg
           cd libredwg
