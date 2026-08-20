@@ -550,33 +550,6 @@ fun WordCountApp(initialUris: List<Uri>) {
                         }
                     }
                 }
-                    val ratio = if (total > 0) cur.toFloat() / total else 0f
-                    Column(
-                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        if (total > 0) {
-                            Text(
-                                text = "${cur}/${total}",
-                                color = Color(0xFF1565C0),
-                                fontSize = androidx.compose.ui.unit.TextUnit(28f, androidx.compose.ui.unit.TextUnitType.Sp),
-                                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
-                            )
-                            Spacer(Modifier.height(6.dp))
-                            LinearProgressIndicator(
-                                progress = { ratio.coerceIn(0f, 1f) },
-                                modifier = Modifier.fillMaxWidth().height(8.dp),
-                                color = Color(0xFF1565C0)
-                            )
-                            Spacer(Modifier.height(4.dp))
-                        }
-                        Text(
-                            text = ptext,
-                            color = Color.Black,
-                            fontSize = androidx.compose.ui.unit.TextUnit(13f, androidx.compose.ui.unit.TextUnitType.Sp)
-                        )
-                    }
-                }
                 LazyColumn(
                     Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -616,7 +589,6 @@ fun WordCountApp(initialUris: List<Uri>) {
                             }
                         )
                     }
-                }
                     // v1.9.8: 进度指示器移到列表内部、位于已完成条目之后，
                     // 避免被第一个文件结果挡住，第二个及以后文件也能看到进度。
                     if (progressText != null) {
@@ -658,7 +630,6 @@ fun WordCountApp(initialUris: List<Uri>) {
             }
         }
     }
-
     // v1.5.56: 手动重命名文件对话框（微信分享等场景系统不暴露原文件名时兜底）
     renameEntry?.let { entry ->
         AlertDialog(
@@ -3378,3 +3349,4 @@ private fun shareDocxFile(context: android.content.Context, path: String, mime: 
         Log.w("WordCount", "分享比对结果失败: ${e.message}")
     }
 }
+
