@@ -313,7 +313,10 @@ fun WordCountApp(initialUris: List<Uri>) {
 
     // SAF 文件选择器（不需要任何存储权限——OpenMultipleDocuments 在所有 Android 版本上均无需授权即可使用）
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (uris.isNotEmpty()) addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total -> progressText = if (total <= 0) null else "正在统计文件$name，已统计$done/$total" })
+        if (uris.isNotEmpty()) {
+            WordCountForegroundService.start(context)
+            addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total -> progressText = if (total <= 0) null else "正在统计文件$name，已统计$done/$total" })
+        }
     }
 
     // v1.5.36: 文字型 PDF 选择器（仅 PDF）。用于 DWG 统计不准时，让用户手动选一份同图文字型 PDF 重新统计。
@@ -368,6 +371,7 @@ fun WordCountApp(initialUris: List<Uri>) {
     // 处理启动时从千牛/微信分享进来的文件
     androidx.compose.runtime.LaunchedEffect(Unit) {
         if (initialUris.isNotEmpty()) {
+            WordCountForegroundService.start(context)
             addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, initialUris, onProgress = { name, done, total -> progressText = if (total <= 0) null else "正在统计文件$name，已统计$done/$total" })
         }
     }
@@ -380,6 +384,7 @@ fun WordCountApp(initialUris: List<Uri>) {
             val uris = MainActivity.pendingUris
             if (uris != null && uris.isNotEmpty() && !busy) {
                 MainActivity.pendingUris = null // 消费掉
+                WordCountForegroundService.start(context)
                 addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total -> progressText = if (total <= 0) null else "正在统计文件$name，已统计$done/$total" })
             }
         }
@@ -2745,6 +2750,8 @@ private fun addFiles(
             // v1.9.1: addFiles 为顶层函数，progressText 属 Composable 作用域，
             //   统计结束用 total<=0 语义通知调用方清除进度文本。
             onProgress?.invoke("", 0, 0)
+            // v1.9.10: 关闭前台占位 service，让 app 进程退出前台优先级。
+            WordCountForegroundService.stop(context)
         }
     }
 }

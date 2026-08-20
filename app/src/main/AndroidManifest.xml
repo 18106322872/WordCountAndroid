@@ -3,6 +3,9 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- v1.9.10: 前台 service 权限，让 app 切后台时不被 Android 14+ 强制挂起子进程（dwg2dxf 等） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- 注：SAF OpenMultipleDocuments 在所有 Android 版本上均无需任何存储/媒体权限 -->
 
     <application
@@ -108,6 +111,13 @@
         <service
             android:name=".DwgIsolatedService"
             android:process=":dwgisolated"
+            android:exported="false" />
+
+        <!-- v1.9.10: 前台占位 service，仅用于让 MainActivity 切后台时进程保持前台优先级，
+             避免 Android 14+ 挂起 dwg2dxf/OLE 等耗时 IO 子进程 -->
+        <service
+            android:name=".WordCountForegroundService"
+            android:foregroundServiceType="dataSync"
             android:exported="false" />
     </application>
 
