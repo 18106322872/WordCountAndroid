@@ -31,6 +31,10 @@ import java.io.File
 class DwgIsolatedService : Service() {
 
     private lateinit var messenger: Messenger
+    private val mainHandler = Handler(Looper.getMainLooper())
+    // v1.9.12: 最后一位客户端解绑后，延迟 10s 自停。覆盖批次内文件间的快速重绑（间隔 < 10s），
+    // 避免每次转换后 stopSelf 使 :dwgisolated 进程在切后台时失去前台优先级被 Android 冻结。
+    private var idleStopRunnable: Runnable? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -39,7 +43,24 @@ class DwgIsolatedService : Service() {
         Log.d("DwgIsolated", "isolated service created (pid=${android.os.Process.myPid()})")
     }
 
-    override fun onBind(intent: Intent?): IBinder = messenger.binder
+    override fun onBind(intent: Intent?): IBinder {
+        // 取消待定的空闲自停，保持进程存活以覆盖连续转换批次
+        idleStopRunnable?.let { mainHandler.removeCallbacks(it) }
+        idleStopRunnable = null
+        return messenger.binder
+    }
+
+    override fun onRebind(intent: Intent?) {
+        idleStopRunnable?.let { mainHandler.removeCallbacks(it) }
+        idleStopRunnable = null
+    }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        // 最后一位客户端解绑 → 延迟自停；若 10s 内重绑（下个文件转换）则取消
+        idleStopRunnable = Runnable { try { stopSelf() } catch (_: Throwable) {} }
+        mainHandler.postDelayed(idleStopRunnable!!, 10_000L)
+        return true
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // v1.9.11: 前台化本进程。切后台时 Android 14+ 会冻结 cached 进程；主进程的
@@ -99,12 +120,9 @@ class DwgIsolatedService : Service() {
                     try { replyTo?.send(resp) } catch (e: Throwable) {
                         Log.e("DwgIsolated", "reply failed: ${e.message}")
                     }
-                    // v1.8.9: 每次转换完成即销毁隔离进程。:dwgisolated 进程在 LibreDWG native 调用
-                    // 后可能残留崩溃/不稳定状态；若被下次 dwg2dxf 复用会污染结果（连续统计压缩包时
-                    // 出现"先正常、后全挂"的有状态现象）。每次调用后彻底销毁，下次由 DwgIsolatedRunner
-                    // 重新 startService+bind 得到全新干净进程。回复已通过 Messenger 同步送达，
-                    // 此时 stopSelf 不影响结果回传。
-                    stopSelf()
+                    // v1.9.12: 不再每次转换后销毁进程。保留前台优先级，避免切后台时 :dwgisolated
+                    // 进程被 Android 冻结导致 dwg2dxf 卡死。进程由 onUnbind 空闲延迟(10s)自停，
+                    // 连续转换批次期间持续存活。native 崩溃仍由进程死亡 + 主进程重绑兜底。
                 }
                 MSG_CONVERT -> {
                     val data = msg.data
@@ -130,8 +148,7 @@ class DwgIsolatedService : Service() {
                     } catch (e: Throwable) {
                         Log.e("DwgIsolated", "reply failed: ${e.message}")
                     }
-                    // v1.8.9: 同上，转换完成即销毁隔离进程，杜绝 native 崩溃状态跨文件复用污染。
-                    stopSelf()
+                    // v1.9.12: 同上，保留进程存活（空闲延迟自停）。
                 }
                 else -> super.handleMessage(msg)
             }
