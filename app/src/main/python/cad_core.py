@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """cad_core.py — WordCount Android CAD 统计核心（自生产版 wordcount.py 提取，与桌面同源）。"""
 
-import os, re, io, struct, glob, json, subprocess, zipfile
+import os, re, io, struct, glob, json, subprocess, zipfile, sys
 from collections import defaultdict
 
 
@@ -554,17 +554,15 @@ def extract_text_from_dxf(dxf_path, converter=None):
         except Exception:
             doc = None
     if doc is None:
-        # ezdxf 全线失败（DXF 结构损坏）→ 退回裸文本扫描
-        try:
-            return extract_text_custom(dxf_path)
-        except Exception:
-            return ""
+        # ezdxf 全线失败（DXF 结构损坏）→ 不再退回裸文本扫描，因为裸扫描会
+        # 把图层名/块定义模板/字段名当正文，导致字数虚高（如 00003 桌面 457
+        # 但裸扫描 3746）。直接返回空，让 Kotlin 端判定 needsPdf=true 显示"-"
+        # 或走 PDF 回退。
+        return ""
     collected = _collect_dxf_texts(doc)
     if not collected:
-        try:
-            return extract_text_custom(dxf_path)
-        except Exception:
-            return ""
+        # 结构化成功但无文字 → 同样不裸扫描，避免块名/图层名噪声
+        return ""
     return "\n".join(collected)
 
 def _detect_frame_rectangles(doc, want_areas=False):
@@ -1837,19 +1835,37 @@ def extract_cad_android(dxf_path, dwg_path=None):
         pass
 
     meta["items"] = items
+    meta.setdefault("error", None)
     return meta
 
 
 def extract_dxf_json(dxf_path, dwg_path=None):
-    """返回 JSON 字符串：{"items":[...],"pages":N,"pages_reason":str,"needs_pdf":bool,"encoder_garbled":bool}"""
-    r = extract_cad_android(dxf_path, dwg_path)
-    return json.dumps(r, ensure_ascii=False, default=str)
+    """返回 JSON 字符串：{"items":[...],"pages":N,"pages_reason":str,"needs_pdf":bool,"encoder_garbled":bool,"error":str|None}"""
+    try:
+        r = extract_cad_android(dxf_path, dwg_path)
+        r["error"] = None
+        return json.dumps(r, ensure_ascii=False, default=str)
+    except Exception as e:
+        import traceback
+        return json.dumps({
+            "items": [], "pages": 1, "pages_reason": "Python异常: " + str(e),
+            "needs_pdf": True, "encoder_garbled": False,
+            "error": traceback.format_exc()
+        }, ensure_ascii=False, default=str)
 
 
 def count_items_json(items):
-    """返回 JSON：{"fe":N,"nc":N,"chars":N,"words":N}"""
-    r = count_items(items)
-    return json.dumps(r, ensure_ascii=False, default=str)
+    """返回 JSON：{"fe":N,"nc":N,"chars":N,"words":N,"error":str|None}"""
+    try:
+        r = count_items(items)
+        r["error"] = None
+        return json.dumps(r, ensure_ascii=False, default=str)
+    except Exception as e:
+        import traceback
+        return json.dumps({
+            "fe": 0, "nc": 0, "chars": 0, "words": 0,
+            "error": traceback.format_exc()
+        }, ensure_ascii=False, default=str)
 
 
 # ==== OLE office 嵌入文字提取（自 cad_ole_ocr.py，桌面同源） ====
@@ -2133,28 +2149,33 @@ def extract_ole_office_json(dxf_path):
     """提取 DXF 内 OLE2FRAME 的 office 嵌入文字（xlsx/docx/pptx Package 流），
     对齐桌面 cad_ole_ocr.extract_embedded_text 的 office 路径（含 section title
     collapse + similar-fragments 去重）。返回 JSON：
-      {"joined": str, "ole_count": N, "unique_objects": N}
+      {"joined": str, "ole_count": N, "unique_objects": N, "error": str|None}
     位图 OLE（无 office package）不在本函数处理，交由 Kotlin 侧 ML Kit OCR。
     """
-    blobs = find_ole_blobs(dxf_path)
-    per_object = []
-    for blob in blobs:
-        cells = _extract_office_cells_from_blob(blob)
-        texts = _collapse_section_titles(cells) if cells is not None else []
-        per_object.append({"texts": texts, "frag_set": set(texts)})
-    kept = []
-    for o in per_object:
-        merged = False
-        for ko in kept:
-            if _similar_fragments(o["frag_set"], ko["frag_set"]):
-                if len(o["frag_set"]) > len(ko["frag_set"]):
-                    ko["texts"] = o["texts"]
-                    ko["frag_set"] = o["frag_set"]
-                merged = True
-                break
-        if not merged:
-            kept.append(o)
-    objects_text = [o["texts"] for o in kept]
-    joined = "\n".join("\n".join(o) for o in objects_text)
-    return json.dumps({"joined": joined, "ole_count": len(blobs),
-                       "unique_objects": len(kept)}, ensure_ascii=False, default=str)
+    try:
+        blobs = find_ole_blobs(dxf_path)
+        per_object = []
+        for blob in blobs:
+            cells = _extract_office_cells_from_blob(blob)
+            texts = _collapse_section_titles(cells) if cells is not None else []
+            per_object.append({"texts": texts, "frag_set": set(texts)})
+        kept = []
+        for o in per_object:
+            merged = False
+            for ko in kept:
+                if _similar_fragments(o["frag_set"], ko["frag_set"]):
+                    if len(o["frag_set"]) > len(ko["frag_set"]):
+                        ko["texts"] = o["texts"]
+                        ko["frag_set"] = o["frag_set"]
+                    merged = True
+                    break
+            if not merged:
+                kept.append(o)
+        objects_text = [o["texts"] for o in kept]
+        joined = "\n".join("\n".join(o) for o in objects_text)
+        return json.dumps({"joined": joined, "ole_count": len(blobs),
+                           "unique_objects": len(kept), "error": None}, ensure_ascii=False, default=str)
+    except Exception as e:
+        import traceback
+        return json.dumps({"joined": "", "ole_count": 0, "unique_objects": 0,
+                           "error": traceback.format_exc()}, ensure_ascii=False, default=str)
