@@ -96,9 +96,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq autoconf automake libtool texinfo pkg-config
           cd /tmp
-          # v1.9.11: 固定 LibreDWG 0.14.8583（与桌面版 dwg2dxf 0.14 同系，已验证可正确转出
-          # L01 系列 XREF DWG）。此前用 releases/latest 每次构建拉到不同版本，行为漂移。
-          TAG="0.14.8583"
+          # v1.9.12: 固定 LibreDWG 0.14（与桌面版 dwg2dxf 0.14 完全一致，杜绝版本漂移导致 DXF 差异）。
+          # 桌面生产版真值基准即基于 0.14 转出 + ODA 兜底的 DXF，手机端走同版本 LibreDWG 转换可最大化对齐。
+          TAG="0.14"
           echo "LibreDWG tag=$TAG"
           rm -rf libredwg && git clone --depth 1 --branch "$TAG" --recursive https://github.com/LibreDWG/libredwg.git libredwg
           cd libredwg
