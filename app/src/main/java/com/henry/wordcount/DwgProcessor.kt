@@ -40,90 +40,130 @@ object DwgProcessor {
             DwgProcessResult(0, 0, 0, 0, 1, "异常兜底", true, "process异常: ${e.message}", null, "")
         }
     }
-    private suspend fun processInner(context: Context, file: File, dName: String): DwgProcessResult {
-        // ── v1.9.12: 主路径改为 Python cad_core（ezdxf 同源，与桌面 wordcount.py 逐字节对齐）──
-        //   v1.9.11 实测：Python 路径在部分手机上抛异常后回退到 Kotlin 旧解析链，
-        //   旧链对 LibreDWG 损坏 DXF 输出严重虚高（00003 桌面 457 → Kotlin 3746）。
-        //   因此 v1.9.12 规定：DWG 字数只能来自 Python；任何失败都显示"-"（needsPdf=true），
-        //   绝不再回退 Kotlin。同时保留原 Kotlin 链代码供调试用，但默认不再进入。
-        val pyDxfPath = "${file.parent}/${file.nameWithoutExtension}.dxf"
-        try {
-            val pyDxfRes = DwgIsolatedRunner.convertToDxf(context, file.absolutePath, pyDxfPath)
-            if (pyDxfRes.path != null) {
-                val pyDxfFile = File(pyDxfPath)
-                if (pyDxfFile.exists() && pyDxfFile.length() > 0 && isDxfComplete(pyDxfPath)) {
-                    val pyJson = PythonEngine.extractCadDxf(context, pyDxfPath, file.absolutePath)
-                    val obj = JSONObject(pyJson)
-                    val pyError = if (obj.has("error") && !obj.isNull("error")) obj.optString("error") else null
-                    if (!pyError.isNullOrBlank()) {
-                        Log.e("WordCount", "DWG Python 返回错误 $dName: ${pyError.take(200)}")
-                    }
-                    val arr = obj.getJSONArray("items")
-                    val items = ArrayList<String>(arr.length())
-                    for (i in 0 until arr.length()) items.add(arr.getString(i))
-                    val pyPages = if (obj.has("pages") && !obj.isNull("pages")) obj.getInt("pages") else 1
-                    val pyPagesReason = obj.optString("pages_reason")
-                    var pyNeedsPdf = obj.optBoolean("needs_pdf", false)
-                    // 若 Python 成功运行但提取到 0 字（DXF 结构损坏无法解析），也标记 needsPdf，避免 Kotlin 虚高
-                    if (items.isEmpty() && !pyNeedsPdf) pyNeedsPdf = true
-                    // OLE 合并：office 嵌入文字走 Python；位图 OLE 兜底走 Kotlin ML Kit OCR
-                    val allItems = ArrayList(items)
-                    val oleMarks = ArrayList<String>()
-                    var oleOfficeOk = false
-                    try {
-                        val oleJson = PythonEngine.extractOleOffice(context, pyDxfPath)
-                        val oo = JSONObject(oleJson)
-                        val oleErr = if (oo.has("error") && !oo.isNull("error")) oo.optString("error") else null
-                        if (!oleErr.isNullOrBlank()) {
-                            Log.e("WordCount", "DWG OLE-office 返回错误 $dName: ${oleErr.take(200)}")
-                        }
-                        val joined = oo.optString("joined", "")
-                        if (joined.isNotBlank()) {
-                            for (ln in joined.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
-                            oleMarks.add("OLE-office")
-                            oleOfficeOk = true
-                        }
-                    } catch (e: Throwable) {
-                        Log.w("WordCount", "DWG OLE-office(Python)失败 $dName: ${e.message}")
-                    }
-                    if (!oleOfficeOk) {
-                        try {
-                            val oleRes = DwgOleExtractor.extractOleText(pyDxfPath)
-                            if (oleRes.text.isNotBlank()) {
-                                for (ln in oleRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
-                                oleMarks.add("OLE-ocr")
-                            }
-                        } catch (_: Throwable) {}
-                        try {
-                            val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath)
-                            if (oleRes2.text.isNotBlank()) {
-                                for (ln in oleRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
-                                oleMarks.add("DWG-OLE-ocr")
-                            }
-                        } catch (_: Throwable) {}
-                    }
-                    val co = JSONObject(PythonEngine.countCadItems(context, allItems))
-                    val cntErr = if (co.has("error") && !co.isNull("error")) co.optString("error") else null
-                    if (!cntErr.isNullOrBlank()) {
-                        Log.e("WordCount", "DWG count_items 返回错误 $dName: ${cntErr.take(200)}")
-                    }
-                    val pyWords = co.optInt("words", 0)
-                    val pyFe = co.optInt("fe", 0)
-                    val pyNc = co.optInt("nc", 0)
-                    val pyChars = co.optInt("chars", 0)
-                    val pyReason = (pyPagesReason ?: "") + (if (oleMarks.isNotEmpty()) "·" + oleMarks.joinToString("·") else "")
-                    Log.d("WordCount", "DWG Python主路径 $dName: words=$pyWords fe=$pyFe nc=$pyNc chars=$pyChars pages=$pyPages($pyReason) items=${items.size}")
-                    return DwgProcessResult(pyWords, pyFe, pyNc, pyChars, pyPages, pyReason, pyNeedsPdf, pyReason, null, allItems.joinToString("\n"))
-                }
-            }
-        } catch (e: Throwable) {
-            Log.e("WordCount", "DWG Python主路径失败 $dName: ${e.javaClass.simpleName}: ${e.message}", e)
-        }
-        // Python 路径失败 → 返回零值 + needsPdf=true，显示"-"，绝不再回退 Kotlin 旧链（会虚高）
-        Log.w("WordCount", "DWG $dName 走 Python 失败保护：显示'-'")
-        return DwgProcessResult(0, 0, 0, 0, 1, "Python解析失败", true, "Python解析失败", null, "")
-            }
+    private suspend fun processInner(context: Context, file: File, dName: String): DwgProcessResult {
+        // v1.9.13: 主路径 Python cad_core(ezdxf同源)，失败/0字时走 Kotlin 简易DXF组码兜底。
+        // v1.9.12 移除 Kotlin 旧链后，真机出现 Python 路径异常/返回空导致全部 0 字。
+        // 原因：旧 Kotlin 链 INSERT 块展开会虚高；但简易组码抽取（只读 TEXT/MTEXT/ATTDEF/ATTRIB
+        // 的组码 1/3，不展开 INSERT）不会虚高，且对 ezdxf 读不了的 DXF 仍可靠。
+        // v1.9.13 策略：Python 优先；Python 失败/空 -> Kotlin 简易抽取兜底；再失败才显示"-"。
+        val pyDxfPath = "${file.parent}/${file.nameWithoutExtension}.dxf"
+        val diagnostics = StringBuilder()
+        var pyPathTried = false
+        var pySuccessWithText = false
 
+        try {
+            val pyDxfRes = DwgIsolatedRunner.convertToDxf(context, file.absolutePath, pyDxfPath)
+            diagnostics.append("convert_rc=${pyDxfRes.errorCode}; ")
+            if (!pyDxfRes.diagText.isNullOrBlank()) diagnostics.append("convert_diag=${pyDxfRes.diagText.take(80)}; ")
+            if (pyDxfRes.path != null) {
+                val pyDxfFile = File(pyDxfPath)
+                if (pyDxfFile.exists() && pyDxfFile.length() > 0 && isDxfComplete(pyDxfPath)) {
+                    pyPathTried = true
+                    try {
+                        val pyJson = PythonEngine.extractCadDxf(context, pyDxfPath, file.absolutePath)
+                        val obj = JSONObject(pyJson)
+                        val pyError = if (obj.has("error") && !obj.isNull("error")) obj.optString("error") else null
+                        if (!pyError.isNullOrBlank()) {
+                            diagnostics.append("py_err=${pyError.take(120)}; ")
+                            Log.e("WordCount", "DWG Python 返回错误 $dName: ${pyError.take(200)}")
+                        }
+                        val arr = obj.getJSONArray("items")
+                        val items = ArrayList<String>(arr.length())
+                        for (i in 0 until arr.length()) items.add(arr.getString(i))
+                        var pyPages = if (obj.has("pages") && !obj.isNull("pages")) obj.getInt("pages") else 1
+                        val pyPagesReason = obj.optString("pages_reason")
+                        var pyNeedsPdf = obj.optBoolean("needs_pdf", false)
+                        if (items.isEmpty() && !pyNeedsPdf) pyNeedsPdf = true
+
+                        if (items.isNotEmpty()) {
+                            pySuccessWithText = true
+                            // OLE 合并：office 嵌入文字走 Python；位图 OLE 兜底走 Kotlin ML Kit OCR
+                            val allItems = ArrayList(items)
+                            val oleMarks = ArrayList<String>()
+                            var oleOfficeOk = false
+                            try {
+                                val oleJson = PythonEngine.extractOleOffice(context, pyDxfPath)
+                                val oo = JSONObject(oleJson)
+                                val oleErr = if (oo.has("error") && !oo.isNull("error")) oo.optString("error") else null
+                                if (!oleErr.isNullOrBlank()) diagnostics.append("ole_err=${oleErr.take(80)}; ")
+                                val joined = oo.optString("joined", "")
+                                if (joined.isNotBlank()) {
+                                    for (ln in joined.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
+                                    oleMarks.add("OLE-office")
+                                    oleOfficeOk = true
+                                }
+                            } catch (e: Throwable) {
+                                diagnostics.append("ole_office_ex=${e.javaClass.simpleName}:${e.message}; ")
+                            }
+                            if (!oleOfficeOk) {
+                                try {
+                                    val oleRes = DwgOleExtractor.extractOleText(pyDxfPath)
+                                    if (oleRes.text.isNotBlank()) {
+                                        for (ln in oleRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
+                                        oleMarks.add("OLE-ocr")
+                                    }
+                                } catch (_: Throwable) {}
+                                try {
+                                    val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath)
+                                    if (oleRes2.text.isNotBlank()) {
+                                        for (ln in oleRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
+                                        oleMarks.add("DWG-OLE-ocr")
+                                    }
+                                } catch (_: Throwable) {}
+                            }
+                            val co = JSONObject(PythonEngine.countCadItems(context, allItems))
+                            val cntErr = if (co.has("error") && !co.isNull("error")) co.optString("error") else null
+                            if (!cntErr.isNullOrBlank()) diagnostics.append("count_err=${cntErr.take(80)}; ")
+                            val pyWords = co.optInt("words", 0)
+                            val pyFe = co.optInt("fe", 0)
+                            val pyNc = co.optInt("nc", 0)
+                            val pyChars = co.optInt("chars", 0)
+                            val pyReason = (pyPagesReason ?: "") + (if (oleMarks.isNotEmpty()) "·" + oleMarks.joinToString("·") else "")
+                            val diag = "PY:${diagnostics}items=${items.size}"
+                            Log.d("WordCount", "DWG Python主路径 $dName: words=$pyWords fe=$pyFe nc=$pyNc chars=$pyChars pages=$pyPages($pyReason) items=${items.size}")
+                            return DwgProcessResult(pyWords, pyFe, pyNc, pyChars, pyPages, pyReason, pyNeedsPdf, diag, null, allItems.joinToString("\n"))
+                        }
+                    } catch (e: Throwable) {
+                        diagnostics.append("py_ex=${e.javaClass.simpleName}:${e.message?.take(120)}; ")
+                        Log.e("WordCount", "DWG Python主路径失败 $dName: ${e.javaClass.simpleName}: ${e.message}", e)
+                    }
+                } else {
+                    diagnostics.append("dxf_incomplete_or_empty; ")
+                }
+            } else {
+                diagnostics.append("dxf_path_null; ")
+            }
+        } catch (e: Throwable) {
+            diagnostics.append("convert_ex=${e.javaClass.simpleName}:${e.message?.take(120)}; ")
+            Log.e("WordCount", "DWG 转换请求失败 $dName: ${e.javaClass.simpleName}: ${e.message}", e)
+        }
+
+        // v1.9.13 兜底：Python 失败/0字时，用 Kotlin 简易组码抽取。
+        // 不展开 INSERT，只读 TEXT/MTEXT/ATTDEF/ATTRIB/MULTILEADER 的文字组码，避免 v1.9.11 的虚高。
+        if (pyPathTried && File(pyDxfPath).exists()) {
+            try {
+                val fallbackText = extractDxfTextsSimple(pyDxfPath)
+                if (fallbackText.isNotBlank()) {
+                    val (fbWords, fbFe, fbNc, fbChars) = countTextKotlin(fallbackText)
+                    if (fbWords > 0) {
+                        val fbReason = "Kotlin组码兜底" + (if (diagnostics.isNotEmpty()) "·" + diagnostics.toString().take(60) else "")
+                        val fbDiag = "FB:${diagnostics}"
+                        Log.d("WordCount", "DWG Kotlin组码兜底 $dName: words=$fbWords fe=$fbFe nc=$fbNc chars=$fbChars")
+                        return DwgProcessResult(fbWords, fbFe, fbNc, fbChars, 1, fbReason, false, fbDiag, null, fallbackText)
+                    }
+                }
+                diagnostics.append("fb_text_empty; ")
+            } catch (e: Throwable) {
+                diagnostics.append("fb_ex=${e.javaClass.simpleName}:${e.message?.take(120)}; ")
+                Log.e("WordCount", "DWG Kotlin组码兜底失败 $dName: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
+
+        // 全部失败 -> 显示"-"，但把诊断信息带出来便于排查
+        Log.w("WordCount", "DWG $dName 全部路径失败：显示'-' diag=${diagnostics}")
+        val failReason = "Python解析失败" + (if (diagnostics.isNotEmpty()) "·" + diagnostics.toString().take(60) else "")
+        return DwgProcessResult(0, 0, 0, 0, 1, failReason, true, diagnostics.toString(), null, "")
+    }
     private fun isDxfComplete(path: String): Boolean {
         return try {
             val f = java.io.RandomAccessFile(path, "r")

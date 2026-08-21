@@ -89,7 +89,6 @@ object DwgIsolatedRunner {
     private suspend fun runConvert(context: Context, input: String, output: String, requestWhat: Int): DwgConverter.DwgResult {
         return suspendCancellableCoroutine { cont ->
             val handler = ipcHandler()
-            val mainHandler = Handler(Looper.getMainLooper())
             var connection: ServiceConnection? = null
             var serviceMessenger: Messenger? = null
             var done = false
@@ -98,8 +97,9 @@ object DwgIsolatedRunner {
                 if (done) return@finish
                 done = true
                 handler.removeCallbacksAndMessages(null)
-                // unbindService 必须走主线程，post 到主 Looper
-                mainHandler.post {
+                // v1.9.13: unbind 必须在 bind 所在的 ipcLooper 线程执行（bind 已在 ipc 线程发起），
+                // 用 handler(ipcLooper) post 保证线程一致，且任意线程调用 finish 都安全。
+                handler.post {
                     try { connection?.let { context.unbindService(it) } } catch (_: Throwable) {}
                 }
                 if (cont.isActive) cont.resume(result)
@@ -167,19 +167,25 @@ object DwgIsolatedRunner {
             }
 
             val intent = Intent(context, DwgIsolatedService::class.java)
-            try {
-                // 显式 start（先 startService 确保进程起来并进入前台）再 bind
-                context.startService(intent)
-                val bound = context.bindService(intent, connection!!, Context.BIND_AUTO_CREATE)
-                if (!bound) {
-                    Log.w("DwgIsolated", "bindService returned false")
-                    finish(DwgConverter.DwgResult(errorCode = -97, diagText = "DWG转换服务绑定失败"))
-                    return@suspendCancellableCoroutine
+            // v1.9.13 根因修复：把 startService+bindService 放到独立 IPC 线程(ipcLooper)执行，
+            // 使 ServiceConnection.onServiceConnected 在 ipcLooper 回调，而非主 Looper。
+            // 主 app 切后台后主线程消息泵被 OEM/Android 节流冻结，onServiceConnected 不触发 ->
+            // serviceMessenger.send(request) 永不执行 -> 转换根本没发起 -> “后台只待机不统计”。
+            // 改在 ipcLooper 线程发起 bind，回调也走 ipcLooper，后台可持续收发。
+            handler.post {
+                try {
+                    // 显式 start（先 startService 确保进程起来并进入前台）再 bind
+                    context.startService(intent)
+                    val bound = context.bindService(intent, connection!!, Context.BIND_AUTO_CREATE)
+                    if (!bound) {
+                        Log.w("DwgIsolated", "bindService returned false")
+                        finish(DwgConverter.DwgResult(errorCode = -97, diagText = "DWG转换服务绑定失败"))
+                        return@post
+                    }
+                } catch (e: Throwable) {
+                    Log.e("DwgIsolated", "start/bind failed: ${e.message}", e)
+                    finish(DwgConverter.DwgResult(errorCode = -97, diagText = "DWG转换服务启动失败：${e.message}"))
                 }
-            } catch (e: Throwable) {
-                Log.e("DwgIsolated", "start/bind failed: ${e.message}", e)
-                finish(DwgConverter.DwgResult(errorCode = -97, diagText = "DWG转换服务启动失败：${e.message}"))
-                return@suspendCancellableCoroutine
             }
 
             handler.postDelayed(bindTimeoutRunnable, BIND_TIMEOUT_MS)
