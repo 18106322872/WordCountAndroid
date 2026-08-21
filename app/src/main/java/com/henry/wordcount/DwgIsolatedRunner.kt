@@ -11,6 +11,7 @@ import android.os.Looper
 import android.os.Message
 import android.os.Messenger
 import android.util.Log
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
@@ -174,8 +175,15 @@ object DwgIsolatedRunner {
             // 改在 ipcLooper 线程发起 bind，回调也走 ipcLooper，后台可持续收发。
             handler.post {
                 try {
-                    // 显式 start（先 startService 确保进程起来并进入前台）再 bind
-                    context.startService(intent)
+                    // v1.9.16: Android 8+ 切后台后禁止普通 startService，必须用 startForegroundService
+                    // 与 DwgIsolatedService.onStartCommand 中的 startForeground 配对，确保后台能拉起进程。
+                    try {
+                        ContextCompat.startForegroundService(context, intent)
+                    } catch (e: Throwable) {
+                        Log.e("DwgIsolated", "startForegroundService failed: ${e.message}", e)
+                        finish(DwgConverter.DwgResult(errorCode = -97, diagText = "DWG转换服务无法前台启动：${e.message}"))
+                        return@post
+                    }
                     val bound = context.bindService(intent, connection!!, Context.BIND_AUTO_CREATE)
                     if (!bound) {
                         Log.w("DwgIsolated", "bindService returned false")
