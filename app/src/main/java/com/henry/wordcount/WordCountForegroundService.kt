@@ -52,15 +52,22 @@ class WordCountForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val noti: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_notify_sync)
-            .setContentTitle("WordCount 正在统计")
-            .setContentText("后台继续进行中")
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .build()
-        startForeground(NOTI_ID, noti)
+        try {
+            val noti: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.stat_notify_sync)
+                .setContentTitle("WordCount 正在统计")
+                .setContentText("后台继续进行中")
+                .setOngoing(true)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setCategory(NotificationCompat.CATEGORY_SERVICE)
+                .build()
+            // v1.9.13: startForeground 包 try/catch —— 任何通知/类型异常都不能抛出到
+            // 主线程，否则前台 service 进程崩溃 → 整个统计协程被杀死 → 切后台统计"暂停"且
+            // 切回前台不会重启（进程已死）。捕获后进程仍保有前台优先级，统计可继续。
+            startForeground(NOTI_ID, noti)
+        } catch (e: Throwable) {
+            Log.w("WordCountFGS", "startForeground 失败(忽略，进程仍前台优先级): ${e.message}")
+        }
         return START_NOT_STICKY
     }
 }

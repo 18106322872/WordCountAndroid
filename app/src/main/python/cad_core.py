@@ -554,15 +554,20 @@ def extract_text_from_dxf(dxf_path, converter=None):
         except Exception:
             doc = None
     if doc is None:
-        # ezdxf 全线失败（DXF 结构损坏）→ 不再退回裸文本扫描，因为裸扫描会
-        # 把图层名/块定义模板/字段名当正文，导致字数虚高（如 00003 桌面 457
-        # 但裸扫描 3746）。直接返回空，让 Kotlin 端判定 needsPdf=true 显示"-"
-        # 或走 PDF 回退。
-        return ""
+        # ezdxf 全线失败（DXF 结构损坏）→ 退回「针对文字实体的裸扫描」：
+        # extract_text_custom 仅抽取 TEXT/ATTDEF/ATTRIB/MTEXT/MULTILEADER 的
+        # 文字（不含图层名/块名噪声），不会像旧版全组码扫描那样把图层/块定义
+        # 当正文导致虚高（00003 桌面 457 → 旧裸扫描 3746）。这是真文字兜底，
+        # 比直接返回空（UI 显示"-"、整篇字数丢失）更贴近桌面结果。
+        t = extract_text_custom(dxf_path)
+        return t if t else ""
     collected = _collect_dxf_texts(doc)
     if not collected:
-        # 结构化成功但无文字 → 同样不裸扫描，避免块名/图层名噪声
-        return ""
+        # 结构化成功但无文字（设备端 ezdxf 在某类 DXF 上漏抽，导致「页数对了
+        # 字都没了」）→ 同样用针对文字实体的裸扫描兜底，避免整篇字数丢失。
+        # 仅当裸扫描也找不到文字时才返回空（确有 0 字）。
+        t = extract_text_custom(dxf_path)
+        return t if t else ""
     return "\n".join(collected)
 
 def _detect_frame_rectangles(doc, want_areas=False):
