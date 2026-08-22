@@ -40,6 +40,8 @@ class DwgIsolatedService : Service() {
         super.onCreate()
         // 注意：本进程不初始化 Python（Application 已跳过）。只加载 native 库。
         messenger = Messenger(IncomingHandler())
+        // v1.9.18: 任何创建路径都立即前台化，确保 :dwgisolated 不被 Android 14+ 冻结。
+        startForegroundCompat()
         Log.d("DwgIsolated", "isolated service created (pid=${android.os.Process.myPid()})")
     }
 
@@ -56,9 +58,11 @@ class DwgIsolatedService : Service() {
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
-        // 最后一位客户端解绑 → 延迟自停；若 10s 内重绑（下个文件转换）则取消
+        // v1.9.18: 不再用 10s 短空闲自停——统计批次内主进程 Python 抽取常 >10s，
+        // 短自停会让 :dwgisolated 在切后台后被 Android 14+ 禁止前台重启→"切后台不统计"。
+        // 改为长空闲(10min)安全网；正常由 DwgIsolatedRunner.stopIsolated 在 addFiles finally 显式停止。
         idleStopRunnable = Runnable { try { stopSelf() } catch (_: Throwable) {} }
-        mainHandler.postDelayed(idleStopRunnable!!, 10_000L)
+        mainHandler.postDelayed(idleStopRunnable!!, 600_000L)
         return true
     }
 
@@ -166,5 +170,10 @@ class DwgIsolatedService : Service() {
         const val KEY_PATH = "path"
         const val CHANNEL_ID = "wordcount_dwg_convert"
         const val NOTI_ID = 200
+
+        /** v1.9.18: 主进程显式停止 :dwgisolated（addFiles 结束后调用）。 */
+        fun stopService(ctx: Context) {
+            try { ctx.stopService(Intent(ctx, DwgIsolatedService::class.java)) } catch (_: Throwable) {}
+        }
     }
 }

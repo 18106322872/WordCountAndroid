@@ -6,12 +6,6 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
-# 串行化构建：避免多次快速 push 时多个 run 竞态，导致后完成的旧版本 run
-# 用"删除旧 release + 重建"把 apk tag 覆盖成旧版 APK（v1.8.9 发布时曾因此被 1.8.8 run 反超）。
-concurrency:
-  group: apk-build
-  cancel-in-progress: true
-
 # 单任务：编译 APK。图片 OCR 主路径用 Google ML Kit Text Recognition；方案 C 最强引擎兜底升级为 PaddleOCR(PP-OCRv4，equationl/paddleocr4android，Paddle-Lite 后端)，模型由本 workflow 下载进 assets。
 
 # 允许默认 GITHUB_TOKEN 创建 Release（否则发布 APK 会 403）
@@ -96,9 +90,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq autoconf automake libtool texinfo pkg-config
           cd /tmp
-          # v1.9.12: 固定 LibreDWG 0.14（与桌面版 dwg2dxf 0.14 完全一致，杜绝版本漂移导致 DXF 差异）。
-          # 桌面生产版真值基准即基于 0.14 转出 + ODA 兜底的 DXF，手机端走同版本 LibreDWG 转换可最大化对齐。
-          TAG="0.14"
+          TAG=$(curl -fsSL https://api.github.com/repos/LibreDWG/libredwg/releases/latest | python3 -c "import sys,json;print(json.load(sys.stdin)['tag_name'])")
           echo "LibreDWG tag=$TAG"
           rm -rf libredwg && git clone --depth 1 --branch "$TAG" --recursive https://github.com/LibreDWG/libredwg.git libredwg
           cd libredwg

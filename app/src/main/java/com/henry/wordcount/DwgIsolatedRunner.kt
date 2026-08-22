@@ -47,6 +47,12 @@ object DwgIsolatedRunner {
     @Volatile
     private var ipcHandler: Handler? = null
 
+    // v1.9.18: 是否已通过 startForegroundService 拉起过 :dwgisolated。
+    // 仅首次(或进程崩溃重启后)才调用 startForegroundService；切后台后 Android 14+ 禁止后台
+    // startForegroundService，故批次内续转换只 bindService 复用，避免"切后台不统计"。
+    @Volatile
+    private var started: Boolean = false
+
     @Synchronized
     private fun ipcLooper(): Looper {
         var t = ipcThread
@@ -162,6 +168,7 @@ object DwgIsolatedRunner {
 
                 override fun onServiceDisconnected(name: ComponentName?) {
                     // 隔离进程崩溃会触发此回调（native crash 杀进程）
+                    started = false
                     Log.w("DwgIsolated", "service disconnected (process likely crashed)")
                     finish(DwgConverter.DwgResult(errorCode = -96, diagText = "DWG转换进程崩溃（文件可能损坏或不兼容）"))
                 }
@@ -175,14 +182,19 @@ object DwgIsolatedRunner {
             // 改在 ipcLooper 线程发起 bind，回调也走 ipcLooper，后台可持续收发。
             handler.post {
                 try {
-                    // v1.9.16: Android 8+ 切后台后禁止普通 startService，必须用 startForegroundService
-                    // 与 DwgIsolatedService.onStartCommand 中的 startForeground 配对，确保后台能拉起进程。
-                    try {
-                        ContextCompat.startForegroundService(context, intent)
-                    } catch (e: Throwable) {
-                        Log.e("DwgIsolated", "startForegroundService failed: ${e.message}", e)
-                        finish(DwgConverter.DwgResult(errorCode = -97, diagText = "DWG转换服务无法前台启动：${e.message}"))
-                        return@post
+                    // v1.9.18: 仅首次(或进程崩溃重启后)调用 startForegroundService。
+                    // 批次内续转换只 bindService 复用已前台化的 :dwgisolated——切后台后 Android 14+
+                    // 禁止后台 startForegroundService，若每次都重调会导致"切后台不统计"。首调发生在
+                    // addFiles 起始(app 仍前台)，必然成功；之后隔离进程持续前台存活，后台也能 bind。
+                    if (!started) {
+                        try {
+                            ContextCompat.startForegroundService(context, intent)
+                            started = true
+                        } catch (e: Throwable) {
+                            Log.e("DwgIsolated", "startForegroundService failed: ${e.message}", e)
+                            finish(DwgConverter.DwgResult(errorCode = -97, diagText = "DWG转换服务无法前台启动：${e.message}"))
+                            return@post
+                        }
                     }
                     val bound = context.bindService(intent, connection!!, Context.BIND_AUTO_CREATE)
                     if (!bound) {
@@ -201,6 +213,19 @@ object DwgIsolatedRunner {
             cont.invokeOnCancellation {
                 finish(DwgConverter.DwgResult(errorCode = -95, diagText = "DWG转换被取消"))
             }
+        }
+    }
+
+    /**
+     * v1.9.18: addFiles 结束后显式停止 :dwgisolated 进程（与 WordCountForegroundService 配对）。
+     * 统计批次内隔离进程持续前台存活（不靠 10s 空闲自停），避免切后台后进程被杀/无法重启；
+     * 此处在 finally 中干净回收，防止进程泄漏。
+     */
+    fun stopIsolated(context: Context) {
+        val handler = ipcHandler()
+        handler.post {
+            started = false
+            try { DwgIsolatedService.stopService(context) } catch (_: Throwable) {}
         }
     }
 }

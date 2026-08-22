@@ -2751,7 +2751,9 @@ private fun addFiles(
             //   统计结束用 total<=0 语义通知调用方清除进度文本。
             onProgress?.invoke("", 0, 0)
             // v1.9.10: 关闭前台占位 service，让 app 进程退出前台优先级。
-            WordCountForegroundService.stop(context)
+            WordCountForegroundService.stop(context)
+            // v1.9.18: 显式停止 :dwgisolated（统计期间持续前台存活，避免切后台被 Android 14+ 冻结/禁重启）。
+            DwgIsolatedRunner.stopIsolated(context)
         }
     }
 }
