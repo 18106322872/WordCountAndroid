@@ -98,6 +98,19 @@ import kotlin.math.roundToInt
  * v1.9.19: 后台保护风险前缀。真机上"切后台不统计"绝大多数是系统层拦截而非代码逻辑，
  * 这里把已知缺失项直接写进进度文案，用户一眼可见、无需连 logcat。
  */
+
+/**
+ * v1.9.20: 文件级统计日志（cacheDir/wc_stats.log，追加写）。
+ * 真机"切后台不统计"排查：统计批次完成后打开文件即可看到每个文件的完成时刻与顺序，
+ * 若某文件之后长时间无记录 → 卡在该文件（多为 :dwgisolated 转换等待）。
+ */
+private fun logStatsLine(context: android.content.Context, name: String, done: Int, total: Int) {
+    try {
+        val f = java.io.File(context.cacheDir, "wc_stats.log")
+        f.appendText("${System.currentTimeMillis()}\t$done/$total\t$name\n")
+    } catch (_: Throwable) {}
+}
+
 private fun bgWarn(): String {
     val miss = mutableListOf<String>()
     if (!MainActivity.batteryUnrestricted) miss += "未允许后台运行(电池优化未豁免)"
@@ -365,7 +378,11 @@ fun WordCountApp(initialUris: List<Uri>) {
         "1.0.26"
     }
     val scope = rememberCoroutineScope()
-    val workScope = remember { ProcessLifecycleOwner.get().lifecycleScope }
+    // v1.9.20: workScope 改用 App 级常驻协程域。此前用 ProcessLifecycleOwner.lifecycleScope，
+    // 其协程在进程级 lifecycle 派发 DESTROYED 时取消——部分 ROM 在 App 切后台后会回调
+    // ON_STOP/ON_DESTROY，统计协程树整体被取消，表现为"切后台不统计"。
+    // WordCountApplication.appScope 由前台 service 守护，与进程同生命周期，切后台不取消。
+    val workScope = WordCountApplication.appScope
     val snackbar = remember { SnackbarHostState() }
 
     val entries = remember { mutableStateListOf<FileEntry>() }
@@ -384,7 +401,12 @@ fun WordCountApp(initialUris: List<Uri>) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) {
             WordCountForegroundService.start(context)
-            addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total -> progressText = if (total <= 0) null else (bgWarn() + "正在统计文件$name，已统计$done/$total") })
+            addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total ->                 progressText = if (total <= 0) null else (bgWarn() + "正在统计文件$name，已统计$done/$total")
+                if (total > 0) {
+                    // v1.9.20: 后台时 UI 不重组，进度改由前台通知实时展示；同时落盘文件级日志供真机排查
+                    WordCountForegroundService.notifyProgress(context, "已统计 $done/$total · $name")
+                    logStatsLine(context, name, done, total)
+                } })
         }
     }
 
@@ -441,7 +463,12 @@ fun WordCountApp(initialUris: List<Uri>) {
     androidx.compose.runtime.LaunchedEffect(Unit) {
         if (initialUris.isNotEmpty()) {
             WordCountForegroundService.start(context)
-            addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, initialUris, onProgress = { name, done, total -> progressText = if (total <= 0) null else (bgWarn() + "正在统计文件$name，已统计$done/$total") })
+            addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, initialUris, onProgress = { name, done, total ->                 progressText = if (total <= 0) null else (bgWarn() + "正在统计文件$name，已统计$done/$total")
+                if (total > 0) {
+                    // v1.9.20: 后台时 UI 不重组，进度改由前台通知实时展示；同时落盘文件级日志供真机排查
+                    WordCountForegroundService.notifyProgress(context, "已统计 $done/$total · $name")
+                    logStatsLine(context, name, done, total)
+                } })
         }
     }
 
@@ -454,7 +481,12 @@ fun WordCountApp(initialUris: List<Uri>) {
             if (uris != null && uris.isNotEmpty() && !busy) {
                 MainActivity.pendingUris = null // 消费掉
                 WordCountForegroundService.start(context)
-                addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total -> progressText = if (total <= 0) null else (bgWarn() + "正在统计文件$name，已统计$done/$total") })
+                addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total ->                 progressText = if (total <= 0) null else (bgWarn() + "正在统计文件$name，已统计$done/$total")
+                if (total > 0) {
+                    // v1.9.20: 后台时 UI 不重组，进度改由前台通知实时展示；同时落盘文件级日志供真机排查
+                    WordCountForegroundService.notifyProgress(context, "已统计 $done/$total · $name")
+                    logStatsLine(context, name, done, total)
+                } })
             }
         }
     }

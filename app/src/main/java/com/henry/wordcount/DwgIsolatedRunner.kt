@@ -39,7 +39,9 @@ import kotlin.coroutines.resume
 object DwgIsolatedRunner {
 
     private const val BIND_TIMEOUT_MS = 8_000L
-    private const val CONVERT_TIMEOUT_MS = 900_000L
+    // v1.9.20: 10min（桌面单文件实测最长 ~492s）。原 15min 在后台卡死时每个文件拖 15 分钟，
+    // 进度看起来"完全不动"；10min 平衡"不误杀大文件"与"快速失败继续"。
+    private const val CONVERT_TIMEOUT_MS = 600_000L
 
     // v1.9.12: 独立 IPC 线程，避免主 Looper 后台冻结导致转换结果无法回传
     @Volatile

@@ -95,9 +95,12 @@ object DwgProcessor {
                             } catch (e: Throwable) {
                                 diagnostics.append("ole_office_ex=${e.javaClass.simpleName}:${e.message}; ")
                             }
-                            if (!oleOfficeOk) {
-                                try {
-                                    val oleRes = DwgOleExtractor.extractOleText(pyDxfPath)
+                            // v1.9.20: OLE office 与位图 OCR 不再互斥。此前 oleOfficeOk=true 时
+                            // 直接跳过位图 OCR，00003 等含大量嵌入位图(图例/截图/LOGO)的 DWG 漏字
+                            // （桌面 RapidOCR 对全部嵌入图做 OCR，00003 因此 +4669 字）。
+                            // 两路结果合并，最终由 FarEast 比例过滤兜底去噪。
+                            try {
+                                val oleRes = DwgOleExtractor.extractOleText(pyDxfPath)
                                     if (oleRes.text.isNotBlank()) {
                                         for (ln in oleRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
                                         oleMarks.add("OLE-ocr")
@@ -110,15 +113,23 @@ object DwgProcessor {
                                         oleMarks.add("DWG-OLE-ocr")
                                     }
                                 } catch (_: Throwable) {}
-                            }
                             val co = JSONObject(PythonEngine.countCadItems(context, allItems))
                             val cntErr = if (co.has("error") && !co.isNull("error")) co.optString("error") else null
                             if (!cntErr.isNullOrBlank()) diagnostics.append("count_err=${cntErr.take(80)}; ")
-                            val pyWords = co.optInt("words", 0)
-                            val pyFe = co.optInt("fe", 0)
-                            val pyNc = co.optInt("nc", 0)
-                            val pyChars = co.optInt("chars", 0)
+
                             val pyReason = (pyPagesReason ?: "") + (if (oleMarks.isNotEmpty()) "·" + oleMarks.joinToString("·") else "")
+                            // v1.9.20: 对齐桌面口径。桌面对纯英文图纸 fe=0；手机端若 FarEast 占比 <15%
+                            // 视为伪中文噪声（全角数字/标点、GB18030 乱码解码、ML Kit 误识别），
+                            // 剔除全部 FarEast 后重新计数（真实中文 DWG 占比高，不受影响）。
+                            val mergedAll = allItems.joinToString("\n")
+                            val cleanedText = PdfOcrEngine.stripNoiseFarEast(mergedAll)
+                            val cleanedItems = cleanedText.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                            val co2 = if (cleanedItems.size != allItems.size)
+                                JSONObject(PythonEngine.countCadItems(context, cleanedItems)) else co
+                            val pyWords = co2.optInt("words", 0)
+                            val pyFe = co2.optInt("fe", 0)
+                            val pyNc = co2.optInt("nc", 0)
+                            val pyChars = co2.optInt("chars", 0)
                             val diag = "PY:${diagnostics}items=${items.size}"
                             Log.d("WordCount", "DWG Python主路径 $dName: words=$pyWords fe=$pyFe nc=$pyNc chars=$pyChars pages=$pyPages($pyReason) items=${items.size}")
                             return DwgProcessResult(pyWords, pyFe, pyNc, pyChars, pyPages, pyReason, pyNeedsPdf, diag, null, allItems.joinToString("\n"))

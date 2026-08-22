@@ -80,6 +80,28 @@ class WordCountForegroundService : Service() {
             } catch (_: Throwable) {
             }
         }
+
+        /**
+         * v1.9.20: 更新前台通知的进度文本（已统计 X/Y · 文件名）。
+         * 仅 nm.notify 替换内容，不改变前台化状态——切后台后用户在通知栏即可看到实时进度。
+         */
+        fun notifyProgress(ctx: Context, text: String) {
+            try {
+                val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
+                val noti = NotificationCompat.Builder(ctx, CHANNEL_ID)
+                    .setSmallIcon(android.R.drawable.stat_notify_sync)
+                    .setContentTitle("WordCount 正在统计")
+                    .setContentText(text.take(120))
+                    .setOngoing(true)
+                    .setPriority(NotificationCompat.PRIORITY_LOW)
+                    .setCategory(NotificationCompat.CATEGORY_SERVICE)
+                    .setSilent(true)
+                    .build()
+                nm.notify(NOTI_ID, noti)
+            } catch (e: Throwable) {
+                Log.w("WordCountFGS", "notify progress failed: ${e.message}")
+            }
+        }
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
