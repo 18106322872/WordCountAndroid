@@ -30,9 +30,9 @@ android {
 
         targetSdk 34
 
-        versionCode 268
+        versionCode 269
 
-        versionName '1.9.18'
+        versionName '1.9.19'
 
 
 
@@ -207,6 +207,8 @@ dependencies {
     implementation 'androidx.compose.material:material-icons-extended'
 
     implementation 'androidx.activity:activity-compose:1.9.0'
+    // v1.9.19: 显式声明 core，保证 ServiceCompat.startForeground(service,id,noti,type) 重载可用
+    implementation 'androidx.core:core-ktx:1.13.1'
 
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.0'
     implementation 'androidx.lifecycle:lifecycle-process:2.8.0'

@@ -6,6 +6,16 @@
     <!-- v1.9.10: 前台 service 权限，让 app 切后台时不被 Android 14+ 强制挂起子进程（dwg2dxf 等） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- v1.9.19 后台统计根治①：Android 13+ 若不声明并申请 POST_NOTIFICATIONS，前台 service 的
+         通知根本不显示；国产 ROM(小米/华为/OPPO/vivo)会把"无可见通知的前台服务"当普通后台进程
+         处理，切后台立刻冻结/回收 → 表现为"切后台不统计"。 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- v1.9.19 后台统计根治②：切后台且息屏后 CPU 进入 Doze/休眠，统计线程被挂起。
+         必须持 PARTIAL_WAKE_LOCK 才能保证 dwg2dxf / Python 抽取持续推进。 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- v1.9.19 后台统计根治③：国产 ROM 默认对未豁免电池优化的 app 在切后台后杀线程/冻结
+         子进程(:dwgisolated)，连前台 service 也拦不住。声明后可由 MainActivity 引导用户一键豁免。 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- 注：SAF OpenMultipleDocuments 在所有 Android 版本上均无需任何存储/媒体权限 -->
 
     <application

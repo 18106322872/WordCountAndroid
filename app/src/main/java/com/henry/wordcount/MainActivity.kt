@@ -1,5 +1,6 @@
 package com.henry.wordcount
 
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -93,6 +94,17 @@ import android.graphics.pdf.PdfDocument
 import java.util.zip.ZipFile
 import kotlin.math.roundToInt
 
+/**
+ * v1.9.19: 后台保护风险前缀。真机上"切后台不统计"绝大多数是系统层拦截而非代码逻辑，
+ * 这里把已知缺失项直接写进进度文案，用户一眼可见、无需连 logcat。
+ */
+private fun bgWarn(): String {
+    val miss = mutableListOf<String>()
+    if (!MainActivity.batteryUnrestricted) miss += "未允许后台运行(电池优化未豁免)"
+    WordCountForegroundService.lastError?.let { miss += it }
+    return if (miss.isEmpty()) "" else "⚠" + miss.joinToString("；") + "｜"
+}
+
 class MainActivity : ComponentActivity() {
     /** 外部可通过此引用向已有列表追加新文件（onNewIntent 时使用） */
     companion object {
@@ -100,12 +112,69 @@ class MainActivity : ComponentActivity() {
         // v1.5.55: 微信等分享传入时，Intent EXTRA_SUBJECT 常携带原文件名，
         // 但 ContentResolver.DISPLAY_NAME 只返回内部缓存 ID。这里临时保存 hint。
         @Volatile var pendingUriNames: MutableMap<Uri, String> = mutableMapOf()
+
+        /** v1.9.19: 是否已获电池优化豁免（false 时切后台极可能被国产 ROM 冻结）。 */
+        @Volatile var batteryUnrestricted: Boolean = true
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ensureBackgroundCapability()
         val uris = extractUrisFromIntent(intent)
         setContent { WordCountApp(initialUris = uris) }
+    }
+
+    /**
+     * v1.9.19: 后台统计的两项系统前置条件，缺任一项都会导致"切后台不统计"。
+     *
+     * ① POST_NOTIFICATIONS(Android 13+)：未授予时前台 service 的通知不可见，
+     *    国产 ROM 会把"无可见通知的前台服务"当普通后台进程直接冻结。
+     * ② 电池优化豁免：小米/华为/OPPO/vivo 默认对未豁免的 app 在切后台后
+     *    杀死或冻结其线程与子进程(:dwgisolated)，前台 service 也拦不住。
+     *
+     * 两者都只在缺失时请求一次(电池豁免用 SharedPreferences 记忆)，拒绝也不阻塞主流程。
+     */
+    private fun ensureBackgroundCapability() {
+        // ① 通知权限
+        if (Build.VERSION.SDK_INT >= 33) {
+            try {
+                val granted = checkSelfPermission("android.permission.POST_NOTIFICATIONS") ==
+                    PackageManager.PERMISSION_GRANTED
+                if (!granted) {
+                    requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 9019)
+                }
+            } catch (e: Throwable) {
+                Log.w("MainActivity", "request notification permission failed: ${e.message}")
+            }
+        }
+        // ② 电池优化豁免（只主动引导一次，之后可在系统设置里自行开启）
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            val ignoring = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                pm.isIgnoringBatteryOptimizations(packageName) else true
+            batteryUnrestricted = ignoring
+            if (!ignoring) {
+                val sp = getSharedPreferences("wordcount_prefs", Context.MODE_PRIVATE)
+                if (!sp.getBoolean("asked_battery_opt", false)) {
+                    sp.edit().putBoolean("asked_battery_opt", true).apply()
+                    val i = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                    i.data = Uri.parse("package:$packageName")
+                    startActivity(i)
+                }
+            }
+        } catch (e: Throwable) {
+            Log.w("MainActivity", "battery optimization check failed: ${e.message}")
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // v1.9.19: 用户从系统设置返回后刷新豁免状态，供统计前提示使用
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            batteryUnrestricted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                pm.isIgnoringBatteryOptimizations(packageName) else true
+        } catch (_: Throwable) {}
     }
 
     /** v1.0.16: 处理从微信/千牛等应用后续传入的文件，追加到已有列表而非替换 */
@@ -315,7 +384,7 @@ fun WordCountApp(initialUris: List<Uri>) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) {
             WordCountForegroundService.start(context)
-            addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total -> progressText = if (total <= 0) null else "正在统计文件$name，已统计$done/$total" })
+            addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total -> progressText = if (total <= 0) null else (bgWarn() + "正在统计文件$name，已统计$done/$total") })
         }
     }
 
@@ -372,7 +441,7 @@ fun WordCountApp(initialUris: List<Uri>) {
     androidx.compose.runtime.LaunchedEffect(Unit) {
         if (initialUris.isNotEmpty()) {
             WordCountForegroundService.start(context)
-            addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, initialUris, onProgress = { name, done, total -> progressText = if (total <= 0) null else "正在统计文件$name，已统计$done/$total" })
+            addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, initialUris, onProgress = { name, done, total -> progressText = if (total <= 0) null else (bgWarn() + "正在统计文件$name，已统计$done/$total") })
         }
     }
 
@@ -385,7 +454,7 @@ fun WordCountApp(initialUris: List<Uri>) {
             if (uris != null && uris.isNotEmpty() && !busy) {
                 MainActivity.pendingUris = null // 消费掉
                 WordCountForegroundService.start(context)
-                addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total -> progressText = if (total <= 0) null else "正在统计文件$name，已统计$done/$total" })
+                addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total -> progressText = if (total <= 0) null else (bgWarn() + "正在统计文件$name，已统计$done/$total") })
             }
         }
     }

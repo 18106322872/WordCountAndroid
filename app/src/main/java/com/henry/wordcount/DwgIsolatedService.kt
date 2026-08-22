@@ -6,8 +6,10 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -15,6 +17,7 @@ import android.os.Message
 import android.os.Messenger
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import java.io.File
 
@@ -36,6 +39,9 @@ class DwgIsolatedService : Service() {
     // v1.9.12: 最后一位客户端解绑后，延迟 10s 自停。覆盖批次内文件间的快速重绑（间隔 < 10s），
     // 避免每次转换后 stopSelf 使 :dwgisolated 进程在切后台时失去前台优先级被 Android 冻结。
     private var idleStopRunnable: Runnable? = null
+
+    /** v1.9.19: 息屏后防 Doze 挂起 dwg2dxf native 调用。 */
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -77,6 +83,19 @@ class DwgIsolatedService : Service() {
     }
 
     private fun startForegroundCompat() {
+        // v1.9.19: 本进程也持 PARTIAL_WAKE_LOCK —— dwg2dxf 是 native 长任务，
+        // 息屏进 Doze 时会被挂起，导致"切后台不统计"。
+        if (wakeLock == null) {
+            try {
+                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WordCount:dwg2dxf")
+                wl.setReferenceCounted(false)
+                wl.acquire(60 * 60 * 1000L)
+                wakeLock = wl
+            } catch (e: Throwable) {
+                Log.w("DwgIsolated", "acquire wakelock failed: ${e.message}")
+            }
+        }
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val nm = getSystemService(NotificationManager::class.java)
@@ -92,11 +111,33 @@ class DwgIsolatedService : Service() {
                 .setOngoing(true)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .setCategory(NotificationCompat.CATEGORY_SERVICE)
+                .setSilent(true)
                 .build()
-            startForeground(NOTI_ID, noti)
+            // v1.9.19: targetSdk 34 必须显式传与 manifest 一致的 dataSync 类型，
+            // 否则抛异常 → 未履行 startForegroundService 的 5 秒契约 → 系统杀进程。
+            ServiceCompat.startForeground(
+                this,
+                NOTI_ID,
+                noti,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0
+            )
+            foregroundOk = true
         } catch (e: Throwable) {
-            Log.w("DwgIsolated", "startForeground 失败(忽略): ${e.message}")
+            // v1.9.19: 不能再"忽略"。startForegroundService 建立了 5 秒契约，
+            // startForeground 失败且不 stopSelf → 系统抛 ForegroundServiceDidNotStartInTimeException 杀进程。
+            // stopSelf 只解除契约；客户端已 BIND_AUTO_CREATE，实例仍存活可继续处理转换消息。
+            foregroundOk = false
+            lastError = "${e.javaClass.simpleName}: ${e.message}"
+            Log.w("DwgIsolated", "startForeground 失败 → stopSelf 解除契约: ${e.message}")
+            try { stopSelf() } catch (_: Throwable) {}
         }
+    }
+
+    override fun onDestroy() {
+        try { wakeLock?.let { if (it.isHeld) it.release() } } catch (_: Throwable) {}
+        wakeLock = null
+        super.onDestroy()
     }
 
     private inner class IncomingHandler : Handler(Looper.getMainLooper()) {
@@ -171,6 +212,10 @@ class DwgIsolatedService : Service() {
         const val KEY_PATH = "path"
         const val CHANNEL_ID = "wordcount_dwg_convert"
         const val NOTI_ID = 200
+
+        /** v1.9.19: 前台化诊断（本进程内可见，崩溃排查用）。 */
+        @Volatile var foregroundOk: Boolean = false
+        @Volatile var lastError: String? = null
 
         /** v1.9.18: 主进程显式停止 :dwgisolated（addFiles 结束后调用）。 */
         fun stopService(ctx: Context) {
