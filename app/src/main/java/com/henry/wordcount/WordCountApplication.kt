@@ -25,7 +25,7 @@ class WordCountApplication : Application() {
          * 协程即持续运行，切后台不取消（此前 ProcessLifecycleOwner.lifecycleScope 在
          * 部分 ROM 上随 App 进后台派发 ON_DESTROY 被取消 → 切后台不统计）。
          */
-        @Volatile lateinit var appScope: kotlinx.coroutines.CoroutineScope
+        lateinit var appScope: kotlinx.coroutines.CoroutineScope
     }
 
 
@@ -50,10 +50,8 @@ class WordCountApplication : Application() {
         // v1.5.13: :dwgisolated 进程只做 native dwg2pdf 转换，不初始化 Python（Chaquopy 在
         // 非主进程初始化会失败且浪费资源，其资源提取还可能干扰主进程）。
         // v1.9.20: 初始化常驻协程域（隔离进程不初始化 Python，但仍可用 scope；此处统一放隔离进程判断之后）
-        if (!::appScope.isInitialized) {
-            appScope = kotlinx.coroutines.CoroutineScope(
-                kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
-        }
+        appScope = kotlinx.coroutines.CoroutineScope(
+            kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
         if (isDwgIsolatedProcess()) {
             Log.d("WordCountApp", "跳过 Python 初始化（隔离进程）")
             return
