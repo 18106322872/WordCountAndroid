@@ -2346,7 +2346,14 @@ private fun addFiles(
         java.io.File(dir, "wc_results.jsonl").delete()
         java.io.File(dir, "wc_results.jsonl.tmp").delete()
     } catch (_: Throwable) {}
-    val sink: (FileEntry) -> Unit = { e -> if (entries.none { it.id == e.id }) entries.add(e) }
+    val sink: (FileEntry) -> Unit = { e ->
+        // v1.9.27: sink 在 IO 线程被调（recoverResults 走 appScope.launch(IO)），
+        // SnapshotStateList.add 必须在 Main 线程才触发 Compose UI 重组，
+        // 否则只更新状态值不刷 UI——这就是"log HEARTBEAT 在打、list 不动"的根因。
+        scope.launch(Dispatchers.Main) {
+            if (entries.none { it.id == e.id }) entries.add(e)
+        }
+    }
     currentEntriesSink = sink
     scope.launch(Dispatchers.Main) {
         busySet(true)
@@ -2365,7 +2372,7 @@ private fun addFiles(
             MainActivity.pendingUriNames.clear()
             processBatchToEntries(context, cf,
                 onProgress = { n, d, t -> scope.launch(Dispatchers.Main) { onProgress?.invoke(n, d, t) } },
-                emit = { e -> if (entries.none { it.id == e.id }) entries.add(e) },
+                emit = { e -> scope.launch(Dispatchers.Main) { if (entries.none { it.id == e.id }) entries.add(e) } },
                 onError = { msg -> scope.launch { snackbar.showSnackbar(msg) } })
             finalizeBatch(context, heartbeatJob, busySet, onProgress)
         }
