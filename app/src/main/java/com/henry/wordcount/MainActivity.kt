@@ -153,8 +153,15 @@ class MainActivity : ComponentActivity() {
             override fun onStart(owner: LifecycleOwner) {
                 logStatsLine(this@MainActivity, "ON_START", 0, 0)
                 // v1.9.25: 切回前台时恢复可能被冻结期间产出的统计结果（按 id 去重）。
-                val lst = currentEntriesSink ?: currentEntries
-                lst?.let { recoverResults(this@MainActivity, { e -> if (it.none { x -> x.id == e.id }) it.add(e) }) }
+                val sink = currentEntriesSink
+                if (sink != null) {
+                    recoverResults(this@MainActivity, sink)
+                } else {
+                    val list = currentEntries
+                    if (list != null) {
+                        recoverResults(this@MainActivity) { e -> if (list.none { x -> x.id == e.id }) list.add(e) }
+                    }
+                }
             }
             override fun onStop(owner: LifecycleOwner) {
                 logStatsLine(this@MainActivity, "ON_STOP", 0, 0)
@@ -2295,7 +2302,7 @@ private fun recoverResults(context: android.content.Context, sink: (FileEntry) -
                     } else {
                         val rr = if (o.has("rawResultJson") && !o.isNull("rawResultJson")) {
                             val s = o.getString("rawResultJson")
-                            if (s == "null") null else org.json.JSONObject(s).toMap()
+                            if (s == "null") null else jsonToMap(org.json.JSONObject(s))
                         } else null
                         FileEntry(id = id, displayName = displayName, cachePath = cachePath,
                             result = toFileResult(rr, cachePath), rawResult = rr)
@@ -3038,6 +3045,24 @@ private fun innerToMeta(r: InnerResult): Map<String, Any?> {
         "stats" to mapOf("words" to r.words, "fe" to r.fe, "nc" to r.nc, "chars" to r.chars),
         "meta" to mapOf("pages" to r.pages, "needs_pdf" to r.needsPdf)
     )
+}
+
+/** v1.9.25: JSONObject → Map<String, Any?>（rawResult 跨进程 JSON 往返的还原；JSONObject.NULL 视为 null）。 */
+private fun jsonToMap(o: org.json.JSONObject): Map<String, Any?> {
+    val m = HashMap<String, Any?>()
+    val keys = o.keys()
+    while (keys.hasNext()) {
+        val k = keys.next()
+        m[k] = jsonValue(o.opt(k))
+    }
+    return m
+}
+
+private fun jsonValue(v: Any?): Any? = when {
+    v == null || v == org.json.JSONObject.NULL -> null
+    v is org.json.JSONObject -> jsonToMap(v)
+    v is org.json.JSONArray -> (0 until v.length()).map { jsonValue(v.opt(it)) }
+    else -> v
 }
 
 private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
