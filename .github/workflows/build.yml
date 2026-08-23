@@ -118,7 +118,9 @@ jobs:
               --disable-bindings --disable-python --disable-perl --disable-docs \
               --enable-static --disable-shared --disable-werror || \
             ../configure --host=$HOST CFLAGS="-fPIC" CXXFLAGS="-fPIC" --prefix=/tmp/ldinst-$ABI --disable-docs --enable-static --disable-shared --disable-werror
-            make -j"$(nproc)"
+            # v1.9.23: 降并行度避免 GitHub runner OOM 杀掉 LibreDWG 并行编译
+            # （nproc=4 时 4 路 cc1plus 峰值内存 ~6GB，逼近 runner 7GB 上限被 kill -> .so 构建失败）。
+            make -j2
             # LibreDWG 静态库名在不同版本可能是 libdwg.a 或 libredwg.a，两者都搜
             LIBDWG=$(find . \( -name "libdwg.a" -o -name "libredwg.a" \) 2>/dev/null | head -1)
             echo "LIBDWG($ABI)=$LIBDWG"
