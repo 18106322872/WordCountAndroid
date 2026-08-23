@@ -80,7 +80,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.verticalScroll
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.withContext
@@ -144,6 +147,18 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         ensureBackgroundCapability()
+        // v1.9.22: 生命周期日志，写入 wc_stats.log；切后台时若心跳停止 → 进程/协程被系统杀掉
+        lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onStart(owner: LifecycleOwner) {
+                logStatsLine(this@MainActivity, "ON_START", 0, 0)
+            }
+            override fun onStop(owner: LifecycleOwner) {
+                logStatsLine(this@MainActivity, "ON_STOP", 0, 0)
+            }
+            override fun onDestroy(owner: LifecycleOwner) {
+                logStatsLine(this@MainActivity, "ON_DESTROY", 0, 0)
+            }
+        })
         val uris = extractUrisFromIntent(intent)
         setContent { WordCountApp(initialUris = uris) }
     }
@@ -2247,6 +2262,15 @@ private fun addFiles(
         scope.launch(Dispatchers.Main) {
             busySet(true)
             cachedFileCounter = 0  // 重置兜底命名计数器
+            // v1.9.22: 心跳日志，5秒一次写外部缓存 wc_stats.log；切后台后若进程/协程仍存活，
+            // 时间戳会持续推进；若被系统冻结/杀掉，心跳中断，便于和用户一起定位根因。
+            val heartbeatJob = scope.launch(Dispatchers.IO) {
+                while (isActive && busyRef()) {
+                    delay(5000L)
+                    logStatsLine(context, "HEARTBEAT", 0, 0)
+                }
+            }
+            logStatsLine(context, "BATCH_START files=${uris.size}", 0, 0)
             try {
                 val pyStartResult = runCatching { PythonEngine.start(context) }
                 Log.d("WordCount", "PythonEngine.start: ${if (pyStartResult.isSuccess) "OK" else "FAIL: ${pyStartResult.exceptionOrNull()?.message}"}")
@@ -2858,6 +2882,8 @@ private fun addFiles(
             Log.e("WordCount", "文件处理异常: ${e.javaClass.simpleName}: ${e.message}", e)
             scope.launch { snackbar.showSnackbar("处理出错：${e.message}") }
         } finally {
+            logStatsLine(context, "BATCH_END", 0, 0)
+            heartbeatJob.cancel()
             busySet(false)
             // v1.9.1: addFiles 为顶层函数，progressText 属 Composable 作用域，
             //   统计结束用 total<=0 语义通知调用方清除进度文本。

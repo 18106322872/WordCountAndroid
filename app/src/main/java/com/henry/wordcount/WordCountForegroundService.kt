@@ -96,6 +96,7 @@ class WordCountForegroundService : Service() {
                     .setPriority(NotificationCompat.PRIORITY_LOW)
                     .setCategory(NotificationCompat.CATEGORY_SERVICE)
                     .setSilent(true)
+                    .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
                     .build()
                 nm.notify(NOTI_ID, noti)
             } catch (e: Throwable) {
@@ -110,6 +111,7 @@ class WordCountForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        Log.d("WordCountFGS", "onCreate")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             try {
                 val nm = getSystemService(NotificationManager::class.java)
@@ -150,6 +152,7 @@ class WordCountForegroundService : Service() {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setSilent(true)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
         try {
             // targetSdk 34：必须传与 manifest foregroundServiceType 一致的类型，否则抛异常
@@ -175,10 +178,11 @@ class WordCountForegroundService : Service() {
             } catch (_: Throwable) {
             }
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     override fun onDestroy() {
+        Log.d("WordCountFGS", "onDestroy")
         try {
             wakeLock?.let { if (it.isHeld) it.release() }
         } catch (_: Throwable) {

@@ -124,8 +124,9 @@ object DwgProcessor {
                             val mergedAll = allItems.joinToString("\n")
                             val cleanedText = PdfOcrEngine.stripNoiseFarEast(mergedAll)
                             val cleanedItems = cleanedText.lines().map { it.trim() }.filter { it.isNotEmpty() }
-                            val co2 = if (cleanedItems.size != allItems.size)
-                                JSONObject(PythonEngine.countCadItems(context, cleanedItems)) else co
+                            // v1.9.22 修正：旧条件 cleanedItems.size!=allItems.size 只在整行被删除时重算；
+                            // stripNoiseFarEast 内部已按 fe 比例决定是否剔除 FarEast，结果应始终使用。
+                            val co2 = JSONObject(PythonEngine.countCadItems(context, cleanedItems))
                             val pyWords = co2.optInt("words", 0)
                             val pyFe = co2.optInt("fe", 0)
                             val pyNc = co2.optInt("nc", 0)
@@ -187,15 +188,18 @@ object DwgProcessor {
                     val merged = fbLines.joinToString("\n")
                     // FarEast 噪声剥离：与 Python 主路径一致。桌面纯英文图纸 fe=0；
                     // 真机误识别/全角数字/乱码解码的伪中文按 FarEast 占比 <15% 剔除后归零。
+                    // v1.9.22 修正：旧条件 cleanedLines.size<fbLines.size 只在整行被删除时才选 cleaned，
+                    // 但 strip 通常是字符级删除（整行仍非空），导致中文不归零。stripNoiseFarEast 内部
+                    // 已按 fe 比例做决策，结果可直接使用。
                     val cleaned = PdfOcrEngine.stripNoiseFarEast(merged)
-                    val cleanedLines = cleaned.lines().map { it.trim() }.filter { it.isNotEmpty() }
-                    val useText = if (cleanedLines.size < fbLines.size) cleaned else merged
-                    val (fbWords, fbFe, fbNc, fbChars) = countTextKotlin(useText)
+                    val (_, feBefore, _, charsBefore) = countTextKotlin(merged)
+                    val (fbWords, fbFe, fbNc, fbChars) = countTextKotlin(cleaned)
+                    diagnostics.append("strip=${feBefore}->${fbFe}/${charsBefore};")
                     if (fbWords > 0) {
                         val fbReason = "Kotlin组码兜底" + (if (diagnostics.isNotEmpty()) "·" + diagnostics.toString().take(60) else "")
                         val fbDiag = "FB:${diagnostics}"
                         Log.d("WordCount", "DWG Kotlin组码兜底 $dName: words=$fbWords fe=$fbFe nc=$fbNc chars=$fbChars")
-                        return DwgProcessResult(fbWords, fbFe, fbNc, fbChars, 1, fbReason, false, fbDiag, null, useText)
+                        return DwgProcessResult(fbWords, fbFe, fbNc, fbChars, 1, fbReason, false, fbDiag, null, cleaned)
                     }
                 }
                 diagnostics.append("fb_text_empty; ")
