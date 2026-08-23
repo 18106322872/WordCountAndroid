@@ -2278,18 +2278,19 @@ private var currentEntries: androidx.compose.runtime.snapshots.SnapshotStateList
 
 /**
  * 从 wc_results.jsonl 恢复已统计结果（在主进程冻结期间服务仍持续写入）。
- * 用 rename→读取→删除 避免与服务的并发追加竞争。返回是否见到 BATCH_END（本批完成）。
+ * v1.9.26: 改用纯增量读取 + 进程内 sink 去重；不再 rename+delete（跨进程竞争会丢数据）。
+ * CountingService 用 O_APPEND atomic 写入，本进程即使每 1.5s 轮询也不会读到半行。
+ * 返回是否见到 BATCH_END（本批完成）。
  */
 private fun recoverResults(context: android.content.Context, sink: (FileEntry) -> Unit): Boolean {
     return try {
         val dir = context.externalCacheDir ?: context.cacheDir ?: return false
         val f = java.io.File(dir, "wc_results.jsonl")
         if (!f.exists()) return false
-        val tmp = java.io.File(dir, "wc_results.jsonl.tmp")
-        if (!f.renameTo(tmp)) return false
         var sawEnd = false
-        try {
-            for (line in tmp.readLines()) {
+        java.io.BufferedReader(java.io.FileReader(f)).use { br ->
+            while (true) {
+                val line = br.readLine() ?: break
                 if (line.isBlank()) continue
                 try {
                     val o = org.json.JSONObject(line)
@@ -2310,8 +2311,6 @@ private fun recoverResults(context: android.content.Context, sink: (FileEntry) -
                     sink(entry)
                 } catch (_: Throwable) {}
             }
-        } finally {
-            tmp.delete()
         }
         sawEnd
     } catch (_: Throwable) { false }
@@ -2341,6 +2340,12 @@ private fun addFiles(
     onProgress: ((String, Int, Int) -> Unit)? = null
 ) {
     if (busyRef()) return
+    // v1.9.26: 清掉上轮 wc_results.jsonl，避免新旧批混合（旧批的 _arch 行会被本批误恢复）。
+    try {
+        val dir = context.externalCacheDir ?: context.cacheDir
+        java.io.File(dir, "wc_results.jsonl").delete()
+        java.io.File(dir, "wc_results.jsonl.tmp").delete()
+    } catch (_: Throwable) {}
     val sink: (FileEntry) -> Unit = { e -> if (entries.none { it.id == e.id }) entries.add(e) }
     currentEntriesSink = sink
     scope.launch(Dispatchers.Main) {

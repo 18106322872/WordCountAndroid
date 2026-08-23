@@ -160,10 +160,18 @@ class CountingService : Service() {
         }
     }
 
-    /** 把一条结果追加写入外部缓存 wc_results.jsonl（主进程轮询/恢复用）。 */
+    /** 把一条结果追加写入外部缓存 wc_results.jsonl（主进程轮询/恢复用）。
+     *  v1.9.26: 改为 append-mode atomic write + fsync；异常不再吞，显式写 wc_stats.log 错误行；
+     *  把每文件 stats 也同步写到 wc_stats.log 的 FILE_DONE 行（用户从单一日志即可对比电脑值）。 */
     private fun appendResult(entry: FileEntry) {
+        val dir = externalCacheDir ?: cacheDir
+        if (dir == null) {
+            Log.e("WordCountCS", "appendResult: cache dir null")
+            try { logStatsLine("APPEND_ERR ${entry.id} cache_dir_null") } catch (_: Throwable) {}
+            return
+        }
         try {
-            val dir = externalCacheDir ?: cacheDir
+            if (!dir.exists()) dir.mkdirs()
             val f = File(dir, "wc_results.jsonl")
             val rawJson = entry.rawResult?.let { JSONObject(it).toString() } ?: "null"
             val obj = JSONObject()
@@ -171,10 +179,22 @@ class CountingService : Service() {
             obj.put("displayName", entry.displayName)
             obj.put("cachePath", entry.cachePath)
             if (entry.error != null) obj.put("error", entry.error) else obj.put("rawResultJson", rawJson)
-            f.appendText(obj.toString() + "\n")
-            logStatsLine("FILE_DONE ${entry.id} ${entry.displayName}")
+            val line = obj.toString() + "\n"
+            // append-mode（O_APPEND）在 Linux/Android 上对 <PIPE_BUF(4096B) 写是 atomic 的，
+            // 不会与主进程并发读产生脏行。fsync 保证崩溃不丢。
+            FileOutputStream(f, true).use { fos ->
+                fos.write(line.toByteArray(Charsets.UTF_8))
+                try { fos.fd.sync() } catch (_: Throwable) {}
+            }
+            // 同步把统计数字写到 wc_stats.log 的 FILE_DONE 行（用户从单一日志即可对比电脑值）
+            val stats = (entry.rawResult?.get("stats") as? Map<*, *>)
+            val statsStr = if (stats != null) {
+                "w=${stats["words"]} fe=${stats["fe"]} nc=${stats["nc"]} c=${stats["chars"]}"
+            } else ""
+            logStatsLine("FILE_DONE ${entry.id} ${entry.displayName} $statsStr".trim())
         } catch (e: Throwable) {
-            Log.w("WordCountCS", "appendResult failed: ${e.message}")
+            Log.e("WordCountCS", "appendResult failed for ${entry.id}", e)
+            try { logStatsLine("APPEND_ERR ${entry.id} ${e.javaClass.simpleName} ${e.message}") } catch (_: Throwable) {}
         }
     }
 
