@@ -130,6 +130,14 @@
             android:name=".WordCountForegroundService"
             android:foregroundServiceType="dataSync"
             android:exported="false" />
+
+        <!-- v1.9.25: 独立前台统计进程。实际统计工作在这里跑，规避 Activity 主进程切后台被
+             系统冻结导致统计中断。持前台优先级 + 唤醒锁，结果写入外部缓存供主进程恢复。 -->
+        <service
+            android:name=".CountingService"
+            android:process=":countservice"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
     </application>
 
 </manifest>

@@ -152,6 +152,9 @@ class MainActivity : ComponentActivity() {
         lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStart(owner: LifecycleOwner) {
                 logStatsLine(this@MainActivity, "ON_START", 0, 0)
+                // v1.9.25: 切回前台时恢复可能被冻结期间产出的统计结果（按 id 去重）。
+                val lst = currentEntriesSink ?: currentEntries
+                lst?.let { recoverResults(this@MainActivity, { e -> if (it.none { x -> x.id == e.id }) it.add(e) }) }
             }
             override fun onStop(owner: LifecycleOwner) {
                 logStatsLine(this@MainActivity, "ON_STOP", 0, 0)
@@ -413,6 +416,7 @@ fun WordCountApp(initialUris: List<Uri>) {
     val snackbar = remember { SnackbarHostState() }
 
     val entries = remember { mutableStateListOf<FileEntry>() }
+    currentEntries = entries
     var busy by remember { mutableStateOf(false) }
     // v1.5.36: 用户为「统计不准」的 DWG 点选文字型 PDF 时，记录当前正在选 PDF 的条目 id
     var pdfPickEntryId by remember { mutableStateOf<String?>(null) }
@@ -2249,6 +2253,76 @@ private val DWG_EXTS = setOf("dwg")
 private val ARCHIVE_EXTS = setOf("zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz")
 private val TXT_EXTS = setOf("txt")
 
+// ════════════════════════════════════════════════════════════════════════════
+// v1.9.25: 后台统计架构重构
+//   根因：真机日志证明切后台后 Activity 主进程被系统冻结（心跳中断 10 分钟级），
+//   即使在主进程内启动前台服务 + WakeLock 仍无效。
+//   修复：把实际统计工作搬到独立前台进程 :countservice（CountingService），
+//   该进程唯一职责就是持前台优先级 + 唤醒锁地跑统计，不被 Activity 主进程冻结牵连。
+//   统计结果追加写入外部缓存 wc_results.jsonl；MainActivity 轮询该文件（切回前台时
+//   亦在 ON_START 恢复），按 id 去重并入 entries。主进程 inline 回退与独立进程服务
+//   共用同一份 processBatchToEntries 逻辑，统计口径完全一致。
+// ════════════════════════════════════════════════════════════════════════════
+
+/** 当前用于结果恢复的 sink（去重后写入 entries）。进程重建后由 ON_START 恢复时复用。 */
+private var currentEntriesSink: ((FileEntry) -> Unit)? = null
+/** 当前 entries 列表引用（进程重建后由 Composable 重新赋值），供 ON_START 恢复兜底。 */
+private var currentEntries: androidx.compose.runtime.snapshots.SnapshotStateList<FileEntry>? = null
+
+/**
+ * 从 wc_results.jsonl 恢复已统计结果（在主进程冻结期间服务仍持续写入）。
+ * 用 rename→读取→删除 避免与服务的并发追加竞争。返回是否见到 BATCH_END（本批完成）。
+ */
+private fun recoverResults(context: android.content.Context, sink: (FileEntry) -> Unit): Boolean {
+    return try {
+        val dir = context.externalCacheDir ?: context.cacheDir ?: return false
+        val f = java.io.File(dir, "wc_results.jsonl")
+        if (!f.exists()) return false
+        val tmp = java.io.File(dir, "wc_results.jsonl.tmp")
+        if (!f.renameTo(tmp)) return false
+        var sawEnd = false
+        try {
+            for (line in tmp.readLines()) {
+                if (line.isBlank()) continue
+                try {
+                    val o = org.json.JSONObject(line)
+                    if (o.optString("type", "") == "batch_end") { sawEnd = true; continue }
+                    val id = o.getString("id")
+                    val displayName = o.getString("displayName")
+                    val cachePath = o.getString("cachePath")
+                    val entry = if (o.has("error") && !o.isNull("error")) {
+                        FileEntry(id = id, displayName = displayName, cachePath = cachePath, error = o.getString("error"))
+                    } else {
+                        val rr = if (o.has("rawResultJson") && !o.isNull("rawResultJson")) {
+                            val s = o.getString("rawResultJson")
+                            if (s == "null") null else org.json.JSONObject(s).toMap()
+                        } else null
+                        FileEntry(id = id, displayName = displayName, cachePath = cachePath,
+                            result = toFileResult(rr, cachePath), rawResult = rr)
+                    }
+                    sink(entry)
+                } catch (_: Throwable) {}
+            }
+        } finally {
+            tmp.delete()
+        }
+        sawEnd
+    } catch (_: Throwable) { false }
+}
+
+private fun finalizeBatch(
+    context: android.content.Context,
+    heartbeatJob: kotlinx.coroutines.Job,
+    busySet: (Boolean) -> Unit,
+    onProgress: ((String, Int, Int) -> Unit)?
+) {
+    try { heartbeatJob.cancel() } catch (_: Throwable) {}
+    busySet(false)
+    onProgress?.invoke("", 0, 0)
+    WordCountForegroundService.stop(context)
+    DwgIsolatedRunner.stopIsolated(context)
+}
+
 private fun addFiles(
     context: android.content.Context,
     scope: kotlinx.coroutines.CoroutineScope,
@@ -2260,24 +2334,76 @@ private fun addFiles(
     onProgress: ((String, Int, Int) -> Unit)? = null
 ) {
     if (busyRef()) return
-        scope.launch(Dispatchers.Main) {
-            busySet(true)
-            cachedFileCounter = 0  // 重置兜底命名计数器
-            // v1.9.22: 心跳日志，5秒一次写外部缓存 wc_stats.log；切后台后若进程/协程仍存活，
-            // 时间戳会持续推进；若被系统冻结/杀掉，心跳中断，便于和用户一起定位根因。
-            val heartbeatJob = scope.launch(Dispatchers.IO) {
-                while (isActive && busyRef()) {
-                    delay(5000L)
-                    logStatsLine(context, "HEARTBEAT", 0, 0)
+    val sink: (FileEntry) -> Unit = { e -> if (entries.none { it.id == e.id }) entries.add(e) }
+    currentEntriesSink = sink
+    scope.launch(Dispatchers.Main) {
+        busySet(true)
+        cachedFileCounter = 0
+        val heartbeatJob = scope.launch(Dispatchers.IO) {
+            while (isActive && busyRef()) {
+                delay(5000L)
+                logStatsLine(context, "HEARTBEAT", 0, 0)
+            }
+        }
+        logStatsLine(context, "BATCH_START files=${uris.size}", 0, 0)
+
+        val runInline: suspend () -> Unit = {
+            try { PythonEngine.start(context) } catch (_: Throwable) {}
+            val cf = uris.map { copyUriToCache(context, it) }
+            MainActivity.pendingUriNames.clear()
+            processBatchToEntries(context, cf,
+                onProgress = { n, d, t -> scope.launch(Dispatchers.Main) { onProgress?.invoke(n, d, t) } },
+                emit = { e -> if (entries.none { it.id == e.id }) entries.add(e) },
+                onError = { msg -> scope.launch { snackbar.showSnackbar(msg) } })
+            finalizeBatch(context, heartbeatJob, busySet, onProgress)
+        }
+
+        try {
+            val cf = uris.map { copyUriToCache(context, it) }
+            MainActivity.pendingUriNames.clear()
+            val started = CountingService.startBatch(context, cf.map { it.file.absolutePath }, cf.map { it.displayName })
+            if (!started) {
+                Log.w("WordCount", "CountingService 启动失败，回退本进程 inline 统计")
+                runInline()
+            } else {
+                // 正常路径：结果由 CountingService 写入 wc_results.jsonl。
+                // 主进程轮询该文件恢复结果；看门狗兜底：30 分钟内未见到 BATCH_END 则强制收尾。
+                scope.launch {
+                    var done = false
+                    var elapsed = 0L
+                    while (isActive && !done && elapsed < 30 * 60 * 1000L) {
+                        delay(1500L)
+                        elapsed += 1500L
+                        if (recoverResults(context, sink)) done = true
+                    }
+                    if (done) {
+                        finalizeBatch(context, heartbeatJob, busySet, onProgress)
+                    } else {
+                        Log.w("WordCount", "统计看门狗超时，强制收尾并恢复已产出结果")
+                        recoverResults(context, sink)
+                        finalizeBatch(context, heartbeatJob, busySet, onProgress)
+                    }
                 }
             }
-            logStatsLine(context, "BATCH_START files=${uris.size}", 0, 0)
-            try {
+        } catch (e: Throwable) {
+            Log.e("WordCount", "addFiles 异常，回退 inline: ${e.message}", e)
+            try { runInline() } catch (_: Throwable) {}
+        }
+    }
+}
+
+// v1.9.25: 把原 addFiles 内联统计逻辑抽成独立挂起函数，供 MainActivity（inline 回退）
+// 与 CountingService（:countservice 独立前台进程）共用，确保两端统计口径一致。
+internal suspend fun processBatchToEntries(
+    context: android.content.Context,
+    cachedFiles: List<CachedFile>,
+    onProgress: (name: String, done: Int, total: Int) -> Unit,
+    emit: (FileEntry) -> Unit,
+    onError: (String) -> Unit
+) {
+    try {
                 val pyStartResult = runCatching { PythonEngine.start(context) }
                 Log.d("WordCount", "PythonEngine.start: ${if (pyStartResult.isSuccess) "OK" else "FAIL: ${pyStartResult.exceptionOrNull()?.message}"}")
-                val cachedFiles = uris.map { copyUriToCache(context, it) }
-                // 文件名 hint 已使用，清空避免影响后续通过 SAF 选择的文件
-                MainActivity.pendingUriNames.clear()
                 val files = cachedFiles.map { it.file }
             val imageFiles = mutableListOf<CachedFile>()
             val oldOfficeFiles = mutableListOf<CachedFile>()
@@ -2313,7 +2439,7 @@ private fun addFiles(
                     try {
                         // v1.9.3: onProgress 在 IO 线程被 invoke，更新 Compose State 需切到 Main 线程
                         val res = ArchiveEngine.extract(f, context.cacheDir, context, onProgress = { done, total ->
-                            scope.launch(Dispatchers.Main) { onProgress?.invoke(dName, done, total) }
+                            onProgress(dName, done, total)
                         })
                         if (res == null) {
                             val ext = f.extension.lowercase()
@@ -2325,7 +2451,7 @@ private fun addFiles(
                                 "压缩包解析失败（文件可能损坏或密码保护）"
                         } else
                             "暂不支持此格式（.$ext）。支持：ZIP / RAR4 / 7Z / TAR / GZ"
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = dName, cachePath = f.absolutePath,
+                            emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = dName, cachePath = f.absolutePath,
                                 error = errMsg))
                         } else {
                             val resMap = mapOf(
@@ -2336,11 +2462,11 @@ private fun addFiles(
                                 "pages" to res.inner.sumOf { it.pages ?: estimatePages(it.chars) }
                             )
                             val fr = toFileResult(resMap, f.absolutePath)
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                            emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                         }
                     } catch (e: Throwable) {
                         Log.w("WordCount", "压缩包解析失败 ${f.name}: ${e.message}")
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = dName, cachePath = f.absolutePath, error = "压缩包解析失败（${e.message}）"))
+                        emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = dName, cachePath = f.absolutePath, error = "压缩包解析失败（${e.message}）"))
                     }
                 }
 
@@ -2351,7 +2477,7 @@ private fun addFiles(
                     try {
                         val res = OoXmlEngine.extract(f)
                         if (res == null) {
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = dName, cachePath = f.absolutePath, error = "无法解析此 OOXML 文件（可能损坏或非标准格式）"))
+                            emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = dName, cachePath = f.absolutePath, error = "无法解析此 OOXML 文件（可能损坏或非标准格式）"))
                         } else {
                             val stats = countTextKotlin(res.text)
                             // v1.3.89 metaWords 安全网（修复 VML 文本框双写导致翻倍的反案例）：
@@ -2434,11 +2560,11 @@ private fun addFiles(
                                 val ext = f.extension.lowercase()
                                 "${res.internalTitle}.${if (ext.isNotBlank()) ext else "file"}"
                             } else dName
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = finalDisplayName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                            emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = finalDisplayName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                         }
                     } catch (e: Throwable) {
                         Log.w("WordCount", "OOXML 解析失败 ${f.name}: ${e.message}")
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = dName, cachePath = f.absolutePath, error = "OOXML 解析失败（${e.message}）"))
+                        emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = dName, cachePath = f.absolutePath, error = "OOXML 解析失败（${e.message}）"))
                     }
                 }
 
@@ -2585,7 +2711,7 @@ private fun addFiles(
                                 "ocrNote" to "文本提取充分，未触发OCR"
                             )
                             val fr = toFileResult(resMap, f.absolutePath)
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_ok", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                            emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_ok", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                         } else {
                             // ★ 文本太少 → 尝试 OCR
                             // v1.3.81: 对"glyph-ID编码垃圾"(ktLooksLikeCidGarbage)使用PRINT模式+2x分辨率渲染
@@ -2598,7 +2724,7 @@ private fun addFiles(
                             //   的 PRINT 高分辨率(这两类确需更清晰渲染)。
                             val ocrForPrintMode = looksLikeGarbage || isFailedChinesePdf
                             val ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = ocrForPrintMode, onProgress = { done, total ->
-                                scope.launch(Dispatchers.Main) { onProgress?.invoke(dName, done, total) }
+                                onProgress(dName, done, total)
                             })
 
                             if (ocrRes != null) {
@@ -2636,7 +2762,7 @@ private fun addFiles(
                                     "ocrNote" to PdfOcrEngine.buildOcrNote(ocrRes.pages, mergedTag)
                                 )
                                 val fr = toFileResult(resMap, f.absolutePath)
-                                entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_ocr", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                                emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_ocr", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                             } else {
                                 // 全部失败 → 显示最佳可用结果或错误
                                 if (bestChars > 0) {
@@ -2652,7 +2778,7 @@ private fun addFiles(
                                         "ocrNote" to "⚠️ OCR未成功，已用文本层降级(详见诊断)"
                                     )
                                     val fr = toFileResult(resMap, f.absolutePath)
-                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_fallback", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                                    emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_fallback", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                                 } else {
                                     // 完全没有文本 → 报错
                                     var pdfPageCount = if (bestPages > 1) bestPages else 1
@@ -2680,13 +2806,13 @@ private fun addFiles(
                                             "此 PDF 部分页面渲染异常（$pdfPageCount 页），OCR 结果不完整。"
                                         else -> "无法从该 PDF 提取文字（$pdfPageCount 页，可能为纯图片、加密或损坏文件）。${if(detail.isNotBlank()) "\n原因: $detail" else ""}"
                                     }
-                                    entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_err", displayName = dName, cachePath = f.absolutePath, error = errMsg))
+                                    emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_err", displayName = dName, cachePath = f.absolutePath, error = errMsg))
                                 }
                             }
                         }
                     } catch (e: Throwable) {
                         Log.w("WordCount", "PDF 解析失败 ${f.name}: ${e.message}")
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = dName, cachePath = f.absolutePath, error = "PDF 解析失败（${e.message}）"))
+                        emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = dName, cachePath = f.absolutePath, error = "PDF 解析失败（${e.message}）"))
                     }
                 }
 
@@ -2731,7 +2857,7 @@ private fun addFiles(
                             pptImages = pptRes.imageCount
                         }
                         if (text.isBlank()) {
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = dName, cachePath = f.absolutePath, error = "此老格式文件内容为空或无法读取"))
+                            emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = dName, cachePath = f.absolutePath, error = "此老格式文件内容为空或无法读取"))
                         } else {
                             val stats = countTextKotlin(text)
                             val extDot = ".$extLower"
@@ -2772,11 +2898,11 @@ private fun addFiles(
                                 resMap["pages_reason"] = "doc_summary_info"
                             }
                             val fr = toFileResult(resMap.toMap(), f.absolutePath)
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap.toMap()))
+                            emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap.toMap()))
                         }
                     } catch (e: Throwable) {
                         Log.w("WordCount", "老格式解析失败 ${f.name}: ${e.message}")
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = dName, cachePath = f.absolutePath, error = "无法解析此老格式（${e.message}），建议另存为 .docx/.xlsx/.pptx"))
+                        emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = dName, cachePath = f.absolutePath, error = "无法解析此老格式（${e.message}），建议另存为 .docx/.xlsx/.pptx"))
                     }
                 }
 
@@ -2808,10 +2934,10 @@ private fun addFiles(
                             "diag" to res.diag
                         )
                         val fr = toFileResult(resMap, f.absolutePath)
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                        emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                     } catch (e: Throwable) {
                         Log.w("WordCount", "DWG 扫描失败 ${f.name}: ${e.message}")
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（${e.message}）"))
+                        emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（${e.message}）"))
                     }
                 }
 
@@ -2822,7 +2948,7 @@ private fun addFiles(
                     try {
                         val text = f.readText(Charsets.UTF_8)
                         if (text.isBlank()) {
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_t", displayName = dName, cachePath = f.absolutePath,
+                            emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_t", displayName = dName, cachePath = f.absolutePath,
                                 error = "文件内容为空"))
                         } else {
                             val stats = countTextKotlin(text)
@@ -2838,11 +2964,11 @@ private fun addFiles(
                                 "meta" to emptyMap<String, Any?>()
                             )
                             val fr = toFileResult(resMap, f.absolutePath)
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_t", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                            emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_t", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                         }
                     } catch (e: Throwable) {
                         Log.w("WordCount", "TXT 读取失败 ${f.name}: ${e.javaClass.simpleName}: ${e.message}")
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_t", displayName = dName, cachePath = f.absolutePath,
+                        emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_t", displayName = dName, cachePath = f.absolutePath,
                             error = "读取失败（${e.message}）"))
                     }
                 }
@@ -2857,7 +2983,7 @@ private fun addFiles(
                                 "图片识别失败（模型未就绪或设备不支持）"
                             else
                                 "未识别到文字（纯图/手写/模糊不清）"
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = dName, cachePath = f.absolutePath,
+                            emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = dName, cachePath = f.absolutePath,
                                 error = err))
                         } else {
                             val stats = countTextKotlin(text)
@@ -2867,35 +2993,25 @@ private fun addFiles(
                                 "meta" to emptyMap<String, Any?>()
                             )
                             val fr = toFileResult(resMap, f.absolutePath)
-                            entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                            emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                         }
                     } catch (e: OutOfMemoryError) {
                         Runtime.getRuntime().gc()
                         Log.w("WordCount", "图片过大 OOM ${f.name}")
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = dName, cachePath = f.absolutePath, error = "图片过大，内存不足"))
+                        emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = dName, cachePath = f.absolutePath, error = "图片过大，内存不足"))
                     } catch (e: Throwable) {
                         Log.w("WordCount", "OCR 失败 ${f.name}: ${e.javaClass.simpleName}: ${e.message}")
-                        entries.add(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = dName, cachePath = f.absolutePath, error = "图片识别失败（${e.message}）"))
+                        emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = dName, cachePath = f.absolutePath, error = "图片识别失败（${e.message}）"))
                     }
                 }
             }
         } catch (e: Throwable) {
-            Log.e("WordCount", "文件处理异常: ${e.javaClass.simpleName}: ${e.message}", e)
-            scope.launch { snackbar.showSnackbar("处理出错：${e.message}") }
-        } finally {
-            logStatsLine(context, "BATCH_END", 0, 0)
-            heartbeatJob.cancel()
-            busySet(false)
-            // v1.9.1: addFiles 为顶层函数，progressText 属 Composable 作用域，
-            //   统计结束用 total<=0 语义通知调用方清除进度文本。
-            onProgress?.invoke("", 0, 0)
-            // v1.9.10: 关闭前台占位 service，让 app 进程退出前台优先级。
-            WordCountForegroundService.stop(context)
-            // v1.9.18: 显式停止 :dwgisolated（统计期间持续前台存活，避免切后台被 Android 14+ 冻结/禁重启）。
-            DwgIsolatedRunner.stopIsolated(context)
-        }
+    } catch (e: Throwable) {
+        Log.e("WordCount", "文件处理异常: ${e.javaClass.simpleName}: ${e.message}", e)
+        onError("处理出错：${e.message}")
     }
 }
+
 
 /** 文本类格式（无明确页概念）按字符量估算页数。
  *  v1.1.10 改进：中文文档平均 ~750 字符/页（适应大字号/大行距/表格多的场景）。

@@ -62,11 +62,11 @@ android {
 
 
 
-        versionCode 274
+        versionCode 280
 
 
 
-        versionName '1.9.24'
+        versionName '1.9.25'
 
 
 
