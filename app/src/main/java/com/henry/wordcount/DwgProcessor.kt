@@ -151,16 +151,51 @@ object DwgProcessor {
 
         // v1.9.16 兜底：只要 DXF 文件存在且完整，无论 Python 主路径是否成功/返回空，
         // 都用 Kotlin 简易组码抽取再试一次，避免 service/后台/Python 异常导致直接 0 字。
+        // v1.9.21 关键修复：此前 OLE 合并 + FarEast 噪声剥离只在内层 Python 成功分支
+        // (if pySuccessWithText) 执行。当 cad_core 在真机抛异常/返回空而走本兜底分支时，
+        // 既不归零中文、也不计入 OLE 嵌入文字 —— 表现为"字数不变、中文不归零"且 v1.9.20
+        // 的改动看似零效果。现统一在本分支也执行 OLE 合并 + strip，与桌面口径对齐。
         if (File(pyDxfPath).exists() && isDxfComplete(pyDxfPath)) {
             try {
+                val fbLines = ArrayList<String>()
                 val fallbackText = extractDxfTextsSimple(pyDxfPath)
                 if (fallbackText.isNotBlank()) {
-                    val (fbWords, fbFe, fbNc, fbChars) = countTextKotlin(fallbackText)
+                    for (ln in fallbackText.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) }
+                }
+                // OLE 合并（office 嵌入文字走 Python；位图 OLE 兜底走 Kotlin ML Kit OCR），
+                // 与 Python 主路径完全一致。
+                try {
+                    val oleJson = PythonEngine.extractOleOffice(context, pyDxfPath)
+                    val oo = JSONObject(oleJson)
+                    val oleErr = if (oo.has("error") && !oo.isNull("error")) oo.optString("error") else null
+                    if (!oleErr.isNullOrBlank()) diagnostics.append("fb_ole_err=${oleErr.take(60)}; ")
+                    val joined = oo.optString("joined", "")
+                    if (joined.isNotBlank()) {
+                        for (ln in joined.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) }
+                    }
+                } catch (e: Throwable) { diagnostics.append("fb_ole_ex=${e.javaClass.simpleName}:${e.message}; ") }
+                try {
+                    val oleRes = DwgOleExtractor.extractOleText(pyDxfPath)
+                    if (oleRes.text.isNotBlank()) { for (ln in oleRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) } }
+                } catch (_: Throwable) {}
+                try {
+                    val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath)
+                    if (oleRes2.text.isNotBlank()) { for (ln in oleRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) } }
+                } catch (_: Throwable) {}
+
+                if (fbLines.isNotEmpty()) {
+                    val merged = fbLines.joinToString("\n")
+                    // FarEast 噪声剥离：与 Python 主路径一致。桌面纯英文图纸 fe=0；
+                    // 真机误识别/全角数字/乱码解码的伪中文按 FarEast 占比 <15% 剔除后归零。
+                    val cleaned = PdfOcrEngine.stripNoiseFarEast(merged)
+                    val cleanedLines = cleaned.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                    val useText = if (cleanedLines.size < fbLines.size) cleaned else merged
+                    val (fbWords, fbFe, fbNc, fbChars) = countTextKotlin(useText)
                     if (fbWords > 0) {
                         val fbReason = "Kotlin组码兜底" + (if (diagnostics.isNotEmpty()) "·" + diagnostics.toString().take(60) else "")
                         val fbDiag = "FB:${diagnostics}"
                         Log.d("WordCount", "DWG Kotlin组码兜底 $dName: words=$fbWords fe=$fbFe nc=$fbNc chars=$fbChars")
-                        return DwgProcessResult(fbWords, fbFe, fbNc, fbChars, 1, fbReason, false, fbDiag, null, fallbackText)
+                        return DwgProcessResult(fbWords, fbFe, fbNc, fbChars, 1, fbReason, false, fbDiag, null, useText)
                     }
                 }
                 diagnostics.append("fb_text_empty; ")
