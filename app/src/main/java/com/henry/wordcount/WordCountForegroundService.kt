@@ -146,8 +146,8 @@ class WordCountForegroundService : Service() {
         // ---- ③ 前台化：显式传 type，失败则主动 stopSelf 解除 5 秒契约，绝不静默吞 ----
         val noti: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
-            .setContentTitle("WordCount 正在统计")
-            .setContentText("后台继续进行中，请勿清理本通知")
+            .setContentTitle("WordCount 统计服务")
+            .setContentText("后台统计运行中，请勿清理本通知")
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
