@@ -2,7 +2,15 @@ plugins {
 
 
 
+
+
+
+
     id 'com.android.application'
+
+
+
+
 
 
 
@@ -10,11 +18,27 @@ plugins {
 
 
 
+
+
+
+
     id 'com.chaquo.python'
 
 
 
+
+
+
+
 }
+
+
+
+
+
+
+
+
 
 
 
@@ -26,7 +50,15 @@ android {
 
 
 
+
+
+
+
     namespace 'com.henry.wordcount'
+
+
+
+
 
 
 
@@ -38,7 +70,19 @@ android {
 
 
 
+
+
+
+
+
+
+
+
     defaultConfig {
+
+
+
+
 
 
 
@@ -46,7 +90,15 @@ android {
 
 
 
+
+
+
+
         applicationId 'com.henry.wordcount2'
+
+
+
+
 
 
 
@@ -54,7 +106,15 @@ android {
 
 
 
+
+
+
+
         minSdk 26
+
+
+
+
 
 
 
@@ -62,11 +122,27 @@ android {
 
 
 
-        versionCode 287
 
 
 
-        versionName '1.9.31'
+
+        versionCode 288
+
+
+
+
+
+
+
+        versionName '1.9.32'
+
+
+
+
+
+
+
+
 
 
 
@@ -78,7 +154,15 @@ android {
 
 
 
+
+
+
+
         ndk {
+
+
+
+
 
 
 
@@ -86,7 +170,19 @@ android {
 
 
 
+
+
+
+
         }
+
+
+
+
+
+
+
+
 
 
 
@@ -98,7 +194,15 @@ android {
 
 
 
+
+
+
+
         // 注：Chaquopy 17 的 DSL 要求 defaultConfig 嵌套层（已验证：删除会导致 pip() 方法找不到）
+
+
+
+
 
 
 
@@ -106,7 +210,15 @@ android {
 
 
 
+
+
+
+
             defaultConfig {
+
+
+
+
 
 
 
@@ -114,7 +226,15 @@ android {
 
 
 
+
+
+
+
                 pip {
+
+
+
+
 
 
 
@@ -122,7 +242,15 @@ android {
 
 
 
+
+
+
+
                     // 注：已移除 python-docx / openpyxl / python-pptx（Android 端 docx/xlsx/pptx 全部由 Kotlin OoXmlEngine 处理）
+
+
+
+
 
 
 
@@ -130,15 +258,31 @@ android {
 
 
 
+
+
+
+
                     install "olefile"
+
+
+
+
 
 
 
                     // v1.9.11: DWG 统计对齐桌面版——引入 ezdxf（结构化 DXF 解析，与桌面 wordcount.py 同源）。
 
+
+
                     //   ezdxf 硬依赖 lxml（Chaquopy 仓库有 cp310 Android wheel，5.3.0）+ numpy（1.26.2）+ fonttools(纯Py)。
 
+
+
                     install "lxml"
+
+
+
+
 
 
 
@@ -146,7 +290,15 @@ android {
 
 
 
+
+
+
+
                     install "ezdxf==1.4.4"
+
+
+
+
 
 
 
@@ -154,7 +306,15 @@ android {
 
 
 
+
+
+
+
                 }
+
+
+
+
 
 
 
@@ -162,7 +322,19 @@ android {
 
 
 
+
+
+
+
         }
+
+
+
+
+
+
+
+
 
 
 
@@ -174,7 +346,19 @@ android {
 
 
 
+
+
+
+
     }
+
+
+
+
+
+
+
+
 
 
 
@@ -186,7 +370,15 @@ android {
 
 
 
+
+
+
+
     packaging {
+
+
+
+
 
 
 
@@ -194,7 +386,15 @@ android {
 
 
 
+
+
+
+
             useLegacyPackaging true
+
+
+
+
 
 
 
@@ -202,7 +402,15 @@ android {
 
 
 
+
+
+
+
             // mergeDebugNativeLibs 因重复文件失败。libc++_shared.so 向后兼容，pickFirst 取其一即可。
+
+
+
+
 
 
 
@@ -210,7 +418,15 @@ android {
 
 
 
+
+
+
+
         }
+
+
+
+
 
 
 
@@ -218,7 +434,15 @@ android {
 
 
 
+
+
+
+
         resources {
+
+
+
+
 
 
 
@@ -226,7 +450,15 @@ android {
 
 
 
+
+
+
+
                 'META-INF/DEPENDENCIES',
+
+
+
+
 
 
 
@@ -234,7 +466,15 @@ android {
 
 
 
+
+
+
+
                 'META-INF/LICENSE.txt',
+
+
+
+
 
 
 
@@ -242,7 +482,15 @@ android {
 
 
 
+
+
+
+
                 'META-INF/NOTICE.txt',
+
+
+
+
 
 
 
@@ -250,7 +498,15 @@ android {
 
 
 
+
+
+
+
                 'META-INF/versions/**',
+
+
+
+
 
 
 
@@ -258,7 +514,15 @@ android {
 
 
 
+
+
+
+
                 'META-INF/*.SF',
+
+
+
+
 
 
 
@@ -266,7 +530,15 @@ android {
 
 
 
+
+
+
+
                 'META-INF/*.EC'
+
+
+
+
 
 
 
@@ -274,11 +546,27 @@ android {
 
 
 
+
+
+
+
         }
 
 
 
+
+
+
+
     }
+
+
+
+
+
+
+
+
 
 
 
@@ -290,11 +578,23 @@ android {
 
 
 
+
+
+
+
         release {
 
 
 
+
+
+
+
             minifyEnabled false
+
+
+
+
 
 
 
@@ -302,7 +602,15 @@ android {
 
 
 
+
+
+
+
         }
+
+
+
+
 
 
 
@@ -310,7 +618,15 @@ android {
 
 
 
+
+
+
+
             minifyEnabled false
+
+
+
+
 
 
 
@@ -318,7 +634,19 @@ android {
 
 
 
+
+
+
+
     }
+
+
+
+
+
+
+
+
 
 
 
@@ -330,7 +658,15 @@ android {
 
 
 
+
+
+
+
         sourceCompatibility JavaVersion.VERSION_17
+
+
+
+
 
 
 
@@ -338,7 +674,15 @@ android {
 
 
 
+
+
+
+
     }
+
+
+
+
 
 
 
@@ -346,11 +690,23 @@ android {
 
 
 
+
+
+
+
         jvmTarget = '17'
 
 
 
+
+
+
+
     }
+
+
+
+
 
 
 
@@ -358,11 +714,23 @@ android {
 
 
 
+
+
+
+
         compose true
 
 
 
+
+
+
+
     }
+
+
+
+
 
 
 
@@ -370,7 +738,15 @@ android {
 
 
 
+
+
+
+
         kotlinCompilerExtensionVersion '1.5.10'
+
+
+
+
 
 
 
@@ -378,7 +754,19 @@ android {
 
 
 
+
+
+
+
 }
+
+
+
+
+
+
+
+
 
 
 
@@ -390,7 +778,15 @@ dependencies {
 
 
 
+
+
+
+
     def composeBom = platform('androidx.compose:compose-bom:2024.06.00')
+
+
+
+
 
 
 
@@ -398,7 +794,15 @@ dependencies {
 
 
 
+
+
+
+
     implementation 'androidx.compose.ui:ui'
+
+
+
+
 
 
 
@@ -406,7 +810,15 @@ dependencies {
 
 
 
+
+
+
+
     implementation 'androidx.compose.material3:material3'
+
+
+
+
 
 
 
@@ -414,17 +826,35 @@ dependencies {
 
 
 
+
+
+
+
     implementation 'androidx.activity:activity-compose:1.9.0'
 
+
+
     // v1.9.19: 显式声明 core，保证 ServiceCompat.startForeground(service,id,noti,type) 重载可用
+
+
 
     implementation 'androidx.core:core-ktx:1.13.1'
 
 
 
+
+
+
+
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.0'
 
+
+
     implementation 'androidx.lifecycle:lifecycle-process:2.8.0'
+
+
+
+
 
 
 
@@ -432,7 +862,15 @@ dependencies {
 
 
 
+
+
+
+
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
+
+
+
+
 
 
 
@@ -440,7 +878,15 @@ dependencies {
 
 
 
+
+
+
+
     // Manifest 层主题(Theme.Material3.DayNight.NoActionBar / colorSurface attr) 由 MDC 提供；
+
+
+
+
 
 
 
@@ -448,7 +894,15 @@ dependencies {
 
 
 
+
+
+
+
     implementation 'com.google.android.material:material:1.12.0'
+
+
+
+
 
 
 
@@ -456,7 +910,15 @@ dependencies {
 
 
 
+
+
+
+
     // 注意：不要再加 com.google.mlkit:text-recognition:16.0.0（Latin 版），该版本已改为 Play Services
+
+
+
+
 
 
 
@@ -464,7 +926,15 @@ dependencies {
 
 
 
+
+
+
+
     implementation 'com.google.mlkit:text-recognition-chinese:16.0.0'
+
+
+
+
 
 
 
@@ -472,7 +942,15 @@ dependencies {
 
 
 
+
+
+
+
     // 与桌面 RapidOCR 同宗（均为 PaddleOCR 引擎），是真正逼近桌面识别率的移动端 OCR，取代原 Tesseract 占位。
+
+
+
+
 
 
 
@@ -480,7 +958,15 @@ dependencies {
 
 
 
+
+
+
+
     implementation 'com.github.equationl.paddleocr4android:paddleocr4android:v1.3.0'
+
+
+
+
 
 
 
@@ -488,7 +974,15 @@ dependencies {
 
 
 
+
+
+
+
     //   系统 PdfRenderer/Pdfium 不支持这两种格式，会导致扫描件页面渲染为空白、OCR 认不出字）。
+
+
+
+
 
 
 
@@ -496,7 +990,15 @@ dependencies {
 
 
 
+
+
+
+
     implementation('com.github.barteksc:pdfium-android:1.9.0') {
+
+
+
+
 
 
 
@@ -504,7 +1006,15 @@ dependencies {
 
 
 
+
+
+
+
     }
+
+
+
+
 
 
 
@@ -512,7 +1022,15 @@ dependencies {
 
 
 
+
+
+
+
     // 仅用 poi + poi-scratchpad（HSSF/HWPF/HSLF），不引入 poi-ooxml，避免安卓缺 javax.xml.stream 的坑
+
+
+
+
 
 
 
@@ -520,7 +1038,15 @@ dependencies {
 
 
 
+
+
+
+
     implementation 'org.apache.poi:poi-scratchpad:5.2.5'
+
+
+
+
 
 
 
@@ -528,7 +1054,15 @@ dependencies {
 
 
 
+
+
+
+
     // v1.0.14 当前策略：DOCX/XLSX/PPTX 仍走 Python（但其他格式已全部纯 Java/Kotlin，
+
+
+
+
 
 
 
@@ -536,7 +1070,15 @@ dependencies {
 
 
 
+
+
+
+
     // 后续版本解决 StAX 问题后再切换为纯 Java
+
+
+
+
 
 
 
@@ -544,7 +1086,15 @@ dependencies {
 
 
 
+
+
+
+
     // implementation 'org.apache.poi:poi-ooxml-lite:5.2.5'
+
+
+
+
 
 
 
@@ -552,7 +1102,15 @@ dependencies {
 
 
 
+
+
+
+
     // PDF 文本提取：暂用轻量方案（v1.0.14 先移除 PdfBox，因其在 Android 有 java.awt 编译依赖）
+
+
+
+
 
 
 
@@ -560,7 +1118,15 @@ dependencies {
 
 
 
+
+
+
+
     // 当前 PDF 格式归入「其他」分类，由 Python/Chaqopy 作为唯一降级方案处理
+
+
+
+
 
 
 
@@ -568,7 +1134,15 @@ dependencies {
 
 
 
+
+
+
+
     implementation 'org.apache.commons:commons-compress:1.26.1'
+
+
+
+
 
 
 
@@ -576,7 +1150,15 @@ dependencies {
 
 
 
+
+
+
+
     // 注意：Maven Central 上实际版本号带 'v' 前缀：v2.0.3
+
+
+
+
 
 
 
@@ -584,7 +1166,15 @@ dependencies {
 
 
 
+
+
+
+
     implementation 'org.apache.commons:commons-math3:3.6.1'
+
+
+
+
 
 
 
@@ -596,7 +1186,19 @@ dependencies {
 
 
 
+
+
+
+
+
+
+
+
 // PaddleOCR 模型(cls/det/rec .nb, PP-OCRv4)由 CI 下载进 app/src/main/assets/models/ch_PP-OCRv4/，随 APK 内置。
+
+
+
+
 
 
 
