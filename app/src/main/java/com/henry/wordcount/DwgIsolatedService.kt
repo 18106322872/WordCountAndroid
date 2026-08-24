@@ -4,12 +4,9 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
-import android.content.Context
 import android.content.Intent
-import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Bundle
-import android.os.PowerManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -17,7 +14,6 @@ import android.os.Message
 import android.os.Messenger
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import java.io.File
 
@@ -40,15 +36,10 @@ class DwgIsolatedService : Service() {
     // 避免每次转换后 stopSelf 使 :dwgisolated 进程在切后台时失去前台优先级被 Android 冻结。
     private var idleStopRunnable: Runnable? = null
 
-    /** v1.9.19: 息屏后防 Doze 挂起 dwg2dxf native 调用。 */
-    private var wakeLock: PowerManager.WakeLock? = null
-
     override fun onCreate() {
         super.onCreate()
         // 注意：本进程不初始化 Python（Application 已跳过）。只加载 native 库。
         messenger = Messenger(IncomingHandler())
-        // v1.9.18: 任何创建路径都立即前台化，确保 :dwgisolated 不被 Android 14+ 冻结。
-        startForegroundCompat()
         Log.d("DwgIsolated", "isolated service created (pid=${android.os.Process.myPid()})")
     }
 
@@ -65,11 +56,9 @@ class DwgIsolatedService : Service() {
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
-        // v1.9.18: 不再用 10s 短空闲自停——统计批次内主进程 Python 抽取常 >10s，
-        // 短自停会让 :dwgisolated 在切后台后被 Android 14+ 禁止前台重启→"切后台不统计"。
-        // 改为长空闲(10min)安全网；正常由 DwgIsolatedRunner.stopIsolated 在 addFiles finally 显式停止。
+        // 最后一位客户端解绑 → 延迟自停；若 10s 内重绑（下个文件转换）则取消
         idleStopRunnable = Runnable { try { stopSelf() } catch (_: Throwable) {} }
-        mainHandler.postDelayed(idleStopRunnable!!, 600_000L)
+        mainHandler.postDelayed(idleStopRunnable!!, 10_000L)
         return true
     }
 
@@ -83,19 +72,6 @@ class DwgIsolatedService : Service() {
     }
 
     private fun startForegroundCompat() {
-        // v1.9.19: 本进程也持 PARTIAL_WAKE_LOCK —— dwg2dxf 是 native 长任务，
-        // 息屏进 Doze 时会被挂起，导致"切后台不统计"。
-        if (wakeLock == null) {
-            try {
-                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-                val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WordCount:dwg2dxf")
-                wl.setReferenceCounted(false)
-                wl.acquire(60 * 60 * 1000L)
-                wakeLock = wl
-            } catch (e: Throwable) {
-                Log.w("DwgIsolated", "acquire wakelock failed: ${e.message}")
-            }
-        }
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val nm = getSystemService(NotificationManager::class.java)
@@ -111,33 +87,11 @@ class DwgIsolatedService : Service() {
                 .setOngoing(true)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .setCategory(NotificationCompat.CATEGORY_SERVICE)
-                .setSilent(true)
                 .build()
-            // v1.9.19: targetSdk 34 必须显式传与 manifest 一致的 dataSync 类型，
-            // 否则抛异常 → 未履行 startForegroundService 的 5 秒契约 → 系统杀进程。
-            ServiceCompat.startForeground(
-                this,
-                NOTI_ID,
-                noti,
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0
-            )
-            foregroundOk = true
+            startForeground(NOTI_ID, noti)
         } catch (e: Throwable) {
-            // v1.9.19: 不能再"忽略"。startForegroundService 建立了 5 秒契约，
-            // startForeground 失败且不 stopSelf → 系统抛 ForegroundServiceDidNotStartInTimeException 杀进程。
-            // stopSelf 只解除契约；客户端已 BIND_AUTO_CREATE，实例仍存活可继续处理转换消息。
-            foregroundOk = false
-            lastError = "${e.javaClass.simpleName}: ${e.message}"
-            Log.w("DwgIsolated", "startForeground 失败 → stopSelf 解除契约: ${e.message}")
-            try { stopSelf() } catch (_: Throwable) {}
+            Log.w("DwgIsolated", "startForeground 失败(忽略): ${e.message}")
         }
-    }
-
-    override fun onDestroy() {
-        try { wakeLock?.let { if (it.isHeld) it.release() } } catch (_: Throwable) {}
-        wakeLock = null
-        super.onDestroy()
     }
 
     private inner class IncomingHandler : Handler(Looper.getMainLooper()) {
@@ -166,9 +120,14 @@ class DwgIsolatedService : Service() {
                     try { replyTo?.send(resp) } catch (e: Throwable) {
                         Log.e("DwgIsolated", "reply failed: ${e.message}")
                     }
-                    // v1.9.12: 不再每次转换后销毁进程。保留前台优先级，避免切后台时 :dwgisolated
-                    // 进程被 Android 冻结导致 dwg2dxf 卡死。进程由 onUnbind 空闲延迟(10s)自停，
-                    // 连续转换批次期间持续存活。native 崩溃仍由进程死亡 + 主进程重绑兜底。
+                    // v1.9.31 根因修复：恢复「每次转换后销毁进程」(v1.8.9 已验证正确的方案)。
+                    // v1.9.12 为「保持前台优先级」移除了 stopSelf，导致同一 :dwgisolated 进程连跑
+                    // 多个 dwg2dxf 后 LibreDWG 全局状态污染 → 后续文件产出损坏/无 EOF 的 DXF →
+                    // 该文件判 0 字或乱字数(手机从 4万+ 掉到 3.4万、且逐次运行结果反复波动)。
+                    // 每次转换后销毁进程，下一个文件 convertToDxf 重新 startService+bindService 拉起
+                    // 全新干净进程，LibreDWG 状态不累积污染。后台回传不冻结由 v1.9.12 的独立 ipcLooper
+                    // 线程保证(本处不动)，二者互补、互不退化。
+                    try { stopSelf() } catch (_: Throwable) {}
                 }
                 MSG_CONVERT -> {
                     val data = msg.data
@@ -194,7 +153,8 @@ class DwgIsolatedService : Service() {
                     } catch (e: Throwable) {
                         Log.e("DwgIsolated", "reply failed: ${e.message}")
                     }
-                    // v1.9.12: 同上，保留进程存活（空闲延迟自停）。
+                    // v1.9.31: 同 MSG_CONVERT_DXF，转换后立即销毁进程以杜绝 LibreDWG 状态污染。
+                    try { stopSelf() } catch (_: Throwable) {}
                 }
                 else -> super.handleMessage(msg)
             }
@@ -212,14 +172,5 @@ class DwgIsolatedService : Service() {
         const val KEY_PATH = "path"
         const val CHANNEL_ID = "wordcount_dwg_convert"
         const val NOTI_ID = 200
-
-        /** v1.9.19: 前台化诊断（本进程内可见，崩溃排查用）。 */
-        @Volatile var foregroundOk: Boolean = false
-        @Volatile var lastError: String? = null
-
-        /** v1.9.18: 主进程显式停止 :dwgisolated（addFiles 结束后调用）。 */
-        fun stopService(ctx: Context) {
-            try { ctx.stopService(Intent(ctx, DwgIsolatedService::class.java)) } catch (_: Throwable) {}
-        }
     }
 }
