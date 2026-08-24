@@ -15,6 +15,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.Message
 import android.os.Messenger
+import android.os.Process
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -140,6 +141,18 @@ class DwgIsolatedService : Service() {
         super.onDestroy()
     }
 
+    /** v1.9.31: 每文件转换完成后延迟杀掉本隔离进程，强制下一个文件通过
+     *  DwgIsolatedRunner.startForegroundService+bindService 拉起全新干净进程，
+     *  避免 LibreDWG dwg2dxf 在同一进程连跑多文件后全局状态污染导致的字数波动/0字。
+     *  延迟 300ms：保证回复 Messenger 已写入 kernel binder 缓冲(对端主进程必能收到)，
+     *  再 Process.killProcess 销毁本进程(:dwgisolated 仅承载 dwg2dxf，杀掉无副作用)。
+     *  进程死亡触发主进程 onServiceDisconnected → started=false → 下一文件重新前台拉起。 */
+    private fun killAfterReply() {
+        mainHandler.postDelayed({
+            try { Process.killProcess(Process.myPid()) } catch (_: Throwable) {}
+        }, 300L)
+    }
+
     private inner class IncomingHandler : Handler(Looper.getMainLooper()) {
         override fun handleMessage(msg: Message) {
             when (msg.what) {
@@ -166,9 +179,14 @@ class DwgIsolatedService : Service() {
                     try { replyTo?.send(resp) } catch (e: Throwable) {
                         Log.e("DwgIsolated", "reply failed: ${e.message}")
                     }
-                    // v1.9.12: 不再每次转换后销毁进程。保留前台优先级，避免切后台时 :dwgisolated
-                    // 进程被 Android 冻结导致 dwg2dxf 卡死。进程由 onUnbind 空闲延迟(10s)自停，
-                    // 连续转换批次期间持续存活。native 崩溃仍由进程死亡 + 主进程重绑兜底。
+                    // v1.9.31: 每文件转换完成后延迟销毁隔离进程，强制下一个文件拿到全新干净进程。
+                    // LibreDWG 的 dwg2dxf 在同一 :dwgisolated 进程连跑多个 DWG 后全局状态会污染，
+                    // 之后产出的 DXF 损坏/无 EOF → 该文件判 0 字或乱字数，且"哪些文件坏掉"随批次顺序
+                    // 变化 → 反复波动(同一 RAR 多次统计数字不一致)。延迟 300ms 确保回传的 Messenger
+                    // 回复已送达主进程(kernel binder 缓冲已写入)再杀进程。
+                    // 主进程在统计期间常驻 WordCountForegroundService 前台服务(见 MainActivity.addFiles)，
+                    // 故下一个文件重新 startForegroundService 在后台也被允许，不会回归"切后台不统计"。
+                    killAfterReply()
                 }
                 MSG_CONVERT -> {
                     val data = msg.data
@@ -194,7 +212,8 @@ class DwgIsolatedService : Service() {
                     } catch (e: Throwable) {
                         Log.e("DwgIsolated", "reply failed: ${e.message}")
                     }
-                    // v1.9.12: 同上，保留进程存活（空闲延迟自停）。
+                    // v1.9.31: 同 MSG_CONVERT_DXF 分支，每文件延迟杀进程拿干净 LibreDWG 状态。
+                    killAfterReply()
                 }
                 else -> super.handleMessage(msg)
             }
