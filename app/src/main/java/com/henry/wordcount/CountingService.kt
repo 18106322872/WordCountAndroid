@@ -147,7 +147,11 @@ class CountingService : Service() {
             processBatchToEntries(
                 context = this@CountingService,
                 cachedFiles = cachedFiles,
-                onProgress = { n, d, t -> updateNotification("$d/$t · $n"); logStatsLine("PROGRESS $d/$t $n") },
+                onProgress = { n, d, t ->
+                    updateNotification("$d/$t · $n")
+                    appendProgress(n, d, t)
+                    logStatsLine("PROGRESS $d/$t $n")
+                },
                 emit = { entry -> appendResult(entry) },
                 onError = { msg -> logStatsLine("ERROR $msg") }
             )
@@ -203,8 +207,35 @@ class CountingService : Service() {
         try {
             val dir = externalCacheDir ?: cacheDir
             val f = File(dir, "wc_results.jsonl")
-            f.appendText(BATCH_END_MARKER + "\n")
-        } catch (_: Throwable) {}
+            val line = BATCH_END_MARKER + "\n"
+            FileOutputStream(f, true).use { fos ->
+                fos.write(line.toByteArray(Charsets.UTF_8))
+                try { fos.fd.sync() } catch (_: Throwable) {}
+            }
+        } catch (e: Throwable) {
+            Log.e("WordCountCS", "appendBatchEnd failed", e)
+        }
+    }
+
+    /** 把进度也写进 jsonl，让主进程在轮询时同步刷新 App 内进度条。 */
+    private fun appendProgress(name: String, done: Int, total: Int) {
+        try {
+            val dir = externalCacheDir ?: cacheDir
+            if (!dir.exists()) dir.mkdirs()
+            val f = File(dir, "wc_results.jsonl")
+            val obj = JSONObject()
+            obj.put("type", "progress")
+            obj.put("done", done)
+            obj.put("total", total)
+            obj.put("name", name)
+            val line = obj.toString() + "\n"
+            FileOutputStream(f, true).use { fos ->
+                fos.write(line.toByteArray(Charsets.UTF_8))
+                try { fos.fd.sync() } catch (_: Throwable) {}
+            }
+        } catch (e: Throwable) {
+            Log.e("WordCountCS", "appendProgress failed", e)
+        }
     }
 
     private fun updateNotification(text: String) {
