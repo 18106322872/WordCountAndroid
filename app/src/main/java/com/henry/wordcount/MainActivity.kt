@@ -2282,7 +2282,11 @@ private var currentEntries: androidx.compose.runtime.snapshots.SnapshotStateList
  * CountingService 用 O_APPEND atomic 写入，本进程即使每 1.5s 轮询也不会读到半行。
  * 返回是否见到 BATCH_END（本批完成）。
  */
-private fun recoverResults(context: android.content.Context, sink: (FileEntry) -> Unit): Boolean {
+private fun recoverResults(
+    context: android.content.Context,
+    sink: (FileEntry) -> Unit,
+    onProgress: ((String, Int, Int) -> Unit)? = null
+): Boolean {
     return try {
         val dir = context.externalCacheDir ?: context.cacheDir ?: return false
         val f = java.io.File(dir, "wc_results.jsonl")
@@ -2295,6 +2299,13 @@ private fun recoverResults(context: android.content.Context, sink: (FileEntry) -
                 try {
                     val o = org.json.JSONObject(line)
                     if (o.optString("type", "") == "batch_end") { sawEnd = true; continue }
+                    if (o.optString("type", "") == "progress") {
+                        val name = o.optString("name", "")
+                        val done = o.optInt("done", 0)
+                        val total = o.optInt("total", 0)
+                        onProgress?.invoke(name, done, total)
+                        continue
+                    }
                     val id = o.getString("id")
                     val displayName = o.getString("displayName")
                     val cachePath = o.getString("cachePath")
@@ -2354,6 +2365,10 @@ private fun addFiles(
             if (entries.none { it.id == e.id }) entries.add(e)
         }
     }
+    // v1.9.29: 所有进度回调统一包到 Main 线程，避免 IO 线程改 mutableState 导致 UI 不刷新。
+    val mainProgress: (String, Int, Int) -> Unit = { name, done, total ->
+        scope.launch(Dispatchers.Main) { onProgress?.invoke(name, done, total) }
+    }
     currentEntriesSink = sink
     scope.launch(Dispatchers.Main) {
         busySet(true)
@@ -2371,10 +2386,10 @@ private fun addFiles(
             val cf = uris.map { copyUriToCache(context, it) }
             MainActivity.pendingUriNames.clear()
             processBatchToEntries(context, cf,
-                onProgress = { n, d, t -> scope.launch(Dispatchers.Main) { onProgress?.invoke(n, d, t) } },
+                onProgress = mainProgress,
                 emit = { e -> scope.launch(Dispatchers.Main) { if (entries.none { it.id == e.id }) entries.add(e) } },
                 onError = { msg -> scope.launch { snackbar.showSnackbar(msg) } })
-            finalizeBatch(context, heartbeatJob, busySet, onProgress)
+            finalizeBatch(context, heartbeatJob, busySet, mainProgress)
         }
 
         try {
@@ -2393,14 +2408,14 @@ private fun addFiles(
                     while (isActive && !done && elapsed < 30 * 60 * 1000L) {
                         delay(1500L)
                         elapsed += 1500L
-                        if (recoverResults(context, sink)) done = true
+                        if (recoverResults(context, sink, mainProgress)) done = true
                     }
                     if (done) {
-                        finalizeBatch(context, heartbeatJob, busySet, onProgress)
+                        finalizeBatch(context, heartbeatJob, busySet, mainProgress)
                     } else {
                         Log.w("WordCount", "统计看门狗超时，强制收尾并恢复已产出结果")
-                        recoverResults(context, sink)
-                        finalizeBatch(context, heartbeatJob, busySet, onProgress)
+                        recoverResults(context, sink, mainProgress)
+                        finalizeBatch(context, heartbeatJob, busySet, mainProgress)
                     }
                 }
             }
