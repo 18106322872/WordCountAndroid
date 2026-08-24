@@ -159,7 +159,7 @@ class MainActivity : ComponentActivity() {
                 } else {
                     val list = currentEntries
                     if (list != null) {
-                        recoverResults(this@MainActivity) { e -> if (list.none { x -> x.id == e.id }) list.add(e) }
+                        recoverResults(this@MainActivity, sink = { e -> if (list.none { x -> x.id == e.id }) list.add(e) })
                     }
                 }
             }
