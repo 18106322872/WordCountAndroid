@@ -837,7 +837,9 @@ fun WordCountApp(initialUris: List<Uri>) {
 
         if (uris.isNotEmpty()) {
 
-            addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total ->                 progressText = if (total <= 0) null else (bgWarn() + "正在统计文件$name，已统计$done/$total")
+            addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total ->                 // v1.9.39: 去掉 total<=0 守卫，让程序内进度与通知栏同步（通知栏从 0/N 开始 → 程序内也从 0/N 开始）；
+//          只有 finalizeBatch 传入的清空信号 (name="", done=0, total=0) 才把进度置 null。
+progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn() + "正在统计文件$name，已统计$done/$total")
 
                 if (total > 0) {
 
@@ -960,7 +962,9 @@ fun WordCountApp(initialUris: List<Uri>) {
 
         if (initialUris.isNotEmpty()) {
 
-            addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, initialUris, onProgress = { name, done, total ->                 progressText = if (total <= 0) null else (bgWarn() + "正在统计文件$name，已统计$done/$total")
+            addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, initialUris, onProgress = { name, done, total ->                 // v1.9.39: 去掉 total<=0 守卫，让程序内进度与通知栏同步（通知栏从 0/N 开始 → 程序内也从 0/N 开始）；
+//          只有 finalizeBatch 传入的清空信号 (name="", done=0, total=0) 才把进度置 null。
+progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn() + "正在统计文件$name，已统计$done/$total")
 
                 if (total > 0) {
 
@@ -995,7 +999,9 @@ fun WordCountApp(initialUris: List<Uri>) {
 
                 MainActivity.pendingUris = null // 消费掉
 
-                    addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total ->                 progressText = if (total <= 0) null else (bgWarn() + "正在统计文件$name，已统计$done/$total")
+                    addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total ->                 // v1.9.39: 去掉 total<=0 守卫，让程序内进度与通知栏同步（通知栏从 0/N 开始 → 程序内也从 0/N 开始）；
+//          只有 finalizeBatch 传入的清空信号 (name="", done=0, total=0) 才把进度置 null。
+progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn() + "正在统计文件$name，已统计$done/$total")
 
                 if (total > 0) {
 

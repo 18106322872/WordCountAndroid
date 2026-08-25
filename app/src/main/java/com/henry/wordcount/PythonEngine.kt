@@ -164,14 +164,21 @@ object PythonEngine {
      * @param dxfPath dwg2dxf 已转换好的 DXF 路径（可能含 LibreDWG 结构缺陷，Python 端 sanitize 修复）
      * @param dwgPath 原始 DWG 路径（可空，用于中文丢失时的 GBK/UTF-16 字节扫描恢复）
      */
-    fun extractCadDxf(context: Context, dxfPath: String, dwgPath: String?): String {
+    /**
+     * v1.9.39: 新增 outDir 参数（可空）。cad_core 会把 DWG 内嵌 IMAGE 实体的 embedded_image
+     * 字节导出为 PNG 落盘到 outDir，路径列表返回到 result.image_pngs。
+     * 主进程 DwgProcessor 拿到后调 DwgImageOcrExtractor 跑 ML Kit OCR。
+     */
+    fun extractCadDxf(context: Context, dxfPath: String, dwgPath: String?, outDir: String? = null): String {
         return withRetry(context) {
             val py = Python.getInstance()
             val mod = py.getModule("cad_core")
-            val s = if (dwgPath != null)
-                mod.callAttr("extract_dxf_json", dxfPath, dwgPath).toString()
-            else
-                mod.callAttr("extract_dxf_json", dxfPath).toString()
+            val s = when {
+                dwgPath != null && outDir != null -> mod.callAttr("extract_dxf_json", dxfPath, dwgPath, outDir).toString()
+                dwgPath != null -> mod.callAttr("extract_dxf_json", dxfPath, dwgPath).toString()
+                outDir != null -> mod.callAttr("extract_dxf_json", dxfPath, null, outDir).toString()
+                else -> mod.callAttr("extract_dxf_json", dxfPath).toString()
+            }
             s
         }
     }

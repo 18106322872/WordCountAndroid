@@ -1743,7 +1743,91 @@ def _gbk_common_ratio(real, stats):
     return common / max(cjk_total, 1)
 
 
-def extract_cad_android(dxf_path, dwg_path=None):
+
+
+def _extract_dwg_images(dxf_path, out_dir, max_images=20):
+    """v1.9.39: 从 DWG 转出的 DXF 中提取内嵌 IMAGE 实体为 PNG 文件，供手机端 ML Kit OCR 识别。
+
+    对齐桌面 wordcount.py 的 _extract_cad_rendered_via_ocr 中的 IMAGE 导出：
+    ezdxf 遍历 modelspace() 的 IMAGE 实体，提取 image_def.embedded_image 字节，
+    落盘为 <out_dir>/embimg_<idx>.png。失败/无嵌入图返回空列表。
+    """
+    if not out_dir:
+        return []
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except Exception:
+        return []
+    pngs = []
+    try:
+        import ezdxf
+        from ezdxf import DXFError
+    except Exception:
+        return pngs
+    doc = None
+    for try_path in [dxf_path]:
+        try:
+            doc = ezdxf.readfile(try_path)
+            break
+        except DXFError:
+            san = sanitize_dxf(try_path)
+            try:
+                doc = ezdxf.readfile(san)
+                break
+            except DXFError:
+                san2 = sanitize_dxf_deep(try_path)
+                try:
+                    doc = ezdxf.readfile(san2)
+                    break
+                except Exception:
+                    try:
+                        from ezdxf.recover import readfile as rread
+                        doc, _ = rread(san2)
+                        break
+                    except Exception:
+                        doc = None
+    if doc is None:
+        return pngs
+    try:
+        for ent in doc.modelspace():
+            if len(pngs) >= max_images:
+                break
+            if ent.dxftype() != "IMAGE":
+                continue
+            try:
+                idef = ent.image_def
+            except Exception:
+                idef = None
+            if idef is None:
+                continue
+            try:
+                blob = idef.embedded_image
+            except Exception:
+                blob = None
+            if blob is None:
+                continue
+            idx = len(pngs)
+            ip = os.path.join(out_dir, "embimg_%d.png" % idx)
+            try:
+                if isinstance(blob, (bytes, bytearray)):
+                    with open(ip, "wb") as _f:
+                        _f.write(blob)
+                else:
+                    # PIL Image
+                    try:
+                        blob.save(ip)
+                    except Exception:
+                        continue
+                if os.path.exists(ip) and os.path.getsize(ip) > 0:
+                    pngs.append(ip)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return pngs
+
+
+def extract_cad_android(dxf_path, dwg_path=None, out_dir=None):
     """手机端 DWG/DXF 统计主路径（对齐桌面 wordcount.py extract_cad，去除 ODA/OCR/dwggrep/同名PDF）。
 
     - dxf_path: Kotlin 侧 dwg2dxf 已转换好的 DXF（可能含 LibreDWG 结构缺陷，sanitize 已修复）
@@ -1839,15 +1923,20 @@ def extract_cad_android(dxf_path, dwg_path=None):
     except Exception:
         pass
 
+    # v1.9.39: 提取内嵌 IMAGE 实体为 PNG 路径列表，供手机端 ML Kit OCR
+    try:
+        meta["image_pngs"] = _extract_dwg_images(dxf_path, out_dir) if out_dir else []
+    except Exception:
+        meta["image_pngs"] = []
     meta["items"] = items
     meta.setdefault("error", None)
     return meta
 
 
-def extract_dxf_json(dxf_path, dwg_path=None):
-    """返回 JSON 字符串：{"items":[...],"pages":N,"pages_reason":str,"needs_pdf":bool,"encoder_garbled":bool,"error":str|None}"""
+def extract_dxf_json(dxf_path, dwg_path=None, out_dir=None):
+    """返回 JSON 字符串：{"items":[...],"pages":N,"pages_reason":str,"needs_pdf":bool,"encoder_garbled":bool,"image_pngs":list,"error":str|None}"""
     try:
-        r = extract_cad_android(dxf_path, dwg_path)
+        r = extract_cad_android(dxf_path, dwg_path, out_dir=out_dir)
         r["error"] = None
         return json.dumps(r, ensure_ascii=False, default=str)
     except Exception as e:
@@ -1855,6 +1944,7 @@ def extract_dxf_json(dxf_path, dwg_path=None):
         return json.dumps({
             "items": [], "pages": 1, "pages_reason": "Python异常: " + str(e),
             "needs_pdf": True, "encoder_garbled": False,
+            "image_pngs": [],
             "error": traceback.format_exc()
         }, ensure_ascii=False, default=str)
 

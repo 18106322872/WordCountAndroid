@@ -68,7 +68,9 @@ object DwgProcessor {
                 if (pyDxfFile.exists() && pyDxfFile.length() > 0 && isDxfComplete(pyDxfPath)) {
                     pyPathTried = true
                     try {
-                        val pyJson = PythonEngine.extractCadDxf(context, pyDxfPath, file.absolutePath)
+                        // v1.9.39: 传 outDir 让 cad_core 把内嵌 IMAGE 导出为 PNG；后续 DwgImageOcrExtractor 跑 ML Kit OCR
+                            val imgOutDir = "${context.cacheDir}/dwg_imgs/${file.nameWithoutExtension}_${System.currentTimeMillis()}"
+                            val pyJson = PythonEngine.extractCadDxf(context, pyDxfPath, file.absolutePath, imgOutDir)
                         val obj = JSONObject(pyJson)
                         val pyError = if (obj.has("error") && !obj.isNull("error")) obj.optString("error") else null
                         if (!pyError.isNullOrBlank()) {
@@ -78,6 +80,13 @@ object DwgProcessor {
                         val arr = obj.getJSONArray("items")
                         val items = ArrayList<String>(arr.length())
                         for (i in 0 until arr.length()) items.add(arr.getString(i))
+                        // v1.9.39: 读取 cad_core 导出的内嵌 IMAGE PNG 路径列表
+                        val imgPngs = if (obj.has("image_pngs") && !obj.isNull("image_pngs")) {
+                            val imgs = obj.getJSONArray("image_pngs")
+                            ArrayList<String>(imgs.length()).apply {
+                                for (i in 0 until imgs.length()) add(imgs.getString(i))
+                            }
+                        } else emptyList()
                         var pyPages = if (obj.has("pages") && !obj.isNull("pages")) obj.getInt("pages") else 1
                         val pyPagesReason = obj.optString("pages_reason")
                         var pyNeedsPdf = obj.optBoolean("needs_pdf", false)
@@ -103,30 +112,56 @@ object DwgProcessor {
                             } catch (e: Throwable) {
                                 diagnostics.append("ole_office_ex=${e.javaClass.simpleName}:${e.message}; ")
                             }
-                            if (!oleOfficeOk) {
+                            // v1.9.39: OLE office 与位图 OCR 不再互斥。此前 oleOfficeOk=true 时
+                            // 直接跳过位图 OCR，FA-00003 等含大量嵌入位图(图例/截图/LOGO)的 DWG 漏字
+                            // （桌面 RapidOCR 对全部嵌入图做 OCR，FA-00003 因此 +4669 字）。
+                            // 两路结果合并，最终由 FarEast 比例过滤兜底去噪。
+                            try {
+                                val oleRes = DwgOleExtractor.extractOleText(pyDxfPath)
+                                if (oleRes.text.isNotBlank()) {
+                                    for (ln in oleRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
+                                    oleMarks.add("OLE-ocr")
+                                }
+                            } catch (_: Throwable) {}
+                            try {
+                                val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath)
+                                if (oleRes2.text.isNotBlank()) {
+                                    for (ln in oleRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
+                                    oleMarks.add("DWG-OLE-ocr")
+                                }
+                            } catch (_: Throwable) {}
+                            // v1.9.39: DWG 内嵌 IMAGE 实体 OCR（对齐桌面 RapidOCR IMAGE 口径）。
+                            // cad_core 已用 ezdxf 把 IMAGE.embedded_image 导出为 PNG 落到 imgOutDir。
+                            if (imgPngs.isNotEmpty()) {
                                 try {
-                                    val oleRes = DwgOleExtractor.extractOleText(pyDxfPath)
-                                    if (oleRes.text.isNotBlank()) {
-                                        for (ln in oleRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
-                                        oleMarks.add("OLE-ocr")
+                                    val imgRes = DwgImageOcrExtractor.extract(context, imgPngs)
+                                    if (imgRes.text.isNotBlank()) {
+                                        for (ln in imgRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
+                                        oleMarks.add("IMG-ocr(${imgRes.imagesScanned}/${imgRes.imagesScanned + imgRes.ocrFailed})")
+                                        diagnostics.append("img_ocr=${imgRes.imagesScanned}+${imgRes.ocrFailed}; ")
                                     }
-                                } catch (_: Throwable) {}
+                                } catch (e: Throwable) {
+                                    diagnostics.append("img_ocr_ex=${e.javaClass.simpleName}:${e.message}; ")
+                                }
+                                // 清理临时 PNG（保留最近一次以备排查；这里直接删避免堆积）
                                 try {
-                                    val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath)
-                                    if (oleRes2.text.isNotBlank()) {
-                                        for (ln in oleRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
-                                        oleMarks.add("DWG-OLE-ocr")
-                                    }
+                                    imgPngs.forEach { java.io.File(it).delete() }
                                 } catch (_: Throwable) {}
                             }
-                            val co = JSONObject(PythonEngine.countCadItems(context, allItems))
+                            val pyReason = (pyPagesReason ?: "") + (if (oleMarks.isNotEmpty()) "·" + oleMarks.joinToString("·") else "")
+                            // v1.9.39: 对齐桌面口径。桌面对纯英文图纸 fe=0；手机端若 FarEast 占比 <15%
+                            // 视为伪中文噪声（全角数字/标点、GB18030 乱码解码、ML Kit 误识别），
+                            // 剔除全部 FarEast 后重新计数（真实中文 DWG 占比高，不受影响）。
+                            val mergedAll = allItems.joinToString("\n")
+                            val cleanedText = PdfOcrEngine.stripNoiseFarEast(mergedAll)
+                            val cleanedItems = cleanedText.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                            val co = JSONObject(PythonEngine.countCadItems(context, cleanedItems))
                             val cntErr = if (co.has("error") && !co.isNull("error")) co.optString("error") else null
                             if (!cntErr.isNullOrBlank()) diagnostics.append("count_err=${cntErr.take(80)}; ")
                             val pyWords = co.optInt("words", 0)
                             val pyFe = co.optInt("fe", 0)
                             val pyNc = co.optInt("nc", 0)
                             val pyChars = co.optInt("chars", 0)
-                            val pyReason = (pyPagesReason ?: "") + (if (oleMarks.isNotEmpty()) "·" + oleMarks.joinToString("·") else "")
                             val diag = "PY:${diagnostics}items=${items.size}"
                             Log.d("WordCount", "DWG Python主路径 $dName: words=$pyWords fe=$pyFe nc=$pyNc chars=$pyChars pages=$pyPages($pyReason) items=${items.size}")
                             return DwgProcessResult(pyWords, pyFe, pyNc, pyChars, pyPages, pyReason, pyNeedsPdf, diag, null, allItems.joinToString("\n"))
@@ -150,14 +185,50 @@ object DwgProcessor {
         // 都用 Kotlin 简易组码抽取再试一次，避免 service/后台/Python 异常导致直接 0 字。
         if (File(pyDxfPath).exists() && isDxfComplete(pyDxfPath)) {
             try {
+                val fbLines = ArrayList<String>()
                 val fallbackText = extractDxfTextsSimple(pyDxfPath)
                 if (fallbackText.isNotBlank()) {
-                    val (fbWords, fbFe, fbNc, fbChars) = countTextKotlin(fallbackText)
+                    for (ln in fallbackText.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) }
+                }
+                // v1.9.39: 兜底分支也合并 OLE（与主路径一致），不再依赖 Python 成功
+                try {
+                    val oleJson = PythonEngine.extractOleOffice(context, pyDxfPath)
+                    val oo = JSONObject(oleJson)
+                    val joined = oo.optString("joined", "")
+                    if (joined.isNotBlank()) {
+                        for (ln in joined.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) }
+                    }
+                } catch (_: Throwable) {}
+                try {
+                    val oleRes = DwgOleExtractor.extractOleText(pyDxfPath)
+                    if (oleRes.text.isNotBlank()) { for (ln in oleRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) } }
+                } catch (_: Throwable) {}
+                try {
+                    val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath)
+                    if (oleRes2.text.isNotBlank()) { for (ln in oleRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) } }
+                } catch (_: Throwable) {}
+                // v1.9.39: 兜底分支也跑 IMAGE OCR（用 cacheDir 已有 PNG，可能不存在则跳过）
+                try {
+                    val imgOutDir2 = java.io.File("${context.cacheDir}/dwg_imgs")
+                    val pngs2 = if (imgOutDir2.exists()) imgOutDir2.listFiles { f -> f.isFile && f.extension == "png" }?.map { it.absolutePath } ?: emptyList() else emptyList()
+                    if (pngs2.isNotEmpty()) {
+                        val imgRes2 = DwgImageOcrExtractor.extract(context, pngs2)
+                        if (imgRes2.text.isNotBlank()) {
+                            for (ln in imgRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) }
+                        }
+                    }
+                } catch (_: Throwable) {}
+                if (fbLines.isNotEmpty()) {
+                    val merged = fbLines.joinToString("\n")
+                    val cleaned = PdfOcrEngine.stripNoiseFarEast(merged)
+                    val (_, feBefore, _, charsBefore) = countTextKotlin(merged)
+                    val (fbWords, fbFe, fbNc, fbChars) = countTextKotlin(cleaned)
+                    diagnostics.append("strip=${feBefore}->${fbFe}/${charsBefore};")
                     if (fbWords > 0) {
                         val fbReason = "Kotlin组码兜底" + (if (diagnostics.isNotEmpty()) "·" + diagnostics.toString().take(60) else "")
                         val fbDiag = "FB:${diagnostics}"
                         Log.d("WordCount", "DWG Kotlin组码兜底 $dName: words=$fbWords fe=$fbFe nc=$fbNc chars=$fbChars")
-                        return DwgProcessResult(fbWords, fbFe, fbNc, fbChars, 1, fbReason, false, fbDiag, null, fallbackText)
+                        return DwgProcessResult(fbWords, fbFe, fbNc, fbChars, 1, fbReason, false, fbDiag, null, cleaned)
                     }
                 }
                 diagnostics.append("fb_text_empty; ")
