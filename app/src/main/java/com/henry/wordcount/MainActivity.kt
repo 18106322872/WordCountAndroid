@@ -209,35 +209,11 @@ import kotlin.math.roundToInt
 
 
 /**
-
- * v1.9.20: 文件级统计日志（cacheDir/wc_stats.log，追加写）。
-
- * 真机"切后台不统计"排查：统计批次完成后打开文件即可看到每个文件的完成时刻与顺序，
-
- * 若某文件之后长时间无记录 → 卡在该文件（多为 :dwgisolated 转换等待）。
-
+ * v1.9.36: 诊断日志已清理，仅保留空函数兼容旧调用点。
  */
 
 private fun logStatsLine(context: android.content.Context, name: String, done: Int, total: Int) {
-
-    try {
-
-        // v1.9.21: 改写外部缓存（文件管理器可见），并附前台服务状态
-
-        val dir = context.externalCacheDir ?: context.cacheDir
-
-        val f = java.io.File(dir, "wc_stats.log")
-
-        val svc = if (WordCountForegroundService.foregroundOk) "FGS✓" else "FGS✗"
-
-        val wl = if (WordCountForegroundService.wakeLockOk) "WL✓" else "WL✗"
-
-        val err = (WordCountForegroundService.lastError ?: "").replace("\n", " ")
-
-        f.appendText("${System.currentTimeMillis()}\t$done/$total\t$name\t$svc\t$wl\t$err\n")
-
-    } catch (_: Throwable) {}
-
+    // v1.9.36: 诊断日志已不再需要，函数保留以兼容现有调用点，内部空实现。
 }
 
 
@@ -245,23 +221,8 @@ private fun logStatsLine(context: android.content.Context, name: String, done: I
 
 
 private fun bgWarn(): String {
-
-    val miss = mutableListOf<String>()
-
-    if (!MainActivity.batteryUnrestricted) miss += "未豁免电池优化"
-
-    WordCountForegroundService.lastError?.let { miss += it }
-
-    val svc = if (WordCountForegroundService.foregroundOk) "前台✓" else "前台✗"
-
-    val wl = if (WordCountForegroundService.wakeLockOk) "唤醒✓" else "唤醒✗"
-
-    val head = "前台=" + svc + " 唤醒=" + wl
-
-    val base = if (miss.isEmpty()) "" else "｜⚠" + miss.joinToString("；")
-
-    return head + base + "｜"
-
+    // v1.9.36: 后台统计已验证可用，移除诊断前缀。
+    return ""
 }
 
 
@@ -297,8 +258,6 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         ensureBackgroundCapability()
-
-        // v1.9.22: 生命周期日志，写入 wc_stats.log；切后台时若心跳停止 → 进程/协程被系统杀掉
 
         lifecycle.addObserver(object : DefaultLifecycleObserver {
 
@@ -878,8 +837,6 @@ fun WordCountApp(initialUris: List<Uri>) {
 
         if (uris.isNotEmpty()) {
 
-            WordCountForegroundService.start(context)
-
             addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total ->                 progressText = if (total <= 0) null else (bgWarn() + "正在统计文件$name，已统计$done/$total")
 
                 if (total > 0) {
@@ -1003,8 +960,6 @@ fun WordCountApp(initialUris: List<Uri>) {
 
         if (initialUris.isNotEmpty()) {
 
-            WordCountForegroundService.start(context)
-
             addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, initialUris, onProgress = { name, done, total ->                 progressText = if (total <= 0) null else (bgWarn() + "正在统计文件$name，已统计$done/$total")
 
                 if (total > 0) {
@@ -1040,9 +995,7 @@ fun WordCountApp(initialUris: List<Uri>) {
 
                 MainActivity.pendingUris = null // 消费掉
 
-                WordCountForegroundService.start(context)
-
-                addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total ->                 progressText = if (total <= 0) null else (bgWarn() + "正在统计文件$name，已统计$done/$total")
+                    addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total ->                 progressText = if (total <= 0) null else (bgWarn() + "正在统计文件$name，已统计$done/$total")
 
                 if (total > 0) {
 
@@ -4565,7 +4518,7 @@ private object RecoverState {
 }
 
 /**
- * 从 wc_results.jsonl 恢复已统计结果（在主进程冻结期间服务仍持续写入）。
+ * 从内部缓存 wc_results.jsonl 恢复已统计结果（在主进程冻结期间服务仍持续写入）。
  * v1.9.30: 真正增量读取——记录上次读到的文件偏移，每次只消费新增行；
  * 同时给 progress 做 (name,total,done) 去重，避免每次轮询把历史进度重新触发一遍，
  * 造成 App 内进度条/通知栏进度乱跳。
@@ -4578,7 +4531,7 @@ private fun recoverResults(
     onProgress: ((String, Int, Int) -> Unit)? = null
 ): Boolean {
     return try {
-        val dir = context.externalCacheDir ?: context.cacheDir ?: return false
+        val dir = context.cacheDir ?: return false
         val f = java.io.File(dir, "wc_results.jsonl")
         if (!f.exists()) { RecoverState.lastOffset = 0L; return false }
         val len = f.length()
@@ -4693,7 +4646,7 @@ private fun addFiles(
 
     try {
 
-        val dir = context.externalCacheDir ?: context.cacheDir
+        val dir = context.cacheDir
 
         java.io.File(dir, "wc_results.jsonl").delete()
 

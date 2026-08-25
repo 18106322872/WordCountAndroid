@@ -18,13 +18,11 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * v1.9.25: 独立前台统计服务，运行在 :countservice 进程。
+ * v1.9.36: 独立前台统计服务，运行在 :countservice 进程。
  *
- * 根因：真机日志证明，即便主进程已启动前台服务 + WakeLock，切后台后 Activity 主进程仍被
- * 国产 ROM / Android 电源管理深度冻结（心跳中断 10 分钟级），导致统计中断。
- * 把实际统计工作搬到本独立进程——其唯一职责就是“持前台优先级 + 唤醒锁地跑统计”，
- * 不受 Activity 主进程冻结牵连。统计逻辑复用 MainActivity 的 processBatchToEntries（同一份口径），
- * 结果追加写入外部缓存 wc_results.jsonl，由 MainActivity 轮询 / ON_START 恢复，按 id 去重并入列表。
+ * 职责：持前台优先级 + WakeLock 地跑统计。统计逻辑复用 MainActivity 的 processBatchToEntries。
+ * 结果写入内部缓存 wc_results.jsonl（非外部可见缓存），供 MainActivity 切回前台时恢复。
+ * v1.9.36 清理：不再写 wc_stats.log；通知只保留一个进度通知。
  */
 class CountingService : Service() {
 
@@ -98,11 +96,11 @@ class CountingService : Service() {
             }
         }
 
-        // ---- 前台化 ----
+        // ---- 前台化：只显示一个简洁的进度通知 ----
         val noti: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setContentTitle("WordCount 正在统计")
-            .setContentText("后台继续进行中，请勿清理本通知")
+            .setContentText("准备中...")
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
@@ -141,41 +139,27 @@ class CountingService : Service() {
 
     private suspend fun processBatch(paths: List<String>, names: List<String>) {
         try {
-            logStatsLine("BATCH_START files=${paths.size}")
             runCatching { PythonEngine.start(this@CountingService) }
             val cachedFiles = paths.mapIndexed { i, p -> CachedFile(File(p), names.getOrElse(i) { File(p).name }) }
             processBatchToEntries(
                 context = this@CountingService,
                 cachedFiles = cachedFiles,
-                onProgress = { n, d, t ->
-                    updateNotification("$d/$t · $n")
-                    appendProgress(n, d, t)
-                    logStatsLine("PROGRESS $d/$t $n")
-                },
+                onProgress = { n, d, t -> updateNotification("$d/$t · $n") },
                 emit = { entry -> appendResult(entry) },
-                onError = { msg -> logStatsLine("ERROR $msg") }
+                onError = { msg -> Log.w("WordCountCS", "batch error: $msg") }
             )
             appendBatchEnd()
-            logStatsLine("BATCH_END")
         } catch (e: Throwable) {
             Log.e("WordCountCS", "processBatch fatal: ${e.message}", e)
-            logStatsLine("FATAL ${e.javaClass.simpleName} ${e.message}")
         } finally {
             stopSelf()
         }
     }
 
-    /** 把一条结果追加写入外部缓存 wc_results.jsonl（主进程轮询/恢复用）。
-     *  v1.9.26: 改为 append-mode atomic write + fsync；异常不再吞，显式写 wc_stats.log 错误行；
-     *  把每文件 stats 也同步写到 wc_stats.log 的 FILE_DONE 行（用户从单一日志即可对比电脑值）。 */
+    /** v1.9.36: 把结果写入内部缓存（cacheDir），供 MainActivity 恢复。 */
     private fun appendResult(entry: FileEntry) {
-        val dir = externalCacheDir ?: cacheDir
-        if (dir == null) {
-            Log.e("WordCountCS", "appendResult: cache dir null")
-            try { logStatsLine("APPEND_ERR ${entry.id} cache_dir_null") } catch (_: Throwable) {}
-            return
-        }
         try {
+            val dir = cacheDir ?: return
             if (!dir.exists()) dir.mkdirs()
             val f = File(dir, "wc_results.jsonl")
             val rawJson = entry.rawResult?.let { JSONObject(it).toString() } ?: "null"
@@ -185,27 +169,18 @@ class CountingService : Service() {
             obj.put("cachePath", entry.cachePath)
             if (entry.error != null) obj.put("error", entry.error) else obj.put("rawResultJson", rawJson)
             val line = obj.toString() + "\n"
-            // append-mode（O_APPEND）在 Linux/Android 上对 <PIPE_BUF(4096B) 写是 atomic 的，
-            // 不会与主进程并发读产生脏行。fsync 保证崩溃不丢。
             FileOutputStream(f, true).use { fos ->
                 fos.write(line.toByteArray(Charsets.UTF_8))
                 try { fos.fd.sync() } catch (_: Throwable) {}
             }
-            // 同步把统计数字写到 wc_stats.log 的 FILE_DONE 行（用户从单一日志即可对比电脑值）
-            val stats = (entry.rawResult?.get("stats") as? Map<*, *>)
-            val statsStr = if (stats != null) {
-                "w=${stats["words"]} fe=${stats["fe"]} nc=${stats["nc"]} c=${stats["chars"]}"
-            } else ""
-            logStatsLine("FILE_DONE ${entry.id} ${entry.displayName} $statsStr".trim())
         } catch (e: Throwable) {
             Log.e("WordCountCS", "appendResult failed for ${entry.id}", e)
-            try { logStatsLine("APPEND_ERR ${entry.id} ${e.javaClass.simpleName} ${e.message}") } catch (_: Throwable) {}
         }
     }
 
     private fun appendBatchEnd() {
         try {
-            val dir = externalCacheDir ?: cacheDir
+            val dir = cacheDir ?: return
             val f = File(dir, "wc_results.jsonl")
             val line = BATCH_END_MARKER + "\n"
             FileOutputStream(f, true).use { fos ->
@@ -214,27 +189,6 @@ class CountingService : Service() {
             }
         } catch (e: Throwable) {
             Log.e("WordCountCS", "appendBatchEnd failed", e)
-        }
-    }
-
-    /** 把进度也写进 jsonl，让主进程在轮询时同步刷新 App 内进度条。 */
-    private fun appendProgress(name: String, done: Int, total: Int) {
-        try {
-            val dir = externalCacheDir ?: cacheDir
-            if (!dir.exists()) dir.mkdirs()
-            val f = File(dir, "wc_results.jsonl")
-            val obj = JSONObject()
-            obj.put("type", "progress")
-            obj.put("done", done)
-            obj.put("total", total)
-            obj.put("name", name)
-            val line = obj.toString() + "\n"
-            FileOutputStream(f, true).use { fos ->
-                fos.write(line.toByteArray(Charsets.UTF_8))
-                try { fos.fd.sync() } catch (_: Throwable) {}
-            }
-        } catch (e: Throwable) {
-            Log.e("WordCountCS", "appendProgress failed", e)
         }
     }
 
@@ -255,15 +209,6 @@ class CountingService : Service() {
         } catch (e: Throwable) {
             Log.w("WordCountCS", "notify progress failed: ${e.message}")
         }
-    }
-
-    /** 在 :countservice 进程写外部缓存 wc_stats.log，便于和主进程日志合并排查。 */
-    private fun logStatsLine(name: String) {
-        try {
-            val dir = externalCacheDir ?: cacheDir
-            val f = File(dir, "wc_stats.log")
-            f.appendText("${System.currentTimeMillis()}\t0/0\t$name\tFGS=${if (foregroundOk) "✓" else "✗"}\tWL=${if (wakeLockOk) "✓" else "✗"}\n")
-        } catch (_: Throwable) {}
     }
 
     override fun onDestroy() {
