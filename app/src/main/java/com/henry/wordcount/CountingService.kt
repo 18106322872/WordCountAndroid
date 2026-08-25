@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.media.RingtoneManager
 import android.os.*
 import android.os.PowerManager
 import android.util.Log
@@ -18,11 +19,12 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * v1.9.36: 独立前台统计服务，运行在 :countservice 进程。
+ * v1.9.38: 独立前台统计服务，运行在 :countservice 进程。
  *
  * 职责：持前台优先级 + WakeLock 地跑统计。统计逻辑复用 MainActivity 的 processBatchToEntries。
  * 结果写入内部缓存 wc_results.jsonl（非外部可见缓存），供 MainActivity 切回前台时恢复。
- * v1.9.36 清理：不再写 wc_stats.log；通知只保留一个进度通知。
+ * 本版新增：把进度也写入 wc_results.jsonl，修复 v1.9.36 主界面进度不显示的问题；
+ * 批次完成后发送一条带系统默认通知铃声的完成通知。
  */
 class CountingService : Service() {
 
@@ -144,15 +146,40 @@ class CountingService : Service() {
             processBatchToEntries(
                 context = this@CountingService,
                 cachedFiles = cachedFiles,
-                onProgress = { n, d, t -> updateNotification("$d/$t · $n") },
+                onProgress = { n, d, t ->
+                    updateNotification("$d/$t · $n")
+                    appendProgress(n, d, t)
+                },
                 emit = { entry -> appendResult(entry) },
                 onError = { msg -> Log.w("WordCountCS", "batch error: $msg") }
             )
             appendBatchEnd()
+            showCompletionNotification()
         } catch (e: Throwable) {
             Log.e("WordCountCS", "processBatch fatal: ${e.message}", e)
         } finally {
             stopSelf()
+        }
+    }
+
+    /** v1.9.38: 把进度写入内部缓存，供 MainActivity recoverResults 更新主界面进度条。 */
+    private fun appendProgress(name: String, done: Int, total: Int) {
+        try {
+            val dir = cacheDir ?: return
+            if (!dir.exists()) dir.mkdirs()
+            val f = File(dir, "wc_results.jsonl")
+            val obj = JSONObject()
+            obj.put("type", "progress")
+            obj.put("name", name)
+            obj.put("done", done)
+            obj.put("total", total)
+            val line = obj.toString() + "\n"
+            FileOutputStream(f, true).use { fos ->
+                fos.write(line.toByteArray(Charsets.UTF_8))
+                try { fos.fd.sync() } catch (_: Throwable) {}
+            }
+        } catch (e: Throwable) {
+            Log.e("WordCountCS", "appendProgress failed", e)
         }
     }
 
@@ -208,6 +235,27 @@ class CountingService : Service() {
             nm.notify(NOTI_ID, noti)
         } catch (e: Throwable) {
             Log.w("WordCountCS", "notify progress failed: ${e.message}")
+        }
+    }
+
+    /** v1.9.38: 统计完成后发送一条带系统默认通知铃声的完成通知。 */
+    private fun showCompletionNotification() {
+        try {
+            val nm = getSystemService(NotificationManager::class.java) ?: return
+            val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            val noti = NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.stat_notify_sync)
+                .setContentTitle("WordCount 统计完成")
+                .setContentText("全部文件已统计完成")
+                .setOngoing(false)
+                .setAutoCancel(true)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .setCategory(NotificationCompat.CATEGORY_STATUS)
+                .setSound(soundUri)
+                .build()
+            nm.notify(NOTI_ID + 1, noti)
+        } catch (e: Throwable) {
+            Log.w("WordCountCS", "showCompletionNotification failed: ${e.message}")
         }
     }
 

@@ -49,9 +49,10 @@ object DwgIsolatedRunner {
     @Volatile
     private var ipcHandler: Handler? = null
 
-    // v1.9.36: :dwgisolated 不再自己 startForeground，而是作为纯 bound service 被前台进程
-    // CountingService(:countservice) 绑定，共享前台优先级。通知栏只保留 CountingService 的
-    // 一个进度通知，不再有 "DWG 转换进行中" 的额外通知。
+    // v1.9.38: 是否已通过 startForegroundService 拉起过 :dwgisolated。
+    // 仅首次(或进程崩溃重启后)才调用 startForegroundService；切后台后 Android 14+ 禁止后台
+    // startForegroundService，故批次内续转换只 bindService 复用已前台化的 :dwgisolated，
+    // 避免"切后台不统计"。首调发生在 addFiles 起始(app 仍前台)，必然成功。
     @Volatile
     private var started: Boolean = false
 
@@ -110,9 +111,9 @@ object DwgIsolatedRunner {
                 // 用 handler(ipcLooper) post 保证线程一致，且任意线程调用 finish 都安全。
                 handler.post {
                     try { connection?.let { context.unbindService(it) } } catch (_: Throwable) {}
-                    // v1.9.36: 配合 service 每文件 stopSelf，确保下一文件重新 bindService 拉起全新
-                    // 干净进程。若依赖 onServiceDisconnected 异步回调，可能因延迟导致下一文件仍走
-                    // 复用路径而失败；此处主动 reset started 标志。
+                    // v1.9.38: 配合 service 每文件 stopSelf，确保下一文件重新 startForegroundService
+                    // + bindService 拉起全新干净进程。若依赖 onServiceDisconnected 异步回调，可能因
+                    // 延迟导致下一文件仍走复用路径而失败；此处主动 reset started 标志。
                     started = false
                 }
                 if (cont.isActive) cont.resume(result)
@@ -188,9 +189,20 @@ object DwgIsolatedRunner {
             // 改在 ipcLooper 线程发起 bind，回调也走 ipcLooper，后台可持续收发。
             handler.post {
                 try {
-                    // v1.9.36: :dwgisolated 不再调用 startForegroundService；直接 bindService。
-                    // 调用方 CountingService(:countservice) 是前台服务进程，bind 后 :dwgisolated
-                    // 共享前台优先级，切后台也不会被冻结，同时避免在通知栏产生额外的 DWG 转换通知。
+                    // v1.9.38: 仅首次(或进程崩溃重启后)调用 startForegroundService。
+                    // 批次内续转换只 bindService 复用已前台化的 :dwgisolated——切后台后 Android 14+
+                    // 禁止后台 startForegroundService，若每次都重调会导致"切后台不统计"。首调发生在
+                    // addFiles 起始(app 仍前台)，必然成功；之后隔离进程持续前台存活，后台也能 bind。
+                    if (!started) {
+                        try {
+                            ContextCompat.startForegroundService(context, intent)
+                            started = true
+                        } catch (e: Throwable) {
+                            Log.e("DwgIsolated", "startForegroundService failed: ${e.message}", e)
+                            finish(DwgConverter.DwgResult(errorCode = -97, diagText = "DWG转换服务无法前台启动：${e.message}"))
+                            return@post
+                        }
+                    }
                     val bound = context.bindService(intent, connection!!, Context.BIND_AUTO_CREATE)
                     if (!bound) {
                         Log.w("DwgIsolated", "bindService returned false")
@@ -212,8 +224,9 @@ object DwgIsolatedRunner {
     }
 
     /**
-     * v1.9.36: addFiles 结束后显式停止 :dwgisolated 进程。统计批次内隔离进程被
-     * CountingService 绑定保持前台，此处 finally 中干净回收，防止进程泄漏。
+     * v1.9.38: addFiles 结束后显式停止 :dwgisolated 进程（与 CountingService 配对）。
+     * 统计批次内隔离进程持续前台存活（不靠 10s 空闲自停），避免切后台后进程被杀/无法重启；
+     * 此处在 finally 中干净回收，防止进程泄漏。
      */
     fun stopIsolated(context: Context) {
         val handler = ipcHandler()
