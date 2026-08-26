@@ -150,33 +150,18 @@ object FileProcessor {
             val ocrForPrintMode = looksLikeGarbage || isFailedChinesePdf
             val ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = ocrForPrintMode)
             if (ocrRes != null) {
-                // v1.5.92: 合并可信文本层，补齐 OCR 漏掉的片段（不再仅限中文，英文/编号
-                // 型 PDF 如工程图的文本层同样可补齐）。用 normKey 软去重避免重复计数。
-                // v1.8.2: 文本层补回门限从 chars>0 提高到 fe>10，避免 PDF 文本层中的少量
-                // 孤立汉字/符号误码被补回到 OCR 结果（常见于纯英文工程图）。
-                val mergedTextRaw = if (ktRes.reliable && ktStats.second > 10 && ktRes.text.isNotBlank()) {
-                    val ocrKeys = ocrRes.text.lines().map { normKey(it) }.filter { it.isNotEmpty() }.toSet()
-                    val lines = ktRes.text.lines().map { it.trim() }.filter { it.length >= 3 }
-                    val sb = StringBuilder(ocrRes.text)
-                    for (ln in lines) {
-                        if (normKey(ln) !in ocrKeys) sb.append('\n').append(ln)
-                    }
-                    sb.toString()
-                } else ocrRes.text
-                // v1.8.2: 对 OCR+文本层合并后的最终文本再做一次中文噪声过滤，确保
-                // 1-3 个孤立 CJK（无西文词、无数字）被丢弃，覆盖 ML Kit/PDF 文本层来源。
-                // v1.8.3: 再叠加文档级 stripNoiseFarEast——旧 filter 的 CJK 判定漏掉全角/
-                // 中文标点（countTextKotlin 却计入“中文”），导致纯英文图纸中文数始终>0。
-                val mergedText = PdfOcrEngine.stripNoiseFarEast(PdfOcrEngine.filterStrongCjkNoise(mergedTextRaw))
-                val ocrStats = countTextKotlin(mergedText)
-                val mergedTag = if (mergedText != ocrRes.text) " +文本层" else ""
+                // v1.9.52: 对齐桌面版 extract_pdf 的 whole_poisoned 口径——触发 OCR 分支说明
+                // 该 PDF 是图纸类/图片型/文字层污染，应以整页 OCR 结果为准，不再把 Level1/Level2
+                // 的少量文本层补回 OCR（避免重复计数/污染）。
+                val finalText = PdfOcrEngine.stripNoiseFarEast(PdfOcrEngine.filterStrongCjkNoise(ocrRes.text))
+                val ocrStats = countTextKotlin(finalText)
                 val resMap = mapOf(
                     "name" to dName, "ext" to ".pdf",
                     "stats" to mapOf("words" to ocrStats.first, "fe" to ocrStats.second, "nc" to ocrStats.third, "chars" to ocrStats.fourth),
                     "meta" to emptyMap<String, Any?>(),
                     "pages" to ocrRes.pages,
-                    "diag" to "$pdfDiag\n(OCR补充$mergedTag)",
-                    "ocrNote" to PdfOcrEngine.buildOcrNote(ocrRes.pages, mergedTag)
+                    "diag" to "$pdfDiag\n(OCR补充)",
+                    "ocrNote" to PdfOcrEngine.buildOcrNote(ocrRes.pages, "")
                 )
                 ProcessOutput(resMap, null)
             } else {

@@ -113,126 +113,22 @@ object PdfOcrEngine {
             lastDiag = "OCR已禁用(ocrEnabled=false)"
             return null
         }
-        // 方案 C：惰性初始化强引擎（PaddleOCR）；模型缺失时 available=false，不抛异常、不阻断主流程
+        // v1.9.52: 提前初始化强引擎（PaddleOCR）；模型缺失时 available=false，不抛异常、不阻断主流程
         PaddleOcr.ensureInit(context)
         lastPaddleAvailable = PaddleOcr.available
         lastPaddleInitError = PaddleOcr.lastError ?: ""
         Log.d("WordCount", "PdfOcr 开始: ${file.name} (${file.length()} bytes) printMode=$forPrintMode ocrEnabled=${OcrEngine.ocrEnabled} ocrFailed=${OcrEngine.ocrFailed} strongOcr=${PaddleOcr.available} paddleErr=${lastPaddleInitError}")
 
-        // 1) 系统 PdfRenderer（v1.9.51: 图纸类页面在逐页渲染时即从一开始用 PaddleOCR 兜底，
-        //    不再跑到 N/N 后再二次全页 OCR；仅 ML Kit 召回低的页面触发 PaddleOCR）
-        val sys = renderWithSystem(context, file, forPrintMode, onProgress, allowPerPageStrong = PaddleOcr.available)
-        val sysDiag = lastDiag
-        if (sys != null) Log.d("WordCount", "PdfOcr 路径1(Sys) 召回 ${sys.text.length} 字")
-
-        // 2) PdfiumAndroid（仅在系统渲染召回偏低时补充，避免重复渲染）
-        val pdfium = if (sys == null || sys.text.length < LOW_RECALL) renderWithPdfium(context, file, forPrintMode) else null
-        val pdfiumDiag = lastDiag
-        if (pdfium != null) Log.d("WordCount", "PdfOcr 路径2(Pdfium) 召回 ${pdfium.text.length} 字")
-
-        val diag = StringBuilder()
-        if (sys != null) diag.append("[Sys:$sysDiag] ")
-        if (pdfium != null) diag.append("[Pdfium:$pdfiumDiag] ")
-
-        // ── 选取主路径结果（保持原优先级：高召回渲染 > 内嵌图 > 低召回渲染兜底）──
-        var primary: PdfOcrResult? = null
-        if (sys != null && sys.text.length >= LOW_RECALL) {
-            primary = sys
-        } else if (pdfium != null && pdfium.text.length >= LOW_RECALL) {
-            primary = pdfium
+        // v1.9.52: 对齐桌面版 extract_pdf 口径——进入 OCR 分支的 PDF 已被判定为图纸类/图片型/文字层污染，
+        // 直接走单一 OCR 引擎整页识别，不再先 ML Kit 再 PaddleOCR 双跑。
+        // 进度回调在“每页渲染+识别”完全结束后才触发，确保走到 N/N 时结果已出、不再卡在最后进度。
+        val result = if (PaddleOcr.available) {
+            renderAndRecognizeStrong(context, file, forPrintMode, onProgress)
         } else {
-            // 3) 内嵌图片提取（多策略）——栅格化/扫描件的最高分辨率来源
-            //    v1.5.91: 实测该 PDF 内嵌图原生 ~2088px，比 2x 整页渲染(~1682px)更清晰，
-            //    整页渲染召回偏低时改走内嵌图，可显著拉近与电脑版 RapidOCR 的字数。
-            Log.d("WordCount", "PdfOcr 尝试路径3(内嵌图片提取): ${file.name}")
-            val images = extractEmbeddedImages(file)
-            if (images.isNotEmpty()) {
-                val sb = StringBuilder()
-                var anyText = false
-                val pageHint = sys?.pages ?: pdfium?.pages ?: images.size
-                // v1.5.99: 内嵌图通常是最高分辨率来源，强引擎可用时优先用 PaddleOCR 分块识别
-                val useStrongForImages = PaddleOcr.available
-                for ((idx, bmp) in images.withIndex()) {
-                    try {
-                        val src = if (useStrongForImages) (enhanceBitmap(bmp) ?: bmp) else bmp
-                        val t = if (useStrongForImages) {
-                            try {
-                                recognizeTiledGeneric(src, upscalePx = 2560) { PaddleOcr.recognize(it) ?: "" }
-                            } finally {
-                                if (src !== bmp) src.recycle()
-                            }
-                        } else {
-                            OcrEngine.recognizeBitmap(bmp, skipPostFilter = true)
-                        }
-                        if (t.isNotBlank()) { sb.append(t).append('\n'); anyText = true }
-                        Log.d("WordCount", "PdfOcr(内嵌图${idx + 1},${if (useStrongForImages) "PaddleOCR" else "MLKit"}) OCR: ${t.length}字")
-                    } catch (_: Throwable) {}
-                    finally { bmp.recycle() }
-                }
-                if (anyText) {
-                    Log.d("WordCount", "PdfOcr(内嵌图片) 成功: ${images.size}张图, ${sb.trim().length}字")
-                    primary = PdfOcrResult(sb.toString().trim(), pageHint)
-                    diag.append("[内嵌图:${sb.trim().length}字] ")
-                } else {
-                    lastFailReason = FailReason.OCR_EMPTY
-                }
-            } else {
-                lastFailReason = FailReason.NO_EMBEDDED_IMAGES
-            }
-            // 内嵌图无果 -> 兜底用已有的少量渲染文字（避免完全 0）
-            if (primary == null) {
-                if (sys != null && sys.text.isNotBlank()) primary = sys
-                else if (pdfium != null && pdfium.text.isNotBlank()) primary = pdfium
-            }
+            renderWithSystemMlKit(context, file, forPrintMode, onProgress)
         }
 
-        lastPrimaryChars = primary?.text?.length ?: 0
-
-        // v1.9.51: 原"主路径跑到 N/N 后再二次全页 PaddleOCR"已移除（这是"卡在 N/N"的根因）。
-        // 现改为：图纸类页面在 renderWithSystem 逐页渲染时即从一开始用 PaddleOCR 兜底，
-        // 进度走到 N/N 即出结果，不再额外全页重试。strongRaw 置空，下列合并逻辑自然跳过。
-        val strongRaw: PdfOcrResult? = null
-
-        // v1.8.0: 过滤强引擎里的孤立短中文噪声（工程图符号/线条误识）。
-        // 不再依赖主路径是否有中文，只要强引擎出现 1-3 个孤立 CJK 字符就丢弃，避免纯英文
-        // 图纸被 PaddleOCR 的线条、剖面线、图框角标误识成汉字。
-        val strong = if (strongRaw != null) {
-            val filtered = filterStrongCjkNoise(strongRaw.text)
-            if (filtered.length < strongRaw.text.length) {
-                diag.append("[去噪:-${strongRaw.text.length - filtered.length}字] ")
-                strongRaw.copy(text = filtered)
-            } else strongRaw
-        } else strongRaw
-
-        // v1.5.99: 强引擎应与主路径合并（去重），而不是二选一。工程图往往 ML Kit 识出大字标题、
-        // PaddleOCR 识出小字标注，合并后才能逼近桌面 RapidOCR 的召回。
-        var result = when {
-            strong != null && primary != null -> {
-                val merged = mergeOcrTexts(primary.text, strong.text)
-                Log.d("WordCount", "PdfOcr 合并: 主路径${primary.text.length}字 + 强引擎${strong.text.length}字 -> ${merged.length}字")
-                PdfOcrResult(merged, primary.pages).also { diag.append("[合并后:${merged.length}字] ") }
-            }
-            strong != null -> strong
-            primary != null -> primary
-            else -> null
-        }
-
-        // v1.8.1: 对最终合并结果再做一次中文噪声过滤。ML Kit 主路径同样可能把工程符号/线条
-        // 误识成孤立汉字，且合并后的文本仍可能残留 1-3 个 CJK 噪声，二次过滤确保纯英文图纸
-        // 统计行中的中文归零。
-        result = result?.let { r ->
-            val filtered = filterStrongCjkNoise(r.text)
-            if (filtered.length < r.text.length) {
-                diag.append("[二次去噪:-${r.text.length - filtered.length}字] ")
-                r.copy(text = filtered)
-            } else r
-        }
-
-        // v1.5.100: 记录简明诊断供 UI 显示（v1.9.51: PaddleOCR 已并入 primary，lastStrongChars 由逐页兜底累加）
         lastMergedChars = result?.text?.length ?: 0
-
-        // 汇总最终诊断（v1.3.84: 累积所有路径）
-        lastDiag = diag.toString().trim()
         if (result == null) {
             if (lastDiag.isEmpty()) {
                 lastDiag = "全部路径失败: reason=${lastFailReason.name}"
@@ -383,24 +279,144 @@ object PdfOcrEngine {
         return if (any) PdfOcrResult(sb.toString().trim(), pageCount) else null
     }
 
-    // ══════════════════ 1) 系统 PdfRenderer ══════════════════
+    // ══════════════════ 1) PaddleOCR 强引擎路径 ══════════════════
 
-    // v1.9.51: allowPerPageStrong 仅图纸类页面(ML Kit 召回低)从一开始用 PaddleOCR 兜底
-    private fun renderWithSystem(context: Context, file: File, forPrintMode: Boolean = false, onProgress: ((Int, Int) -> Unit)? = null, allowPerPageStrong: Boolean = false): PdfOcrResult? {
+    /**
+     * v1.9.52: 对齐桌面版 RapidOCR 整页识别口径。
+     * 进入此函数的 PDF 已被上层判定为图纸类/图片型/文字层污染，直接整页渲染 → PaddleOCR，
+     * 不再先跑 ML Kit 再兜底 PaddleOCR。进度在每页识别完成后回调，杜绝"走到 N/N 还卡"。
+     */
+    private fun renderAndRecognizeStrong(context: Context, file: File, forPrintMode: Boolean, onProgress: ((Int, Int) -> Unit)?): PdfOcrResult? {
+        val diag = StringBuilder()
+        val sb = StringBuilder()
+        var anyText = false
+        var pageCount = 0
+        var blankCount = 0
+        var errorCount = 0
+
+        fun processBitmap(bmp: Bitmap, source: String, pageIdx: Int) {
+            try {
+                if (isBlankBitmap(bmp)) { blankCount++; return }
+                val dark = darkPixelRatio(bmp)
+                val needsInvert = dark > 95.0
+                val baseBmp = if (needsInvert) (invertBitmap(bmp) ?: bmp) else bmp
+                val enhanced = enhanceBitmap(baseBmp) ?: baseBmp
+                val raw = try {
+                    recognizeTiledGeneric(enhanced, upscalePx = 1280) { PaddleOcr.recognize(it) ?: "" }
+                } catch (_: Throwable) { "" }
+                val text = filterStrongCjkNoise(raw)
+                if (text.isNotBlank()) {
+                    sb.append(text).append('\n')
+                    anyText = true
+                    lastStrongChars += text.length
+                    diag.append(" p${pageIdx + 1}:$source=${text.length}")
+                } else {
+                    diag.append(" p${pageIdx + 1}:$source空")
+                }
+                if (enhanced !== baseBmp && enhanced !== bmp) enhanced.recycle()
+                if (baseBmp !== bmp) baseBmp.recycle()
+            } catch (_: Throwable) {
+                errorCount++
+                diag.append(" p${pageIdx + 1}:${source}Err")
+            }
+        }
+
+        // Stage 1: 系统 PdfRenderer（2x/3x 渲染）
+        var sysPfd: ParcelFileDescriptor? = null
+        var sysRenderer: PdfRenderer? = null
+        try {
+            sysPfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+            sysRenderer = PdfRenderer(sysPfd)
+            pageCount = sysRenderer.pageCount
+            val limit = min(pageCount, MAX_PAGES)
+            diag.append("Strong(Paddle): ${pageCount}页 print=$forPrintMode")
+            for (i in 0 until limit) {
+                try {
+                    val page = sysRenderer.openPage(i)
+                    try {
+                        val w = page.width; val h = page.height
+                        if (w <= 0 || h <= 0) continue
+                        val baseScale = computeScale(w, h)
+                        val rawScale = if (forPrintMode) baseScale * 3f else baseScale * 2f
+                        val scale = min(rawScale, MAX_DIM.toFloat() / max(w, h).toFloat())
+                        val bw = max(1, (w * scale).toInt()); val bh = max(1, (h * scale).toInt())
+                        val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { errorCount++; diag.append(" [p${i+1}:创建位图失败]"); continue }
+                        try {
+                            val renderMode = if (forPrintMode) PdfRenderer.Page.RENDER_MODE_FOR_PRINT else PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY
+                            page.render(bmp, null, null, renderMode)
+                            processBitmap(bmp, "Sys", i)
+                        } finally { bmp.recycle() }
+                    } finally { page.close() }
+                } catch (_: Throwable) { errorCount++ }
+                onProgress?.invoke(i + 1, pageCount)
+            }
+        } catch (e: Throwable) {
+            diag.append(" [sysErr:${e.javaClass.simpleName}]")
+            lastFailReason = FailReason.RENDER_FAILED
+            lastFailDetail = e.javaClass.simpleName + ": " + e.message
+        } finally {
+            runCatching { sysRenderer?.close() }
+            runCatching { sysPfd?.close() }
+        }
+
+        // Stage 2: PdfiumCore 兜底（系统渲染失败或全空时）
+        if (!anyText && pageCount > 0) {
+            try {
+                val core = PdfiumCore(context)
+                val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+                val doc = core.newDocument(pfd)
+                val pc = core.getPageCount(doc)
+                if (pageCount == 0) pageCount = pc
+                val limit = min(pc, MAX_PAGES)
+                diag.append(" | Pdfium fallback")
+                for (i in 0 until limit) {
+                    try {
+                        core.openPage(doc, i)
+                        val sz = core.getPageSize(doc, i) ?: continue
+                        val sw = sz.width.toInt(); val sh = sz.height.toInt()
+                        if (sw <= 0 || sh <= 0) continue
+                        val sc = min(3f, MAX_DIM.toFloat() / max(sw, sh))
+                        val bw = max(1, (sw * sc).toInt()); val bh = max(1, (sh * sc).toInt())
+                        val bmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) ?: continue
+                        try {
+                            core.renderPageBitmap(doc, bmp, i, 0, 0, bw, bh)
+                            processBitmap(bmp, "Pdfium", i)
+                        } finally { bmp.recycle() }
+                    } catch (_: Throwable) { errorCount++ }
+                    onProgress?.invoke(i + 1, pageCount)
+                }
+            } catch (e: Throwable) {
+                diag.append(" [pdfiumErr:${e.javaClass.simpleName}]")
+            }
+        }
+
+        lastStrongDiag = "强引擎:Paddle pages=$pageCount blank=$blankCount err=$errorCount$diag"
+        lastDiag = lastStrongDiag
+        val text = sb.toString().trim()
+        return if (text.isNotBlank()) PdfOcrResult(text, pageCount) else null
+    }
+
+    // ══════════════════ 2) ML Kit 兜底路径（PaddleOCR 不可用时）══════════════════
+
+    /**
+     * v1.9.52: PaddleOCR 模型缺失/初始化失败时的纯 ML Kit 兜底。
+     * 同样保证进度在每页 OCR 完成后回调，不再卡 N/N。
+     */
+    private fun renderWithSystemMlKit(context: Context, file: File, forPrintMode: Boolean, onProgress: ((Int, Int) -> Unit)?): PdfOcrResult? {
         val diag = StringBuilder()
         val pfd = try {
             ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
         } catch (e: Throwable) {
             lastFailReason = FailReason.RENDER_FAILED
             lastFailDetail = "PFD打开失败: ${e.javaClass.simpleName}"
-            lastDiag = "SysRenderer: $lastFailDetail"
+            lastDiag = "SysRenderer(MLKit): $lastFailDetail"
             return null
         }
         val renderer = try { PdfRenderer(pfd) } catch (e: Throwable) {
             runCatching { pfd.close() }
             lastFailReason = FailReason.RENDER_FAILED
             lastFailDetail = "PdfRenderer创建失败: ${e.javaClass.simpleName}"
-            lastDiag = "SysRenderer: $lastFailDetail"
+            lastDiag = "SysRenderer(MLKit): $lastFailDetail"
             return null
         }
         var result: PdfOcrResult? = null
@@ -408,22 +424,17 @@ object PdfOcrEngine {
             val pageCount = renderer.pageCount
             val limit = min(pageCount, MAX_PAGES)
             val sb = StringBuilder()
-            var anyRenderedContent = false; var anyOcrText = false; var pageErrors = 0
+            var anyRenderedContent = false; var pageErrors = 0
             var blankCount = 0; var ocrEmptyCount = 0
 
-            diag.append("SysRenderer: ${pageCount}页(forPrint=$forPrintMode)")
+            diag.append("SysRenderer(MLKit): ${pageCount}页(forPrint=$forPrintMode)")
 
             for (i in 0 until limit) {
-                onProgress?.invoke(i + 1, pageCount)
                 try {
                     val page = renderer.openPage(i)
                     try {
                         val w = page.width; val h = page.height
                         if (w <= 0 || h <= 0) continue
-                        // v1.3.81: PRINT模式用高分辨率+PRINT渲染，提升中文OCR识别率
-                        // v1.3.83: 提升到3x（2x仍可能分辨率不足导致ML Kit空结果）
-                        // v1.5.69: DISPLAY 模式也用 2x（原 1x 对小字识别率不足，导致扫描/图文 PDF 字数略少）；
-                        //   用 MAX_DIM 上限钳制，避免大图 OOM。PRINT 仍 3x（更清晰渲染）。
                         val baseScale = computeScale(w, h)
                         val rawScale = if (forPrintMode) baseScale * 3f else baseScale * 2f
                         val scale = min(rawScale, MAX_DIM.toFloat() / max(w, h).toFloat())
@@ -435,79 +446,28 @@ object PdfOcrEngine {
                             if (isBlankBitmap(bmp)) { blankCount++; continue }
                             anyRenderedContent = true
 
-                            // v1.3.85: 计算暗像素(文字)占比，判断渲染图是否有可见内容
                             val darkRatio = darkPixelRatio(bmp)
-                            if (i == 0) diag.append(" 暗像素:${String.format("%.2f", darkRatio)}%")
-
-                            // v1.3.86: 暗像素>95%→渲染图近乎全黑，自动反色后再OCR
                             val needsInvert = darkRatio > 95.0
                             var ocrBmp: Bitmap = bmp
                             var inverted: Bitmap? = null
                             if (needsInvert) {
                                 inverted = invertBitmap(bmp)
-                                if (inverted != null) {
-                                    ocrBmp = inverted
-                                    if (i == 0) diag.append("[已反色]")
-                                }
+                                if (inverted != null) ocrBmp = inverted
                             }
 
-                            // v1.3.84: 保存第一页渲染Bitmap到缓存，用于调试"ML Kit返回空"问题
-                            if (i == 0) {
-                                try {
-                                    val debugDir = File(context.cacheDir, "pdf_debug")
-                                    debugDir.mkdirs()
-                                    val debugFile = File(debugDir, "${file.nameWithoutExtension}_p0_render.png")
-                                    val fos = java.io.FileOutputStream(debugFile)
-                                    bmp.compress(Bitmap.CompressFormat.PNG, 90, fos)
-                                    fos.close()
-                                    Log.d("WordCount", "PdfOcr 调试: 已保存渲染位图 ${debugFile.absolutePath} (${debugFile.length()} bytes)")
-                                    diag.append(" [调试图已保存]")
-                                } catch (_: Throwable) {}
-                            }
-
-                            // v1.3.83: 区分OCR空结果 vs 异常，便于定位ML Kit问题
-                            var ocrResult = ""
-                            var ocrError: String? = null
-                            try {
-                                // v1.5.90: 改用分块 OCR（密集工程图整页召回低），提升 ML Kit 召回率
-                                ocrResult = recognizeTiled(ocrBmp)
-                            } catch (e: Exception) {
-                                ocrError = "${e.javaClass.simpleName}: ${e.message}"
-                            }
+                            val ocrResult = try { recognizeTiled(ocrBmp) } catch (_: Throwable) { "" }
                             if (ocrResult.isNotBlank()) {
-                                sb.append(ocrResult).append('\n'); anyOcrText = true
+                                sb.append(ocrResult).append('\n')
                                 diag.append(" p${i+1}:${ocrResult.length}字")
-                            } else if (ocrError != null) {
-                                ocrEmptyCount++
-                                diag.append(" [p${i+1}:OCR异常:${ocrError.take(60)}]")
                             } else {
                                 ocrEmptyCount++
-                                val tag = if (needsInvert && inverted != null) "反色后空" else "OCR空结果"
-                                diag.append(" [p${i+1}:$tag ${bw}x${bh}]")
-                            }
-                            // v1.9.51: 图纸类页面(ML Kit 召回低)从一开始即用 PaddleOCR 兜底。
-                            // 仅当本页 ML Kit 结果偏少且强引擎就绪时才触发——文字型页面 ML Kit 召回高，
-                            // 不触发 → 满足"只有图纸类PDF才走PaddleOCR"且"需要PaddleOCR的一开始就用上"。
-                            if (allowPerPageStrong && ocrResult.length < PER_PAGE_STRONG_TRIGGER) {
-                                try {
-                                    val src = (enhanceBitmap(ocrBmp) ?: ocrBmp)
-                                    val strongT = try {
-                                        recognizeTiledGeneric(src, upscalePx = 1280) { PaddleOcr.recognize(it) ?: "" }
-                                    } finally {
-                                        if (src !== ocrBmp) src.recycle()
-                                    }
-                                    val filtered = filterStrongCjkNoise(strongT)
-                                    if (filtered.isNotBlank()) {
-                                        ocrResult = if (ocrResult.isBlank()) filtered else mergeOcrTexts(ocrResult, filtered)
-                                        lastStrongChars += filtered.length
-                                        diag.append(" [p${i+1}:Paddle+${filtered.length}]")
-                                    }
-                                } catch (_: Throwable) {}
+                                diag.append(" [p${i+1}:OCR空结果 ${bw}x${bh}]")
                             }
                             inverted?.recycle()
                         } catch (_: Throwable) { pageErrors++ } finally { bmp.recycle() }
                     } finally { page.close() }
                 } catch (_: Throwable) { pageErrors++ }
+                onProgress?.invoke(i + 1, pageCount)
             }
 
             diag.append(" | 渲染:${if (anyRenderedContent) "有内容" else "全空白"} 空白:$blankCount OCR空:$ocrEmptyCount 错误:$pageErrors")
@@ -527,7 +487,7 @@ object PdfOcrEngine {
         return result
     }
 
-    // ══════════════════ 2) PdfiumAndroid ══════════════════
+    // ══════════════════ 3) PdfiumAndroid（旧入口，已不再被 extractText 调用，保留备用）══════════════════
 
     private fun renderWithPdfium(context: Context, file: File, forPrintMode: Boolean = false): PdfOcrResult? {
         val core = try { PdfiumCore(context) } catch (e: Throwable) {
