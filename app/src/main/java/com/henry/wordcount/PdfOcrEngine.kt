@@ -311,7 +311,7 @@ object PdfOcrEngine {
                     lastStrongChars += text.length
                     diag.append(" p${pageIdx + 1}:$source=${text.length}")
                 } else {
-                    diag.append(" p${pageIdx + 1}:$source空")
+                    diag.append(" p${pageIdx + 1}:${source}空")
                 }
                 if (enhanced !== baseBmp && enhanced !== bmp) enhanced.recycle()
                 if (baseBmp !== bmp) baseBmp.recycle()
