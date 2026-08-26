@@ -399,7 +399,11 @@ object DwgOleExtractor {
     // ───────────────────────── OCR ─────────────────────────
 
     private fun ocrBitmap(bmpBytes: ByteArray): String? {
-        val bmp = BitmapFactory.decodeByteArray(bmpBytes, 0, bmpBytes.size) ?: return null
+        // v1.9.51: BitmapFactory 对 32-bit BI_BITFIELDS 等 BMP 常返回 null，加手动解码回退
+        //          （对齐桌面 PIL），修复 FA-31018 类"仅 CONTENTS 位图"OLE 无法 OCR 问题。
+        var bmp = BitmapFactory.decodeByteArray(bmpBytes, 0, bmpBytes.size)
+        if (bmp == null) bmp = decodeBmpManual(bmpBytes)
+        if (bmp == null) return null
         return try {
             val scaled = scaleDown(bmp, 1600)
             val text = try {
@@ -413,6 +417,97 @@ object DwgOleExtractor {
             Log.w(TAG, "DwgOleExtractor.ocrBitmap 失败: ${e.message}")
             null
         }
+    }
+
+    /**
+     * v1.9.51: 手动解码 BMP，作为 BitmapFactory.decodeByteArray 的回退。
+     * Android BitmapFactory 对 32-bit BI_BITFIELDS（AutoCAD OLE 预览常见）常返回 null，
+     * 导致 OCR 拿不到图、字数归零（FA-31018 类"仅 CONTENTS 位图"OLE）。
+     * 对齐桌面 PIL：支持 24-bit BI_RGB 与 32-bit BI_RGB/BI_BITFIELDS，逐像素转 ARGB_8888。
+     */
+    private fun decodeBmpManual(data: ByteArray): Bitmap? {
+        return try {
+            val hasFileHeader = data.size >= 2 && data[0] == 0x42.toByte() && data[1] == 0x4D.toByte()
+            val dibOff = if (hasFileHeader) 14 else 0
+            if (data.size < dibOff + 40) return null
+            val headerSize = u32(data, dibOff)
+            if (headerSize < 40 || headerSize > 124) return null
+            val w = i32(data, dibOff + 4)
+            val h = i32(data, dibOff + 8)
+            val absW = kotlin.math.abs(w)
+            val absH = kotlin.math.abs(h)
+            if (absW <= 0 || absH <= 0 || absW > 20000 || absH > 20000) return null
+            val planes = u16(data, dibOff + 12)
+            if (planes != 1) return null
+            val bpp = u16(data, dibOff + 14)
+            if (bpp != 24 && bpp != 32) return null
+            val compression = u32(data, dibOff + 16)
+            if (compression != 0 && compression != 3) return null
+            val colorTableSize = if (bpp <= 8) {
+                val clrUsed = u32(data, dibOff + 32)
+                val n = if (clrUsed > 0) clrUsed else (1 shl bpp)
+                n * 4
+            } else 0
+            val maskOff = dibOff + headerSize
+            val pixelOff = if (hasFileHeader) u32(data, 10) else (maskOff + colorTableSize)
+            if (pixelOff <= 0 || pixelOff >= data.size) return null
+            val stride = if (bpp == 32) absW * 4 else ((bpp * absW + 31) / 32) * 4
+            val needed = stride * absH
+            if (pixelOff + needed > data.size) return null
+
+            val rMask = if (bpp == 32 && compression == 3) u32(data, maskOff) else 0x00FF0000
+            val gMask = if (bpp == 32 && compression == 3) u32(data, maskOff + 4) else 0x0000FF00
+            val bMask = if (bpp == 32 && compression == 3) u32(data, maskOff + 8) else 0x000000FF
+            val rSh = rShift(rMask); val gSh = rShift(gMask); val bSh = rShift(bMask)
+
+            val bmp = Bitmap.createBitmap(absW, absH, Bitmap.Config.ARGB_8888)
+            val pixels = IntArray(absW * absH)
+            var idx = 0
+            for (row in 0 until absH) {
+                // height 为正：底图行在文件最前，需翻转；为负：顶图向下
+                val srcRow = if (h >= 0) (absH - 1 - row) else row
+                val rowBase = pixelOff + srcRow * stride
+                for (col in 0 until absW) {
+                    val px = if (bpp == 24) {
+                        val off = rowBase + col * 3
+                        if (off + 3 > data.size) 0
+                        else {
+                            val bb = data[off].toInt() and 0xFF
+                            val gg = data[off + 1].toInt() and 0xFF
+                            val rr = data[off + 2].toInt() and 0xFF
+                            (0xFF shl 24) or (rr shl 16) or (gg shl 8) or bb
+                        }
+                    } else {
+                        val off = rowBase + col * 4
+                        if (off + 4 > data.size) 0
+                        else {
+                            val dw = (data[off].toInt() and 0xFF) or
+                                     ((data[off + 1].toInt() and 0xFF) shl 8) or
+                                     ((data[off + 2].toInt() and 0xFF) shl 16) or
+                                     ((data[off + 3].toInt() and 0xFF) shl 24)
+                            val rr = (dw and rMask) ushr rSh
+                            val gg = (dw and gMask) ushr gSh
+                            val bb = (dw and bMask) ushr bSh
+                            (0xFF shl 24) or ((rr and 0xFF) shl 16) or ((gg and 0xFF) shl 8) or (bb and 0xFF)
+                        }
+                    }
+                    pixels[idx++] = px
+                }
+            }
+            bmp.setPixels(pixels, 0, absW, 0, 0, absW, absH)
+            bmp
+        } catch (e: Throwable) {
+            Log.w(TAG, "DwgOleExtractor.decodeBmpManual 失败: ${e.message}")
+            null
+        }
+    }
+
+    /** 取最低置位位索引（用于 BI_BITFIELDS 通道掩码右移量）。mask=0 时返回 0 安全兜底。 */
+    private fun rShift(mask: Int): Int {
+        var m = mask
+        var s = 0
+        while (m != 0 && (m and 1) == 0) { m = m ushr 1; s++ }
+        return s
     }
 
     /** 按最大边长缩放，避免超大预览图 OOM；返回新 Bitmap 时回收旧图。 */
