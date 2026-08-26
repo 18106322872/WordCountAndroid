@@ -92,66 +92,66 @@ object DwgProcessor {
                         var pyNeedsPdf = obj.optBoolean("needs_pdf", false)
                         if (items.isEmpty() && !pyNeedsPdf) pyNeedsPdf = true
 
-                        if (items.isNotEmpty()) {
-                            pySuccessWithText = true
-                            // OLE 合并：office 嵌入文字走 Python；位图 OLE 兜底走 Kotlin ML Kit OCR
-                            val allItems = ArrayList(items)
-                            val oleMarks = ArrayList<String>()
-                            var oleOfficeOk = false
+                        // v1.9.41 FIX: OLE 合并 + IMAGE OCR 不再受 items 非空守卫限制。
+                        // 此前 FA-31018 这类"无矢量文字、仅 OLE 嵌入有字"的 DWG 被 items.isEmpty()
+                        // 守卫整段跳过，落到 Kotlin 兜底仍失败 → 显示 0 字（桌面据此统计出 2230 字）。
+                        // 现改为：矢量/ OLE / IMAGE 三路文字统一并入 allItems；仅当合并后确有文字才
+                        // 提前 return，否则（全空/纯噪声）仍落入下方 Kotlin 组码兜底，保持原 items 空行为。
+                        val allItems = ArrayList(items)
+                        val oleMarks = ArrayList<String>()
+                        var oleOfficeOk = false
+                        try {
+                            val oleJson = PythonEngine.extractOleOffice(context, pyDxfPath)
+                            val oo = JSONObject(oleJson)
+                            val oleErr = if (oo.has("error") && !oo.isNull("error")) oo.optString("error") else null
+                            if (!oleErr.isNullOrBlank()) diagnostics.append("ole_err=${oleErr.take(80)}; ")
+                            val joined = oo.optString("joined", "")
+                            if (joined.isNotBlank()) {
+                                for (ln in joined.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
+                                oleMarks.add("OLE-office")
+                                oleOfficeOk = true
+                            }
+                        } catch (e: Throwable) {
+                            diagnostics.append("ole_office_ex=${e.javaClass.simpleName}:${e.message}; ")
+                        }
+                        // v1.9.39: OLE office 与位图 OCR 不再互斥。FA-00003 等含大量嵌入位图(图例/截图/LOGO)
+                        // 的 DWG 此前因 oleOfficeOk=true 直接跳过位图 OCR 而漏字（桌面 RapidOCR 全量 OCR +4669 字）。
+                        try {
+                            val oleRes = DwgOleExtractor.extractOleText(pyDxfPath)
+                            if (oleRes.text.isNotBlank()) {
+                                for (ln in oleRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
+                                oleMarks.add("OLE-ocr")
+                            }
+                        } catch (_: Throwable) {}
+                        try {
+                            val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath)
+                            if (oleRes2.text.isNotBlank()) {
+                                for (ln in oleRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
+                                oleMarks.add("DWG-OLE-ocr")
+                            }
+                        } catch (_: Throwable) {}
+                        // v1.9.39: DWG 内嵌 IMAGE 实体 OCR（对齐桌面 RapidOCR IMAGE 口径）。
+                        if (imgPngs.isNotEmpty()) {
                             try {
-                                val oleJson = PythonEngine.extractOleOffice(context, pyDxfPath)
-                                val oo = JSONObject(oleJson)
-                                val oleErr = if (oo.has("error") && !oo.isNull("error")) oo.optString("error") else null
-                                if (!oleErr.isNullOrBlank()) diagnostics.append("ole_err=${oleErr.take(80)}; ")
-                                val joined = oo.optString("joined", "")
-                                if (joined.isNotBlank()) {
-                                    for (ln in joined.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
-                                    oleMarks.add("OLE-office")
-                                    oleOfficeOk = true
+                                val imgRes = DwgImageOcrExtractor.extract(context, imgPngs)
+                                if (imgRes.text.isNotBlank()) {
+                                    for (ln in imgRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
+                                    oleMarks.add("IMG-ocr(${imgRes.imagesScanned}/${imgRes.imagesScanned + imgRes.ocrFailed})")
+                                    diagnostics.append("img_ocr=${imgRes.imagesScanned}+${imgRes.ocrFailed}; ")
                                 }
                             } catch (e: Throwable) {
-                                diagnostics.append("ole_office_ex=${e.javaClass.simpleName}:${e.message}; ")
+                                diagnostics.append("img_ocr_ex=${e.javaClass.simpleName}:${e.message}; ")
                             }
-                            // v1.9.39: OLE office 与位图 OCR 不再互斥。此前 oleOfficeOk=true 时
-                            // 直接跳过位图 OCR，FA-00003 等含大量嵌入位图(图例/截图/LOGO)的 DWG 漏字
-                            // （桌面 RapidOCR 对全部嵌入图做 OCR，FA-00003 因此 +4669 字）。
-                            // 两路结果合并，最终由 FarEast 比例过滤兜底去噪。
                             try {
-                                val oleRes = DwgOleExtractor.extractOleText(pyDxfPath)
-                                if (oleRes.text.isNotBlank()) {
-                                    for (ln in oleRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
-                                    oleMarks.add("OLE-ocr")
-                                }
+                                imgPngs.forEach { java.io.File(it).delete() }
                             } catch (_: Throwable) {}
-                            try {
-                                val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath)
-                                if (oleRes2.text.isNotBlank()) {
-                                    for (ln in oleRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
-                                    oleMarks.add("DWG-OLE-ocr")
-                                }
-                            } catch (_: Throwable) {}
-                            // v1.9.39: DWG 内嵌 IMAGE 实体 OCR（对齐桌面 RapidOCR IMAGE 口径）。
-                            // cad_core 已用 ezdxf 把 IMAGE.embedded_image 导出为 PNG 落到 imgOutDir。
-                            if (imgPngs.isNotEmpty()) {
-                                try {
-                                    val imgRes = DwgImageOcrExtractor.extract(context, imgPngs)
-                                    if (imgRes.text.isNotBlank()) {
-                                        for (ln in imgRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
-                                        oleMarks.add("IMG-ocr(${imgRes.imagesScanned}/${imgRes.imagesScanned + imgRes.ocrFailed})")
-                                        diagnostics.append("img_ocr=${imgRes.imagesScanned}+${imgRes.ocrFailed}; ")
-                                    }
-                                } catch (e: Throwable) {
-                                    diagnostics.append("img_ocr_ex=${e.javaClass.simpleName}:${e.message}; ")
-                                }
-                                // 清理临时 PNG（保留最近一次以备排查；这里直接删避免堆积）
-                                try {
-                                    imgPngs.forEach { java.io.File(it).delete() }
-                                } catch (_: Throwable) {}
-                            }
+                        }
+                        if (allItems.isNotEmpty()) {
+                            // 合并后确有文字：仅当"文字全部来自 OLE/IMAGE、矢量 items 为空"时，
+                            // 视为已成功提取（与桌面口径一致，桌面 OLE 计为真实字数），故 needs_pdf 置 false；
+                            // 若矢量 items 本就非空，保留 cad_core 原汁原味的 pyNeedsPdf 判定。
+                            val finalNeedsPdf = if (items.isEmpty()) false else pyNeedsPdf
                             val pyReason = (pyPagesReason ?: "") + (if (oleMarks.isNotEmpty()) "·" + oleMarks.joinToString("·") else "")
-                            // v1.9.39: 对齐桌面口径。桌面对纯英文图纸 fe=0；手机端若 FarEast 占比 <15%
-                            // 视为伪中文噪声（全角数字/标点、GB18030 乱码解码、ML Kit 误识别），
-                            // 剔除全部 FarEast 后重新计数（真实中文 DWG 占比高，不受影响）。
                             val mergedAll = allItems.joinToString("\n")
                             val cleanedText = PdfOcrEngine.stripNoiseFarEast(mergedAll)
                             val cleanedItems = cleanedText.lines().map { it.trim() }.filter { it.isNotEmpty() }
@@ -164,7 +164,7 @@ object DwgProcessor {
                             val pyChars = co.optInt("chars", 0)
                             val diag = "PY:${diagnostics}items=${items.size}"
                             Log.d("WordCount", "DWG Python主路径 $dName: words=$pyWords fe=$pyFe nc=$pyNc chars=$pyChars pages=$pyPages($pyReason) items=${items.size}")
-                            return DwgProcessResult(pyWords, pyFe, pyNc, pyChars, pyPages, pyReason, pyNeedsPdf, diag, null, allItems.joinToString("\n"))
+                            return DwgProcessResult(pyWords, pyFe, pyNc, pyChars, pyPages, pyReason, finalNeedsPdf, diag, null, allItems.joinToString("\n"))
                         }
                     } catch (e: Throwable) {
                         diagnostics.append("py_ex=${e.javaClass.simpleName}:${e.message?.take(120)}; ")

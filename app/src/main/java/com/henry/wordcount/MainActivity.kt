@@ -4748,7 +4748,7 @@ private fun addFiles(
 
                 // 正常路径：结果由 CountingService 写入 wc_results.jsonl。
 
-                // 主进程轮询该文件恢复结果；看门狗兜底：30 分钟内未见到 BATCH_END 则强制收尾。
+                // 主进程轮询该文件恢复结果；看门狗兜底：60 分钟内未见到 BATCH_END 则强制收尾。
 
                 scope.launch {
 
@@ -4756,7 +4756,8 @@ private fun addFiles(
 
                     var elapsed = 0L
 
-                    while (isActive && !done && elapsed < 30 * 60 * 1000L) {
+                    // v1.9.41: 看门狗超时 30→60 分钟，避免超大/低密度 PDF 在强引擎 OCR 阶段被提前收尾而漏统计。
+                    while (isActive && !done && elapsed < 60 * 60 * 1000L) {
 
                         delay(1500L)
 
