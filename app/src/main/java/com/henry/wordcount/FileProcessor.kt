@@ -62,19 +62,21 @@ object FileProcessor {
         // v1.5.66: 用系统 PdfRenderer 取可靠页数
         val realPages = reliablePdfPageCount(f)
 
-        // v1.9.55: 高密度可靠文字层 PDF 走 Kotlin 快速路径，跳过 Python pdfminer 初始化与抽取，
-        // 直接秒出，显著缩短“准备中”等待。阈值：可靠、总字符>=500、每页>=500字符、
-        // 不含可疑的低 fe 伪中文（与桌面 pdfminer 口径差异极小，覆盖 3b016... 等纯英文文字层）。
+        // v1.9.56: 高密度文字层 PDF 走 Kotlin 快速路径，跳过 Python pdfminer 初始化与抽取，
+        // 直接秒出，显著缩短“准备中”等待。阈值：可靠、总字符>=500、每页>=500字符、不含可疑的低 fe 伪中文；
+        // 新增纯英文/非中文高密度路径（fe=0, nc>=500），覆盖 3b016... 等纯英文文字层。
         val denomPagesFast = if (realPages > 1) realPages else 1
         val ktCharsPerPage = ktStats.fourth.toDouble() / denomPagesFast
         val suspiciousLowFe = ktStats.second > 0 && ktStats.second < 30
-        if (ktRes.reliable && ktStats.fourth >= 500 && ktCharsPerPage >= 500.0 && !suspiciousLowFe) {
+        val pureNonCjkFast = ktStats.second == 0 && ktStats.third >= 500 && ktCharsPerPage >= 500.0
+        val normalFast = ktRes.reliable && ktStats.fourth >= 500 && ktCharsPerPage >= 500.0 && !suspiciousLowFe
+        if (normalFast || pureNonCjkFast) {
             return ProcessOutput(mapOf(
                 "name" to dName, "ext" to ".pdf",
                 "stats" to mapOf("words" to ktStats.first, "fe" to ktStats.second, "nc" to ktStats.third, "chars" to ktStats.fourth),
                 "meta" to emptyMap<String, Any?>(),
                 "pages" to denomPagesFast,
-                "diag" to "【PDF诊断】Kotlin快速路径：可靠文字层 ${ktStats.fourth}字/${denomPagesFast}页，跳过Python/OCR",
+                "diag" to "【PDF诊断】Kotlin快速路径：${ktStats.fourth}字(fe=${ktStats.second},nc=${ktStats.third})/${denomPagesFast}页，跳过Python/OCR",
                 "ocrNote" to "文本提取充分，未触发OCR"
             ), null)
         }

@@ -1462,13 +1462,10 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
 
                                 if (total > 0) {
 
-                                    // v1.9.55: 统计启动、尚未有文件完成时主界面同步显示“准备中”，避免空白。
-
-                                    val bigText = if (cur == 0) "准备中" else "${cur}/${total}"
-
+                                    // v1.9.56: 进度始终显示 cur/total，0/N 时下方额外显示“准备中...”，与通知栏对齐。
                                     Text(
 
-                                        text = bigText,
+                                        text = "${cur}/${total}",
 
                                         color = Color(0xFF1565C0),
 
@@ -1477,6 +1474,15 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
                                         fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
 
                                     )
+
+                                    if (cur == 0) {
+                                        Spacer(Modifier.height(2.dp))
+                                        Text(
+                                            text = "准备中...",
+                                            color = Color(0xFF1565C0),
+                                            fontSize = androidx.compose.ui.unit.TextUnit(13f, androidx.compose.ui.unit.TextUnitType.Sp)
+                                        )
+                                    }
 
                                     Spacer(Modifier.height(6.dp))
 

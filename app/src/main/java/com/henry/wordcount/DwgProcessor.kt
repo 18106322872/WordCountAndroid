@@ -203,11 +203,11 @@ object DwgProcessor {
                     }
                 } catch (_: Throwable) {}
                 try {
-                    val oleRes = DwgOleExtractor.extractOleText(pyDxfPath)
+                    val oleRes = DwgOleExtractor.extractOleText(pyDxfPath, context = context)
                     if (oleRes.text.isNotBlank()) { for (ln in oleRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) } }
                 } catch (_: Throwable) {}
                 try {
-                    val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath)
+                    val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath, context = context)
                     if (oleRes2.text.isNotBlank()) { for (ln in oleRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) } }
                 } catch (_: Throwable) {}
                 // v1.9.39: 兜底分支也跑 IMAGE OCR（用 cacheDir 已有 PNG，可能不存在则跳过）
