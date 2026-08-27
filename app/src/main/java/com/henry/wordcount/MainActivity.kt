@@ -1770,6 +1770,17 @@ fun FileCard(
 
                         )
 
+                        // v1.9.58: PDF 诊断短摘要常显（一眼看出走了文字层还是 OCR），
+                        // 完整决策详情见展开明细里的【PDF诊断】多行文本。
+                        if (r.ocrNote != null) {
+                            Text(
+                                r.ocrNote!!,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (r.ocrNote!!.contains("OCR未成功")) Color(0xFFB00020) else Color(0xFF2E7D32),
+                                modifier = Modifier.padding(top = 2.dp)
+                            )
+                        }
+
                         // v1.3.6: 明细折叠/展开切换（点击统计行展开）
 
                         // v1.3.34: 备注合并为一条汇总，所以 notesSlides 只算 1
@@ -2088,6 +2099,17 @@ fun FileCard(
 
                 }
 
+            }
+
+            // v1.9.58: PDF/DWG 完整诊断（含决策路径）放到展开明细末尾，便于复制发开发者定位。
+            val diagText = entry.result?.diag
+            if (!diagText.isNullOrBlank()) {
+                Text(
+                    diagText,
+                    Modifier.padding(start = 32.dp, top = 4.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.Gray
+                )
             }
 
             } // end expanded
