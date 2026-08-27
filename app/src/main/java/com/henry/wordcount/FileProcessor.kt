@@ -126,7 +126,10 @@ object FileProcessor {
         val cjkLooksLikeCidGarbage = !usePython && bestFe > 50 && cjkCommonRatio < 0.10
 
         val bestCjkRatio = if (bestChars > 0) bestFe.toDouble() / bestChars else 0.0
-        val looksLikeGarbage = bestChars > 200 && bestFe < 30 && bestCjkRatio < 0.15
+        // v1.9.53 FIX: 纯英文字符层 PDF（bestFe==0）不是「伪中文」，不应判为垃圾走 OCR。
+        // 桌面 extract_pdf 仅对「含 CJK 的文字层」做 CID 检测；纯英文文字层直接走文字层秒出。
+        // 此前 3b01623708fda016f81421fd6e4244dd.pdf（每页 3733 英文字符、fe=0）被误判→整本 19 页走 PaddleOCR 极慢。
+        val looksLikeGarbage = bestFe > 0 && bestChars > 200 && bestFe < 30 && bestCjkRatio < 0.15
         val isFailedChinesePdf = bestChars > 20 && bestFe == 0 && bestChars < 500
         val denomPages = if (realPages > 1) realPages else 1
         val avgCharsPerPage = bestChars.toDouble() / denomPages
