@@ -143,6 +143,9 @@ class CountingService : Service() {
         try {
             runCatching { PythonEngine.start(this@CountingService) }
             val cachedFiles = paths.mapIndexed { i, p -> CachedFile(File(p), names.getOrElse(i) { File(p).name }) }
+            // v1.9.55: 在第一个文件开始统计前，把“准备中”进度同步给主界面，避免主界面空白。
+            updateNotification("准备中...")
+            appendProgress("", 0, cachedFiles.size)
             processBatchToEntries(
                 context = this@CountingService,
                 cachedFiles = cachedFiles,

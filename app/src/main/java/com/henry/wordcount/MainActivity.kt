@@ -1462,9 +1462,13 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
 
                                 if (total > 0) {
 
+                                    // v1.9.55: 统计启动、尚未有文件完成时主界面同步显示“准备中”，避免空白。
+
+                                    val bigText = if (cur == 0) "准备中" else "${cur}/${total}"
+
                                     Text(
 
-                                        text = "${cur}/${total}",
+                                        text = bigText,
 
                                         color = Color(0xFF1565C0),
 
@@ -4759,9 +4763,11 @@ private fun addFiles(
                     // v1.9.41: 看门狗超时 30→60 分钟，避免超大/低密度 PDF 在强引擎 OCR 阶段被提前收尾而漏统计。
                     while (isActive && !done && elapsed < 60 * 60 * 1000L) {
 
-                        delay(1500L)
+                        // v1.9.55: 轮询间隔 1500ms → 500ms，让主界面进度更贴近通知栏进度。
 
-                        elapsed += 1500L
+                        delay(500L)
+
+                        elapsed += 500L
 
                         if (recoverResults(context, sink, mainProgress)) done = true
 

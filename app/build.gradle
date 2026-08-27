@@ -254,7 +254,7 @@ android {
 
 
 
-        versionCode 299
+        versionCode 300
 
 
 
@@ -270,7 +270,7 @@ android {
 
 
 
-        versionName '1.9.54'
+        versionName '1.9.55'
 
 
 
