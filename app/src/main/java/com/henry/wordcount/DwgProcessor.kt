@@ -117,7 +117,7 @@ object DwgProcessor {
                         // v1.9.39: OLE office 与位图 OCR 不再互斥。FA-00003 等含大量嵌入位图(图例/截图/LOGO)
                         // 的 DWG 此前因 oleOfficeOk=true 直接跳过位图 OCR 而漏字（桌面 RapidOCR 全量 OCR +4669 字）。
                         try {
-                            val oleRes = DwgOleExtractor.extractOleText(pyDxfPath)
+                            val oleRes = DwgOleExtractor.extractOleText(pyDxfPath, context = context)
                             // v1.9.53: 诊断 FA-31018 类「仅 OLE 位图」0 字——记录两条 OLE 路径实际返回
                             diagnostics.append("ole_dxf(obj=${oleRes.objects},txt=${oleRes.text.length}); ")
                             if (oleRes.text.isNotBlank()) {
@@ -126,7 +126,7 @@ object DwgProcessor {
                             }
                         } catch (_: Throwable) {}
                         try {
-                            val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath)
+                            val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath, context = context)
                             diagnostics.append("ole_dwg(cfb=${oleRes2.objects},txt=${oleRes2.text.length}); ")
                             if (oleRes2.text.isNotBlank()) {
                                 for (ln in oleRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }

@@ -47,7 +47,7 @@ object DwgOleExtractor {
      * 顺序：① office 嵌入（xlsx/docx/pptx Package 流 → ZIP → 文本）；② 预览位图 OCR。
      * @param dxfPath dwg→dxf 转换产物路径（不存在时直接返回空，绝不影响主流程）
      */
-    fun extractOleText(dxfPath: String, maxBitmaps: Int = MAX_BITMAPS_PER_FILE): OleExtractResult {
+    fun extractOleText(dxfPath: String, maxBitmaps: Int = MAX_BITMAPS_PER_FILE, context: Context? = null): OleExtractResult {
         return try {
             val blobs = findOleBlobs(dxfPath)
             if (blobs.isEmpty()) return OleExtractResult("", 0, 0)
@@ -85,7 +85,7 @@ object DwgOleExtractor {
                         if (allLines.size >= MAX_OCR_TEXT_CHARS) break
                         val stream = cfb.getStream(sname) ?: continue
                         val (bmp, _) = findBitmap(stream) ?: continue
-                        val text = ocrBitmap(bmp) ?: continue
+                        val text = ocrBitmap(bmp, context) ?: continue
                         if (text.isBlank()) continue
                         val lines = text.lines().map { it.trim() }.filter { it.length >= 2 }
                         if (lines.isEmpty()) continue
@@ -112,7 +112,7 @@ object DwgOleExtractor {
      * 不保留 OLE2FRAME 实体，导致 dxfPath 路径拿不到 OLE。直接扫 DWG 文件二进制可补救此情况，
      * 也能在 dwg2dxf 转换失败时（31003-31035 现象）作为 OLE 兜底来源。
      */
-    fun extractOleTextFromDwg(dwgPath: String, maxScans: Int = 64): OleExtractResult {
+    fun extractOleTextFromDwg(dwgPath: String, maxScans: Int = 64, context: Context? = null): OleExtractResult {
         return try {
             val file = File(dwgPath)
             if (!file.exists() || file.length() < 1024L) return OleExtractResult("", 0, 0)
@@ -159,7 +159,7 @@ object DwgOleExtractor {
                     for (sname in PRES_NAMES) {
                         val stream = cfb.getStream(sname) ?: continue
                         val (bmp, _) = findBitmap(stream) ?: continue
-                        val text = ocrBitmap(bmp) ?: continue
+                        val text = ocrBitmap(bmp, context) ?: continue
                         if (text.isBlank()) continue
                         val lines = text.lines().map { it.trim() }.filter { it.length >= 2 }
                         if (lines.isEmpty()) continue
@@ -398,16 +398,25 @@ object DwgOleExtractor {
 
     // ───────────────────────── OCR ─────────────────────────
 
-    private fun ocrBitmap(bmpBytes: ByteArray): String? {
-        // v1.9.51: BitmapFactory 对 32-bit BI_BITFIELDS 等 BMP 常返回 null，加手动解码回退
-        //          （对齐桌面 PIL），修复 FA-31018 类"仅 CONTENTS 位图"OLE 无法 OCR 问题。
+    private fun ocrBitmap(bmpBytes: ByteArray, context: Context? = null): String? {
+        // v1.9.54: OLE 预览位图 OCR 主引擎改为 PaddleOCR（与 v1.9.53 的 DWG IMAGE OCR 修复一致）。
+        // OLE 预览图多为粘贴进来的中文规格书/图框（CONTENTS 流里的 32-bit BMP），ML Kit 中文识别器
+        // 偏弱且 postFilter 易误剔真实中文（这正是 FA-31018 等"仅 OLE 位图"DWG 在移动端 0 字的根因）；
+        // PaddleOCR(PP-OCRv4) 与桌面 RapidOCR 同宗，保留全部中文字符，对齐桌面口径。
+        // PaddleOcr.available==false（模型缺失/初始化失败）时自动回退 ML Kit，零回归。
         var bmp = BitmapFactory.decodeByteArray(bmpBytes, 0, bmpBytes.size)
         if (bmp == null) bmp = decodeBmpManual(bmpBytes)
         if (bmp == null) return null
         return try {
             val scaled = scaleDown(bmp, 1600)
             val text = try {
-                OcrEngine.recognizeBitmap(scaled, true)
+                if (context != null) {
+                    PaddleOcr.ensureInit(context)
+                    if (PaddleOcr.available) PaddleOcr.recognize(scaled)
+                    else OcrEngine.recognizeBitmap(scaled, true)
+                } else {
+                    OcrEngine.recognizeBitmap(scaled, true)
+                }
             } finally {
                 if (scaled !== bmp) bmp.recycle()
                 scaled.recycle()
