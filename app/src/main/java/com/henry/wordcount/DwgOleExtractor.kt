@@ -43,6 +43,178 @@ object DwgOleExtractor {
     private const val MAX_BITMAPS_PER_FILE = 20
     private const val MAX_OCR_TEXT_CHARS = 12000
 
+    // ─────────── v1.9.62: OLE 收获通用逻辑（office / EMF矢量文字 / 位图OCR 三路并存） ───────────
+    private val EMF_SIG = byteArrayOf(0x20, 0x45, 0x4D, 0x46)   // " EMF" 位于 EMF 头偏移 40
+    private val ZIP_SIG = byteArrayOf(0x50, 0x4B, 0x03, 0x04)
+
+    /** 一次抽取过程内的去重/合并状态（跨 blob 共享，用于合并"同一对象粘贴多次"）。 */
+    private class HarvestState {
+        val acceptedFragSets = mutableListOf<Set<String>>()
+        val allLines = LinkedHashSet<String>()
+        var bitmapsOcred = 0
+    }
+
+    /** 把一段文本按行并入状态；与已接受对象高度相似则返回 false（视为重复粘贴）。 */
+    private fun addLines(text: String, st: HarvestState, minLen: Int): Boolean {
+        val lines = text.lines().map { it.trim() }.filter { it.length >= minLen }
+        if (lines.isEmpty()) return false
+        val fragSet = lines.toSet()
+        if (st.acceptedFragSets.any { jaccard(it, fragSet) >= 0.9 }) return false
+        st.acceptedFragSets.add(fragSet)
+        for (ln in lines) st.allLines.add(ln)
+        return true
+    }
+
+    /** 在任意字节流里定位 EMF 起始（dSignature " EMF" 位于 EMF 头偏移 40，且 iType==1）。 */
+    private fun findEmfStart(data: ByteArray): Int {
+        if (data.size < 48) return -1
+        var i = 40
+        val end = data.size - 4
+        while (i <= end) {
+            if (data[i] == EMF_SIG[0] && data[i + 1] == EMF_SIG[1] &&
+                data[i + 2] == EMF_SIG[2] && data[i + 3] == EMF_SIG[3]) {
+                val start = i - 40
+                if (start >= 0 && u32(data, start) == 1) return start
+            }
+            i++
+        }
+        return -1
+    }
+
+    /**
+     * v1.9.62: 直接从 EMF 矢量记录里抽文字（EMR_EXTTEXTOUTW / EMR_EXTTEXTOUTA）。
+     * 桌面用 Win32 GDI 把 EMF 渲染成 PNG 再 OCR；移动端没有 GDI，但粘贴进 CAD 的
+     * Excel/Word 内容在 EMF 里本身就是 Unicode 文字记录，直接解析比"渲染+OCR"更准、
+     * 更快、零识别损失。这是 FA-31018 这类"仅 OLE 矢量对象"DWG 在移动端只有个位数字的根因。
+     */
+    private fun extractEmfText(data: ByteArray, start0: Int): String {
+        val out = LinkedHashSet<String>()
+        var off = start0
+        val n = data.size
+        var guard = 0
+        while (off + 8 <= n && guard < 200000 && out.size < MAX_OCR_TEXT_CHARS) {
+            guard++
+            val type = u32(data, off)
+            val size = u32(data, off + 4)
+            if (size < 8 || off + size > n) break
+            if (type == 84 || type == 83) {           // EMR_EXTTEXTOUTW / EMR_EXTTEXTOUTA
+                try {
+                    // 布局：type(0) size(4) bounds(8,16B) iGraphicsMode(24) exScale(28) eyScale(32) → EmrText 始于 36
+                    val et = off + 36
+                    if (size >= 76 && et + 40 <= n) {
+                        val chars = u32(data, et + 8)
+                        val offString = u32(data, et + 12)
+                        if (chars >= 1 && chars <= 4000 && offString >= 0) {
+                            val sOff = et + offString
+                            val nBytes = if (type == 84) chars * 2 else chars
+                            if (sOff >= 0 && sOff + nBytes <= n) {
+                                val s = if (type == 84)
+                                    String(data, sOff, nBytes, Charsets.UTF_16LE)
+                                else
+                                    String(data, sOff, nBytes, Charsets.ISO_8859_1)
+                                val t = s.trim()
+                                if (t.isNotBlank()) out.add(t)
+                            }
+                        }
+                    }
+                } catch (_: Throwable) { /* 单条记录失败不影响整体 */ }
+            }
+            off += size
+            if (size == 0) break
+        }
+        return out.joinToString("\n")
+    }
+
+    /** 从任意字节里按 PK 头定位并解 ZIP 抽 Office 文本（不依赖 CFB 目录，抗目录损坏）。 */
+    private fun extractTextFromZipAt(data: ByteArray): String? {
+        val idx = indexOfBytesFrom(data, ZIP_SIG, 0)
+        if (idx < 0) return null
+        return try {
+            extractTextFromZip(data.copyOfRange(idx, data.size))
+        } catch (_: Throwable) { null }
+    }
+
+    /** 判定 CFB 流名是否像"预览/内容"流（名称常带大小写与不可见前缀差异）。 */
+    private fun isPresOrContentName(name: String): Boolean {
+        val n = name.lowercase()
+        if (PRES_NAMES.any { n.contains(it.lowercase()) }) return true
+        return n.contains("package") || n.contains("contents") || n.contains("content")
+            || n.contains("olepres") || n.contains("olpres") || n.contains("ole10native")
+            || n.contains("native") || n.contains("pres")
+    }
+
+    /**
+     * v1.9.62: 单个 OLE 对象的统一收获入口。
+     * 三路并存（此前 office 命中会 continue 掉 OCR，FA-00003 类位图漏字即由此而来）：
+     *   ① Office Package(ZIP) 文本 —— 100% 准确，最优先；
+     *   ② EMF 矢量文字记录直取     —— 无 GDI 也能拿到粘贴对象的真实文字；
+     *   ③ 预览位图 OCR             —— 兜底（1920/2560 双档放大）。
+     * 任一路径异常都只跳过该路径，绝不外抛（否则 DwgProcessor 会整文件失败）。
+     */
+    private fun harvestBlob(blob: ByteArray, context: Context?, maxBitmaps: Int, st: HarvestState) {
+        try {
+            val cfb = Cfb(blob)
+            // ① Office Package
+            val officeText = extractOfficeTextFromCfb(cfb)
+            if (!officeText.isNullOrBlank()) addLines(officeText, st, 1)
+            // ② EMF 矢量文字（每个候选流都试，命中即止）
+            for (name in cfb.listNames()) {
+                if (!isPresOrContentName(name)) continue
+                val stream = cfb.getStream(name) ?: continue
+                val emfStart = findEmfStart(stream)
+                if (emfStart < 0) continue
+                val t = extractEmfText(stream, emfStart)
+                if (t.isNotBlank()) { addLines(t, st, 2); break }
+            }
+            // ③ 预览位图 OCR（不再被 office/EMF 命中互斥掉）
+            for (name in cfb.listNames()) {
+                if (st.bitmapsOcred >= maxBitmaps) break
+                if (!isPresOrContentName(name)) continue
+                val stream = cfb.getStream(name) ?: continue
+                val (bmpBytes, _) = findBitmap(stream) ?: continue
+                val text = ocrBitmap(bmpBytes, context) ?: continue
+                if (text.isBlank()) continue
+                if (addLines(text, st, 2)) st.bitmapsOcred++
+            }
+            return
+        } catch (_: Throwable) { /* CFB 解析失败 → 走下方原始字节兜底 */ }
+
+        // 原始字节兜底：CFB 目录损坏/魔数误命中时仍能靠 magic 抢救
+        try {
+            val zipText = extractTextFromZipAt(blob)
+            if (!zipText.isNullOrBlank()) addLines(zipText, st, 1)
+            val emfStart = findEmfStart(blob)
+            if (emfStart >= 0) {
+                val t = extractEmfText(blob, emfStart)
+                if (t.isNotBlank()) addLines(t, st, 2)
+            }
+            if (st.bitmapsOcred < maxBitmaps) {
+                val bm = findBitmap(blob)
+                if (bm != null) {
+                    val text = ocrBitmap(bm.first, context)
+                    if (!text.isNullOrBlank() && addLines(text, st, 2)) st.bitmapsOcred++
+                }
+            }
+        } catch (_: Throwable) {}
+    }
+
+    /** 带起始下标的 indexOfBytes（用于大缓冲区连续扫描 CFB/EMF/ZIP 魔数）。 */
+    private fun indexOfBytesFrom(haystack: ByteArray, needle: ByteArray, from: Int): Int {
+        if (needle.isEmpty()) return from
+        if (needle.size > haystack.size) return -1
+        var i = maxOf(0, from)
+        while (i <= haystack.size - needle.size) {
+            var j = 0
+            while (j < needle.size) {
+                if (haystack[i + j] != needle[j]) break
+                j++
+            }
+            if (j == needle.size) return i
+            i++
+        }
+        return -1
+    }
+
     /**
      * 从 DXF 中抽取所有 OLE2FRAME 嵌入对象的文本。
      * 顺序：① office 嵌入（xlsx/docx/pptx Package 流 → ZIP → 文本）；② 预览位图 OCR。
@@ -53,55 +225,17 @@ object DwgOleExtractor {
             val blobs = findOleBlobs(dxfPath)
             if (blobs.isEmpty()) return OleExtractResult("", 0, 0)
 
-            // 已接受的文本行集合，用于合并「粘贴多次的同一对象」（近似桌面去重）
-            val acceptedFragSets = mutableListOf<Set<String>>()
-            val allLines = LinkedHashSet<String>()
-            var bitmapsOcred = 0
-
+            // v1.9.62: 统一走 harvestBlob——office / EMF矢量文字 / 位图OCR 三路并存
+            val st = HarvestState()
             for (blob in blobs) {
-                if (allLines.size >= MAX_OCR_TEXT_CHARS) break
+                if (st.allLines.size >= MAX_OCR_TEXT_CHARS) break
                 try {
-                    val cfb = Cfb(blob)
-                    // v1.9.9: 先尝试 Office Package 抽取（xlsx/docx/pptx 直接抽文字，比 OCR 准且快得多，
-                    // 对齐桌面 cad_ole_ocr.py 的 office 优先路径）。仅在 office 流缺失/损坏时回退 OCR。
-                    val officeText = extractOfficeTextFromCfb(cfb)
-                    var officeGot = false
-                    if (officeText != null && officeText.isNotBlank()) {
-                        val lines = officeText.lines().map { it.trim() }.filter { it.length >= 1 }
-                        if (lines.isNotEmpty()) {
-                            val fragSet = lines.toSet()
-                            if (acceptedFragSets.none { jaccard(it, fragSet) >= 0.9 }) {
-                                acceptedFragSets.add(fragSet)
-                                for (ln in lines) allLines.add(ln)
-                                officeGot = true
-                            } else {
-                                officeGot = true  // 算作识别过，但内容重复
-                            }
-                        }
-                    }
-                    if (officeGot) continue  // office 路径成功，跳过该 blob 的 OCR
-                    if (bitmapsOcred >= maxBitmaps) continue
-                    for (sname in PRES_NAMES) {
-                        if (bitmapsOcred >= maxBitmaps) break
-                        if (allLines.size >= MAX_OCR_TEXT_CHARS) break
-                        val stream = cfb.getStream(sname) ?: continue
-                        val (bmp, _) = findBitmap(stream) ?: continue
-                        val text = ocrBitmap(bmp, context) ?: continue
-                        if (text.isBlank()) continue
-                        val lines = text.lines().map { it.trim() }.filter { it.length >= 2 }
-                        if (lines.isEmpty()) continue
-                        // 对象合并：若本 blob 的行集合与已接受对象高度相似，视为同一粘贴对象，跳过
-                        val fragSet = lines.toSet()
-                        if (acceptedFragSets.any { jaccard(it, fragSet) >= 0.9 }) continue
-                        acceptedFragSets.add(fragSet)
-                        for (ln in lines) allLines.add(ln)
-                        bitmapsOcred++
-                    }
+                    harvestBlob(blob, context, maxBitmaps, st)
                 } catch (e: Throwable) {
                     Log.d(TAG, "DwgOleExtractor blob 解析失败(跳过): ${e.message}")
                 }
             }
-            OleExtractResult(allLines.joinToString("\n"), blobs.size, bitmapsOcred)
+            OleExtractResult(st.allLines.joinToString("\n"), blobs.size, st.bitmapsOcred)
         } catch (e: Throwable) {
             Log.w(TAG, "DwgOleExtractor.extractOleText 失败: ${e.message}")
             OleExtractResult("", 0, 0)
@@ -122,62 +256,52 @@ object DwgOleExtractor {
             val nRead = try { java.io.FileInputStream(file).use { it.read(buf) } } catch (e: Throwable) { return OleExtractResult("", 0, 0) }
             if (nRead < 512) return OleExtractResult("", 0, 0)
 
-            val acceptedFragSets = mutableListOf<Set<String>>()
-            val allLines = LinkedHashSet<String>()
+            // v1.9.62: 统一走 harvestBlob（office / EMF矢量文字 / 位图OCR 三路并存）
+            val st = HarvestState()
             var cfbCount = 0
             var i = 0
             val end = nRead - 8
-            while (i < end && cfbCount < maxScans && allLines.size < MAX_OCR_TEXT_CHARS) {
-                var j = i
-                var found = -1
-                while (j < end) {
-                    if (buf[j] == 0xD0.toByte() && buf[j+1] == 0xCF.toByte() && buf[j+2] == 0x11.toByte() && buf[j+3] == 0xE0.toByte()
-                        && buf[j+4] == 0xA1.toByte() && buf[j+5] == 0xB1.toByte() && buf[j+6] == 0x1A.toByte() && buf[j+7] == 0xE1.toByte()) {
-                        found = j; break
-                    }
-                    j++
-                }
-                if (found < 0) break
-                // 尝试解析该 CFB
-                val slice = buf.copyOfRange(found, nRead)
+            while (i < end && cfbCount < maxScans && st.allLines.size < MAX_OCR_TEXT_CHARS) {
+                val found = indexOfBytesFrom(buf, CFB_MAGIC, i)
+                if (found < 0 || found >= end) break
+                // 限制 slice 大小，避免超大 DWG 反复 copyOfRange 造成内存压力
+                val sliceEnd = (found.toLong() + 32L * 1024 * 1024).coerceAtMost(nRead.toLong()).toInt()
+                val slice = buf.copyOfRange(found, sliceEnd)
+                var parsed = false
                 try {
-                    val cfb = Cfb(slice)
-                    val officeText = extractOfficeTextFromCfb(cfb)
-                    var officeGot = false
-                    if (officeText != null && officeText.isNotBlank()) {
-                        val lines = officeText.lines().map { it.trim() }.filter { it.length >= 1 }
-                        if (lines.isNotEmpty()) {
-                            val fragSet = lines.toSet()
-                            if (acceptedFragSets.none { jaccard(it, fragSet) >= 0.9 }) {
-                                acceptedFragSets.add(fragSet)
-                                for (ln in lines) allLines.add(ln)
-                                officeGot = true
-                            } else { officeGot = true }
-                        }
-                    }
-                    if (officeGot) { cfbCount++; i = found + 512; continue }
-                    // 回退 OCR（限制每次只 OCR 1 张图，避免长耗时）
-                    for (sname in PRES_NAMES) {
-                        val stream = cfb.getStream(sname) ?: continue
-                        val (bmp, _) = findBitmap(stream) ?: continue
-                        val text = ocrBitmap(bmp, context) ?: continue
-                        if (text.isBlank()) continue
-                        val lines = text.lines().map { it.trim() }.filter { it.length >= 2 }
-                        if (lines.isEmpty()) continue
-                        val fragSet = lines.toSet()
-                        if (acceptedFragSets.any { jaccard(it, fragSet) >= 0.9 }) break
-                        acceptedFragSets.add(fragSet)
-                        for (ln in lines) allLines.add(ln)
-                        break  // 每 blob 仅 OCR 第一张图，避免超时
+                    Cfb(slice)   // 校验是否合法 CFB
+                    parsed = true
+                } catch (_: Throwable) {
+                    parsed = false
+                }
+                if (parsed) {
+                    try { harvestBlob(slice, context, 2, st) } catch (e: Throwable) {
+                        Log.d(TAG, "DwgOleExtractor CFB 收获失败(跳过): ${e.message}")
                     }
                     cfbCount++
                     i = found + 512
-                } catch (e: Throwable) {
-                    // 不是合法 CFB，跳过当前 magic 位置继续
+                } else {
+                    // 不是合法 CFB：仍尝试原始字节抢救（ZIP / EMF / DIB）
+                    try {
+                        val zipText = extractTextFromZipAt(slice)
+                        if (!zipText.isNullOrBlank()) addLines(zipText, st, 1)
+                        val emfStart = findEmfStart(slice)
+                        if (emfStart >= 0) {
+                            val t = extractEmfText(slice, emfStart)
+                            if (t.isNotBlank()) addLines(t, st, 2)
+                        }
+                        if (st.bitmapsOcred < 2) {
+                            val bm = findBitmap(slice)
+                            if (bm != null) {
+                                val text = ocrBitmap(bm.first, context)
+                                if (!text.isNullOrBlank() && addLines(text, st, 2)) st.bitmapsOcred++
+                            }
+                        }
+                    } catch (_: Throwable) {}
                     i = found + 1
                 }
             }
-            OleExtractResult(allLines.joinToString("\n"), cfbCount, 0)
+            OleExtractResult(st.allLines.joinToString("\n"), cfbCount, st.bitmapsOcred)
         } catch (e: Throwable) {
             Log.w(TAG, "DwgOleExtractor.extractOleTextFromDwg 失败: ${e.message}")
             OleExtractResult("", 0, 0)
@@ -200,8 +324,23 @@ object DwgOleExtractor {
      * 对齐桌面 cad_ole_ocr.py 的 office 优先路径。无 office 流或 ZIP 损坏时返回 null。
      */
     private fun extractOfficeTextFromCfb(cfb: Cfb): String? {
-        // Office Package 流名（CFB 内顶层流，名称大小写可能不同）
-        val pkgBytes = cfb.getStream("Package") ?: cfb.getStream("package")
+        // v1.9.62: 流名不再硬匹配——CFB 目录名常带大小写/不可见前缀差异（Package / package /
+        // \u0001Package / CONTENTS 等）。按"名称含 package 优先、其次含 contents"模糊取流，
+        // 且必须校验 PK 头；取不到再退回精确旧名，最后再对整段字节做 PK 扫描。
+        val names = cfb.listNames()
+        fun pick(vararg hints: String): ByteArray? {
+            for (h in hints) {
+                for (n in names) {
+                    if (!n.lowercase().contains(h)) continue
+                    val b = cfb.getStream(n) ?: continue
+                    if (b.size >= 4 && b[0] == ZIP_MAGIC[0] && b[1] == ZIP_MAGIC[1] &&
+                        b[2] == ZIP_MAGIC[2] && b[3] == ZIP_MAGIC[3]) return b
+                }
+            }
+            return null
+        }
+        val pkgBytes = pick("package") ?: pick("contents", "content")
+            ?: cfb.getStream("Package") ?: cfb.getStream("package")
             ?: cfb.getStream("Contents") ?: cfb.getStream("CONTENTS")
             ?: cfb.getStream("CONTENTS\u0000") ?: return null
         if (pkgBytes.size < 4) return null
@@ -409,23 +548,35 @@ object DwgOleExtractor {
         if (bmp == null) bmp = decodeBmpManual(bmpBytes)
         if (bmp == null) return null
         return try {
-            val scaled = scaleToLong(bmp, 1920)
-            val text = try {
-                if (context != null) {
-                    PaddleOcr.ensureInit(context)
-                    if (PaddleOcr.available) PaddleOcr.recognize(scaled)
-                    else OcrEngine.recognizeBitmap(scaled, true)
-                } else {
-                    OcrEngine.recognizeBitmap(scaled, true)
-                }
-            } finally {
-                if (scaled !== bmp) bmp.recycle()
-                scaled.recycle()
-            }
-            text
+            // v1.9.62: 双档放大识别。小预览图（如 544×209）在 1920 档仍可能字太细，
+            // 首档结果过短（<30 字）时再用 2560 档重试一次，取更丰富的一份。
+            val t1 = recognizeAt(bmp, 1920, context)
+            val len1 = t1?.trim()?.length ?: 0
+            if (len1 >= 30) return t1
+            val t2 = recognizeAt(bmp, 2560, context)
+            val len2 = t2?.trim()?.length ?: 0
+            if (len2 > len1) t2 else (t1 ?: t2)
         } catch (e: Throwable) {
             Log.w(TAG, "DwgOleExtractor.ocrBitmap 失败: ${e.message}")
             null
+        } finally {
+            try { bmp.recycle() } catch (_: Throwable) {}
+        }
+    }
+
+    /** 按目标最长边缩放后识别（PaddleOCR 优先，不可用时回退 ML Kit）。 */
+    private fun recognizeAt(src: Bitmap, targetDim: Int, context: Context?): String? {
+        val scaled = scaleToLong(src, targetDim)
+        return try {
+            if (context != null) {
+                PaddleOcr.ensureInit(context)
+                if (PaddleOcr.available) PaddleOcr.recognize(scaled)
+                else OcrEngine.recognizeBitmap(scaled, true)
+            } else {
+                OcrEngine.recognizeBitmap(scaled, true)
+            }
+        } finally {
+            if (scaled !== src) { try { scaled.recycle() } catch (_: Throwable) {} }
         }
     }
 
@@ -450,7 +601,8 @@ object DwgOleExtractor {
             val planes = u16(data, dibOff + 12)
             if (planes != 1) return null
             val bpp = u16(data, dibOff + 14)
-            if (bpp != 24 && bpp != 32) return null
+            // v1.9.62: 支持 1/4/8-bit 索引色预览图（此前只认 24/32，8-bit 预览直接解码失败 → 漏字）
+            if (bpp != 1 && bpp != 4 && bpp != 8 && bpp != 24 && bpp != 32) return null
             val compression = u32(data, dibOff + 16)
             if (compression != 0 && compression != 3) return null
             val colorTableSize = if (bpp <= 8) {
@@ -470,6 +622,22 @@ object DwgOleExtractor {
             val bMask = if (bpp == 32 && compression == 3) u32(data, maskOff + 8) else 0x000000FF
             val rSh = rShift(rMask); val gSh = rShift(gMask); val bSh = rShift(bMask)
 
+            // v1.9.62: 索引色（1/4/8-bit）调色板：位于 DIB 头之后，每项 4 字节 BGRA
+            val palette = if (bpp <= 8) {
+                val n = 1 shl bpp
+                val pal = IntArray(n)
+                var k = 0
+                while (k < n) {
+                    val p = maskOff + k * 4
+                    val bb = if (p + 2 < data.size) data[p].toInt() and 0xFF else 0
+                    val gg = if (p + 1 < data.size) data[p + 1].toInt() and 0xFF else 0
+                    val rr = if (p < data.size) data[p + 2].toInt() and 0xFF else 0
+                    pal[k] = (0xFF shl 24) or (rr shl 16) or (gg shl 8) or bb
+                    k++
+                }
+                pal
+            } else IntArray(0)
+
             val bmp = Bitmap.createBitmap(absW, absH, Bitmap.Config.ARGB_8888)
             val pixels = IntArray(absW * absH)
             var idx = 0
@@ -478,6 +646,17 @@ object DwgOleExtractor {
                 val srcRow = if (h >= 0) (absH - 1 - row) else row
                 val rowBase = pixelOff + srcRow * stride
                 for (col in 0 until absW) {
+                    if (bpp <= 8) {
+                        // 索引色：按位取出调色板下标（1/4/8-bit 打包，行按 4 字节对齐）
+                        val bitPos = col * bpp
+                        val byteOff = rowBase + (bitPos ushr 3)
+                        if (byteOff < 0 || byteOff >= data.size) { pixels[idx++] = 0xFF000000.toInt(); continue }
+                        val raw = data[byteOff].toInt() and 0xFF
+                        val shift = 8 - bpp - (bitPos and 7)
+                        val palIdx = (raw ushr shift) and ((1 shl bpp) - 1)
+                        pixels[idx++] = if (palIdx < palette.size) palette[palIdx] else 0xFF000000.toInt()
+                        continue
+                    }
                     val px = if (bpp == 24) {
                         val off = rowBase + col * 3
                         if (off + 3 > data.size) 0
@@ -719,6 +898,9 @@ object DwgOleExtractor {
                 }
             }
         }
+
+        /** v1.9.62: 暴露目录内所有流名，供"模糊匹配"取 Package / OlePres / Ole10Native 等流。 */
+        fun listNames(): List<String> = streams.keys.toList()
 
         fun getStream(name: String): ByteArray? {
             val (start, size) = streams[name] ?: return null
