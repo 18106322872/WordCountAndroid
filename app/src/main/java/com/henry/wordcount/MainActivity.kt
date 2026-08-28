@@ -433,7 +433,7 @@ fun WordCountApp(initialUris: List<Uri>) {
      * v1.9.62: 是否处于"已暂停"——直接由进度文案前缀派生，
      * 这样服务侧恢复统计、进度一更新，弹窗自动切回「暂停统计 / 停止统计」，无需额外同步状态。
      */
-    val countPaused: Boolean get() = progressText?.startsWith("已暂停") == true
+    val countPaused: Boolean = progressText?.startsWith("已暂停") == true
 
     /** v1.9.62: 暂停前的进度文案，继续时原样恢复。 */
     var pausedProgressText by remember { mutableStateOf<String?>(null) }
