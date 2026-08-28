@@ -433,8 +433,7 @@ fun WordCountApp(initialUris: List<Uri>) {
      * v1.9.62: 是否处于"已暂停"——直接由进度文案前缀派生，
      * 这样服务侧恢复统计、进度一更新，弹窗自动切回「暂停统计 / 停止统计」，无需额外同步状态。
      */
-    val countPaused: Boolean
-        get() = progressText?.startsWith("已暂停") == true
+    val countPaused: Boolean get() = progressText?.startsWith("已暂停") == true
 
     /** v1.9.62: 暂停前的进度文案，继续时原样恢复。 */
     var pausedProgressText by remember { mutableStateOf<String?>(null) }
@@ -2645,7 +2644,7 @@ internal suspend fun processDwgPipelined(
         kotlinx.coroutines.coroutineScope {
             val channel = kotlinx.coroutines.channels.Channel<Pair<Int, DwgProcessor.DwgConvertOutcome?>>(capacity = 1)
             // 生产者：阶段A 转换（串行，独占 :dwgisolated）
-            kotlinx.coroutines.launch(kotlinx.coroutines.Dispatchers.IO) {
+            launch(kotlinx.coroutines.Dispatchers.IO) {
                 try {
                     for ((idx, cf) in dwgFiles.withIndex()) {
                         control.waitIfPaused()
@@ -2662,9 +2661,15 @@ internal suspend fun processDwgPipelined(
                 }
             }
             // 消费者：阶段B 解析 + OCR + 计数（单线程串行，保护 PaddleOCR 单例与 Chaquopy）
-            kotlinx.coroutines.launch(kotlinx.coroutines.Dispatchers.IO) {
+            launch(kotlinx.coroutines.Dispatchers.IO) {
                 var done = 0
-                for ((idx, conv) in channel) {
+                // 用 receiveCatching 显式取元素（避免依赖 ReceiveChannel.iterator 扩展的 import）
+                while (true) {
+                    val rc = channel.receiveCatching()
+                    if (rc.isClosed) break
+                    val item = rc.getOrNull() ?: continue
+                    val idx = item.first
+                    val conv = item.second
                     control.waitIfPaused()
                     if (control.stopped) break
                     val cf = dwgFiles[idx]
