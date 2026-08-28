@@ -29,8 +29,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.pointerInput
 
 import androidx.compose.foundation.layout.Arrangement
 
@@ -1513,7 +1511,7 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
 
                                 Modifier.fillMaxWidth()
 
-                                    .pointerInput(Unit) { detectTapGestures(onLongPress = { showCountControl = true }) }
+                                    .combinedClickable(onClick = {}, onLongClick = { showCountControl = true })
 
                                     .padding(horizontal = 12.dp, vertical = 6.dp),
 
