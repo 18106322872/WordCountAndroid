@@ -50,20 +50,28 @@ object ArchiveEngine {
 
     /** cacheDir 用于解包内层文件到临时文件。返回 null 表示不支持或解析失败。
      *  context 参数用于内层图片/PDF 的 OCR 统计。 */
-    suspend fun extract(file: File, cacheDir: File, context: Context? = null, onProgress: ((Int, Int) -> Unit)? = null): ArchiveResult? {
+    /**
+     * v1.9.63: 新增 gate / onInner 回调。
+     *  - gate: 返回 false 表示"已停止"，调用方应立即终止整包（暂停时 gate 会阻塞到继续）。
+     *  - onInner: 每个内层文件统计完成后立即回调，供上层"边统计边 emit 条目"，
+     *    这样暂停时主界面就能显示已经统计出来的字数（此前整包只产出一个聚合条目，
+     *    统计中途暂停汇总永远为 0）。
+     */
+    suspend fun extract(file: File, cacheDir: File, context: Context? = null, onProgress: ((Int, Int) -> Unit)? = null,
+                        gate: (() -> Boolean)? = null, onInner: ((InnerResult) -> Unit)? = null): ArchiveResult? {
         return try {
             val ext = file.extension.lowercase()
             when {
-                ext == "zip" || (ext.isBlank() && isZipMagic(file)) -> fromZipCommonsCompress(file, cacheDir, context, onProgress)
-                ext == "rar" || (ext.isBlank() && isRarMagic(file)) -> fromRar(file, cacheDir, context, onProgress)
-                ext in setOf("gz", "tgz") -> fromGzip(file, cacheDir, context)
-                ext == "tar" || (ext.isBlank() && isTarMagic(file)) -> fromTarDirect(file, cacheDir, context)
-                ext == "7z" -> fromSevenZip(file, cacheDir, context)
+                ext == "zip" || (ext.isBlank() && isZipMagic(file)) -> fromZipCommonsCompress(file, cacheDir, context, onProgress, gate, onInner)
+                ext == "rar" || (ext.isBlank() && isRarMagic(file)) -> fromRar(file, cacheDir, context, onProgress, gate, onInner)
+                ext in setOf("gz", "tgz") -> fromGzip(file, cacheDir, context, gate, onInner)
+                ext == "tar" || (ext.isBlank() && isTarMagic(file)) -> fromTarDirect(file, cacheDir, context, gate, onInner)
+                ext == "7z" -> fromSevenZip(file, cacheDir, context, gate, onInner)
                 else -> {
                     // 兜底：按 magic bytes 再试一次
-                    if (isZipMagic(file)) fromZipCommonsCompress(file, cacheDir, context, onProgress)
-                    else if (isRarMagic(file)) fromRar(file, cacheDir, context, onProgress)
-                    else if (isGzipMagic(file)) fromGzip(file, cacheDir, context)
+                    if (isZipMagic(file)) fromZipCommonsCompress(file, cacheDir, context, onProgress, gate, onInner)
+                    else if (isRarMagic(file)) fromRar(file, cacheDir, context, onProgress, gate, onInner)
+                    else if (isGzipMagic(file)) fromGzip(file, cacheDir, context, gate, onInner)
                     else null
                 }
             }
@@ -119,24 +127,27 @@ object ArchiveEngine {
     }
 
     // ──────────────────── ZIP (commons-compress) ────────────────────
-    private suspend fun fromZipCommonsCompress(file: File, cacheDir: File, context: Context?, onProgress: ((Int, Int) -> Unit)? = null): ArchiveResult {
+    private suspend fun fromZipCommonsCompress(file: File, cacheDir: File, context: Context?, onProgress: ((Int, Int) -> Unit)? = null,
+                                                gate: (() -> Boolean)? = null, onInner: ((InnerResult) -> Unit)? = null): ArchiveResult {
         val inner = mutableListOf<InnerResult>()
         org.apache.commons.compress.archivers.zip.ZipFile(file).use { zis ->
             val entries = zis.entries
             val zipTotal = zis.entries.toList().size
             var zipDone = 0
             while (entries.hasMoreElements()) {
+                if (gate?.invoke() == false) break
                 val entry = entries.nextElement() as ZipArchiveEntry
                 zipDone++
                 onProgress?.invoke(zipDone, zipTotal)
                 if (entry.isDirectory) continue
                 val bytes = zis.getInputStream(entry)?.readBytes() ?: continue
-                processEntry(entry.name, bytes, cacheDir, inner, context)
+                val ir = processEntry(entry.name, bytes, cacheDir, context)
+                if (ir != null) { inner.add(ir); onInner?.invoke(ir) }
                 // 嵌套 zip
                 if (entry.name.lowercase().endsWith(".zip")) {
                     val nestedTmp = writeTemp(bytes, entry.name, cacheDir)
                     if (nestedTmp != null) {
-                        val nestedRes = extract(nestedTmp, cacheDir, context)
+                        val nestedRes = extract(nestedTmp, cacheDir, context, gate = gate, onInner = onInner)
                         if (nestedRes != null) inner.addAll(nestedRes.inner)
                         nestedTmp.delete()
                     }
@@ -147,7 +158,8 @@ object ArchiveEngine {
     }
 
     // ──────────────────── RAR (unrar5j，支持 RAR4/RAR5) ────────────────────
-    private suspend fun fromRar(file: File, cacheDir: File, context: Context?, onProgress: ((Int, Int) -> Unit)? = null): ArchiveResult? {
+    private suspend fun fromRar(file: File, cacheDir: File, context: Context?, onProgress: ((Int, Int) -> Unit)? = null,
+                                gate: (() -> Boolean)? = null, onInner: ((InnerResult) -> Unit)? = null): ArchiveResult? {
         val inner = mutableListOf<InnerResult>()
         val dest = File(cacheDir, "rar_${System.currentTimeMillis()}")
         dest.mkdirs()
@@ -163,12 +175,18 @@ object ArchiveEngine {
                 }
                 val rarFiles = dest.walkTopDown().filter { it.isFile }.toList()
                 val rarTotal = rarFiles.size
-                rarFiles.forEachIndexed { idx, f ->
+                for ((idx, f) in rarFiles.withIndex()) {
+                    // v1.9.63: 内层文件边界检查暂停/停止闸门——暂停时阻塞到继续，停止时终止整包。
+                    // 这样暂停期间已统计完成的内层文件已通过 onInner 落盘，主界面汇总不再为 0。
+                    if (gate?.invoke() == false) break
                     // v1.9.1: 处理前先上报已完成数，保证进入首个大文件（DWG 可能数分钟）时界面即有提示
                     onProgress?.invoke(idx, rarTotal)
                     // v1.5.88: 保留 RAR 内相对路径，避免同名文件被覆盖/统计显示不全
                     val relName = f.relativeTo(dest).path.replace('\\', '/')
-                    try { processEntry(relName, f.readBytes(), cacheDir, inner, context) } catch (_: Throwable) {}
+                    try {
+                        val ir = processEntry(relName, f.readBytes(), cacheDir, context)
+                        if (ir != null) { inner.add(ir); onInner?.invoke(ir) }
+                    } catch (_: Throwable) {}
                     onProgress?.invoke(idx + 1, rarTotal)
                 }
                 Log.d("WordCount", "RAR processed ${file.name}: innerFiles=${inner.size}")
@@ -183,38 +201,46 @@ object ArchiveEngine {
     }
 
     // ──────────────────── GZ / TGZ ────────────────────
-    private suspend fun fromGzip(file: File, cacheDir: File, context: Context?): ArchiveResult {
+    private suspend fun fromGzip(file: File, cacheDir: File, context: Context?,
+                                 gate: (() -> Boolean)? = null, onInner: ((InnerResult) -> Unit)? = null): ArchiveResult {
         val bytes = file.readBytes()
         val decompressed = gunzipCompat(bytes)
         val inner = mutableListOf<InnerResult>()
         val isTar = decompressed.size > 262 &&
                 String(decompressed.copyOfRange(257, 262), StandardCharsets.ISO_8859_1) == "ustar"
         if (isTar || file.extension.lowercase() == "tgz") {
-            processTar(decompressed, cacheDir, inner, context)
+            processTar(decompressed, cacheDir, inner, context, gate, onInner)
         } else {
             val baseName = file.name.removeSuffix(".gz").removeSuffix(".GZ")
-            processEntry(baseName, decompressed, cacheDir, inner, context)
+            val ir = processEntry(baseName, decompressed, cacheDir, context)
+            if (ir != null) { inner.add(ir); onInner?.invoke(ir) }
         }
         return aggregate(inner)
     }
 
     // ──────────────────── TAR ────────────────────
-    private suspend fun fromTarDirect(file: File, cacheDir: File, context: Context?): ArchiveResult {
+    private suspend fun fromTarDirect(file: File, cacheDir: File, context: Context?,
+                                      gate: (() -> Boolean)? = null, onInner: ((InnerResult) -> Unit)? = null): ArchiveResult {
         val bytes = file.readBytes()
         val inner = mutableListOf<InnerResult>()
-        processTar(bytes, cacheDir, inner, context)
+        processTar(bytes, cacheDir, inner, context, gate, onInner)
         return aggregate(inner)
     }
 
     /** 7Z（commons-compress SevenZFile） */
-    private suspend fun fromSevenZip(file: File, cacheDir: File, context: Context?): ArchiveResult {
+    private suspend fun fromSevenZip(file: File, cacheDir: File, context: Context?,
+                                     gate: (() -> Boolean)? = null, onInner: ((InnerResult) -> Unit)? = null): ArchiveResult {
         val inner = mutableListOf<InnerResult>()
         SevenZFile(file).use { sevenz ->
             while (true) {
+                if (gate?.invoke() == false) break
                 val entry = sevenz.nextEntry ?: break
                 if (!entry.isDirectory) {
                     val bytes = sevenz.getInputStream(entry).readBytes()
-                    if (bytes.isNotEmpty()) processEntry(entry.name, bytes, cacheDir, inner, context)
+                    if (bytes.isNotEmpty()) {
+                        val ir = processEntry(entry.name, bytes, cacheDir, context)
+                        if (ir != null) { inner.add(ir); onInner?.invoke(ir) }
+                    }
                 }
             }
         }
@@ -222,10 +248,12 @@ object ArchiveEngine {
     }
 
     // ──────────────────── TAR 解析器（复用原有逻辑） ────────────────────
-    private suspend fun processTar(bytes: ByteArray, cacheDir: File, inner: MutableList<InnerResult>, context: Context? = null) {
+    private suspend fun processTar(bytes: ByteArray, cacheDir: File, inner: MutableList<InnerResult>, context: Context? = null,
+                                    gate: (() -> Boolean)? = null, onInner: ((InnerResult) -> Unit)? = null) {
         var pos = 0
         var pendingLongName: String? = null
         while (pos + 512 <= bytes.size) {
+            if (gate?.invoke() == false) break
             val header = bytes.copyOfRange(pos, pos + 512)
             pos += 512
             val name = readTarName(header)
@@ -242,7 +270,10 @@ object ArchiveEngine {
                 '0', '\u0000' -> {
                     val finalName = pendingLongName?.let { if (name.isNotEmpty()) "$it/$name" else it } ?: name
                     pendingLongName = null
-                    if (finalName.isNotBlank()) processEntry(finalName, data, cacheDir, inner, context)
+                    if (finalName.isNotBlank()) {
+                        val ir = processEntry(finalName, data, cacheDir, context)
+                        if (ir != null) { inner.add(ir); onInner?.invoke(ir) }
+                    }
                 }
                 else -> { pendingLongName = null }
             }
@@ -269,19 +300,20 @@ object ArchiveEngine {
      * 内层文件统一走与「单独打开该文件」完全相同的 FileProcessor。
      * 这样压缩包内任意格式（PDF/OOXML/老Office/图片/DWG/文本/未知）的统计路径与结果，
      * 都与单独打开该文件一丝不差（v1.5.82 彻底统一，取代此前重写一遍的独立逻辑）。
+     * v1.9.63: 返回 InnerResult?（统计成功时非 null），供调用方即时 emit 进度条目。
      */
-    private suspend fun processEntry(name: String, bytes: ByteArray, cacheDir: File, inner: MutableList<InnerResult>, context: Context? = null) {
+    private suspend fun processEntry(name: String, bytes: ByteArray, cacheDir: File, context: Context? = null): InnerResult? {
         val ext = name.substringAfterLast('.', "").lowercase()
-        if (ext in NESTED_ARCHIVE_SKIP) return
-        if (context == null) return
-        val tmp = writeTemp(bytes, name, cacheDir) ?: return
+        if (ext in NESTED_ARCHIVE_SKIP) return null
+        if (context == null) return null
+        val tmp = writeTemp(bytes, name, cacheDir) ?: return null
         try {
             val out = FileProcessor.process(context, tmp, name.substringAfterLast('/'))
             val m = out.resMap
             if (m == null) {
                 // 单个内层文件无结果（如图片无文字/PDF全失败），记录后跳过，不影响其他文件
                 Log.d("WordCount", "processEntry skip '$name': resMap=null error=${out.error}")
-                return
+                return null
             }
             val stats = m["stats"] as? Map<*, *> ?: emptyMap<String, Any>()
             val meta = m["meta"] as? Map<*, *> ?: emptyMap<String, Any>()
@@ -291,14 +323,15 @@ object ArchiveEngine {
             val chars = (stats["chars"] as? Number)?.toInt() ?: 0
             val pages = (m["pages"] as? Int) ?: estimatePages(chars)
             val needsPdf = (meta["needs_pdf"] as? Boolean) ?: false
-            inner.add(InnerResult(
+            return InnerResult(
                 name = name.substringAfterLast('/'),
                 words = words, fe = fe, nc = nc, chars = chars, pages = pages,
                 needsPdf = needsPdf
-            ))
+            )
         } catch (e: Throwable) {
             // v1.5.90: 单个内层文件异常不得导致整个压缩包归零；记录后继续
             Log.w("WordCount", "processEntry exception '$name': ${e.javaClass.simpleName}: ${e.message}")
+            return null
         } finally {
             runCatching { tmp.delete() }
         }

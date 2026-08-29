@@ -2751,10 +2751,30 @@ internal suspend fun processBatchToEntries(
                         // v1.9.3: onProgress 在 IO 线程被 invoke，更新 Compose State 需切到 Main 线程
                         // v1.9.62: 压缩包在"内层文件边界"也要能暂停——该回调由解压工作线程
                         // 逐个内层文件触发，在此阻塞即可让整条压缩包流水线停下来（继续时立即放行）。
-                        val res = ArchiveEngine.extract(f, context.cacheDir, context, onProgress = archProg@{ done, total ->
-                            if (!control.gateBlocking()) return@archProg
-                            onProgress(dName, done, total)
-                        })
+                        // v1.9.63: 新增 gate + onInner —— 暂停闸门在每个内层文件边界阻塞（让整包停下），
+                        // 每个内层文件统计完成后通过 onInner 立即 emit 为独立条目，
+                        // 这样暂停时主界面就能显示已经统计出来的字数（此前整包只产出一个聚合条目，暂停汇总恒为 0）。
+                        val res = ArchiveEngine.extract(f, context.cacheDir, context,
+                            onProgress = archProg@{ done, total ->
+                                if (!control.gateBlocking()) return@archProg
+                                onProgress(dName, done, total)
+                            },
+                            gate = { control.gateBlocking() },
+                            onInner = { inner ->
+                                val innerId = "arch::${f.absolutePath}::${inner.name}"
+                                val inExt = inner.name.substringAfterLast('.').lowercase().let { if (it.isBlank()) "" else ".$it" }
+                                val resMap = mapOf(
+                                    "name" to inner.name,
+                                    "ext" to inExt,
+                                    "stats" to mapOf("words" to inner.words, "fe" to inner.fe, "nc" to inner.nc, "chars" to inner.chars),
+                                    "meta" to mapOf("pages" to inner.pages, "needs_pdf" to inner.needsPdf),
+                                    "is_archive" to false,
+                                    "pages" to (inner.pages ?: estimatePages(inner.chars))
+                                )
+                                val fr = toFileResult(resMap, f.absolutePath)
+                                emit(FileEntry(id = innerId, displayName = "${dName}/${inner.name}", cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                            }
+                        )
                         if (res == null) {
                             val ext = f.extension.lowercase()
                             val isSupported = ext in setOf("zip", "rar", "7z", "tar", "gz", "tgz")
@@ -2767,17 +2787,8 @@ internal suspend fun processBatchToEntries(
                             "暂不支持此格式（.$ext）。支持：ZIP / RAR4 / 7Z / TAR / GZ"
                             emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = dName, cachePath = f.absolutePath,
                                 error = errMsg))
-                        } else {
-                            val resMap = mapOf(
-                                "name" to f.name, "ext" to ".${f.extension.lowercase()}",
-                                "stats" to mapOf("words" to res.words, "fe" to res.fe, "nc" to res.nc, "chars" to res.chars),
-                                "meta" to mapOf("inner" to res.inner.map { innerToMeta(it) }),
-                                "is_archive" to true,
-                                "pages" to res.inner.sumOf { it.pages ?: estimatePages(it.chars) }
-                            )
-                            val fr = toFileResult(resMap, f.absolutePath)
-                            emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                         }
+                        // 成功时各内层文件已通过 onInner 逐个 emit 为独立条目，无需再 emit 整包聚合条目
                     } catch (e: Throwable) {
                         Log.w("WordCount", "压缩包解析失败 ${f.name}: ${e.message}")
                         emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = dName, cachePath = f.absolutePath, error = "压缩包解析失败（${e.message}）"))
