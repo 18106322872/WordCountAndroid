@@ -226,7 +226,7 @@ object DwgProcessor {
             Diag.e( "DWG 解析阶段异常 $dName: ${e.javaClass.simpleName}: ${e.message}", e)
         }
 
-        Diag.d("DWG 主路径无有效文字 $dName: items=${items.size} oleMarks=$oleMarks pyErr=${if (diagnostics.contains("py_err")) "Y" else "N"} pyEx=${if (diagnostics.contains("py_ex")) "Y" else "N"}，进入 Kotlin 兜底/失败分支")
+        Diag.d("DWG 主路径无有效文字 $dName: pyErr=${if (diagnostics.contains("py_err")) "Y" else "N"} pyEx=${if (diagnostics.contains("py_ex")) "Y" else "N"}，进入 Kotlin 兜底/失败分支")
         // v1.9.16 兜底：只要 DXF 文件存在且完整，无论 Python 主路径是否成功/返回空，
         // 都用 Kotlin 简易组码抽取再试一次，避免 service/后台/Python 异常导致直接 0 字。
         if (File(pyDxfPath).exists() && isDxfComplete(pyDxfPath)) {
