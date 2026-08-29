@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import androidx.core.content.FileProvider
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.BufferedWriter
 import java.io.File
 import java.io.FileWriter
@@ -81,31 +83,53 @@ object Diag {
         }
     }
 
-    /** 合并所有 wc_diag_*.log 为单个导出文件，并通过 FileProvider 唤起系统分享面板 */
-    fun exportAndShare(context: Context) {
+    /** 合并所有 wc_diag_*.log 为单个导出文件，并通过 FileProvider 唤起系统分享面板。
+     *  v1.9.66: 改为 suspend + IO 线程，避免主线程读大日志导致 ANR/卡死；
+     *  每个进程日志只取末尾 500KB，避免导出文件过大无法分享。 */
+    suspend fun exportAndShare(context: Context) {
         val c = context.applicationContext
         init(c)
-        val ver = try { c.packageManager.getPackageInfo(c.packageName, 0).versionName ?: "?" } catch (_: Throwable) { "?" }
-        val files = (c.cacheDir.listFiles { _, name ->
-            name.startsWith("wc_diag_") && name.endsWith(".log")
-        } ?: emptyArray()).sortedBy { it.name }
         val out = File(c.cacheDir, "wc_diag_export.log")
+        val ver = try {
+            c.packageManager.getPackageInfo(c.packageName, 0).versionName ?: "?"
+        } catch (_: Throwable) { "?" }
+        val files = withContext(Dispatchers.IO) {
+            (c.cacheDir.listFiles { _, name ->
+                name.startsWith("wc_diag_") && name.endsWith(".log")
+            } ?: emptyArray()).sortedBy { it.name }
+        }
         try {
-            out.bufferedWriter().use { bw ->
-                bw.write("WordCount 诊断日志导出 @ ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}\n")
-                bw.write("版本: v$ver\n")
-                bw.write("进程标签: main=主界面, :countservice=统计服务, :dwgisolated=DWG转换隔离进程\n\n")
-                if (files.isEmpty()) {
-                    bw.write("(无诊断日志)\n")
-                }
-                for (f in files) {
-                    bw.write("========== ${f.name} (${f.length()} bytes) ==========\n")
-                    try {
-                        f.forEachLine { bw.write(it + "\n") }
-                    } catch (e: Throwable) {
-                        bw.write("(读取失败: ${e.message})\n")
+            withContext(Dispatchers.IO) {
+                out.bufferedWriter().use { bw ->
+                    bw.write("WordCount 诊断日志导出 @ ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}\n")
+                    bw.write("版本: v$ver\n")
+                    bw.write("进程标签: main=主界面, :countservice=统计服务, :dwgisolated=DWG转换隔离进程\n\n")
+                    if (files.isEmpty()) {
+                        bw.write("(无诊断日志)\n")
                     }
-                    bw.write("\n")
+                    val maxPerFile = 500_000L
+                    for (f in files) {
+                        val len = f.length()
+                        val take = minOf(len, maxPerFile)
+                        val skip = len - take
+                        bw.write("========== ${f.name} ($len bytes, 导出后 $take bytes) ==========\n")
+                        try {
+                            f.inputStream().use { ins ->
+                                if (skip > 0) ins.skip(skip)
+                                ins.bufferedReader().useLines { lines ->
+                                    // 第一行可能是半截，丢弃
+                                    var first = true
+                                    lines.forEach { line ->
+                                        if (first) { first = false; return@forEach }
+                                        bw.write(line + "\n")
+                                    }
+                                }
+                            }
+                        } catch (e: Throwable) {
+                            bw.write("(读取失败: ${e.message})\n")
+                        }
+                        bw.write("\n")
+                    }
                 }
             }
         } catch (e: Throwable) {
@@ -124,10 +148,13 @@ object Diag {
             putExtra(Intent.EXTRA_SUBJECT, "WordCount 诊断日志")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        try {
-            c.startActivity(Intent.createChooser(intent, "导出诊断日志"))
-        } catch (e: Throwable) {
-            Log.e("WordCount", "启动分享面板失败: ${e.message}", e)
+        withContext(Dispatchers.Main) {
+            try {
+                // 用原始 Activity context 启动，避免 applicationContext 缺少 NEW_TASK 在某些系统上无反应
+                context.startActivity(Intent.createChooser(intent, "导出诊断日志"))
+            } catch (e: Throwable) {
+                Log.e("WordCount", "启动分享面板失败: ${e.message}", e)
+            }
         }
     }
 }
