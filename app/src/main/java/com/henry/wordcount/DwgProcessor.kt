@@ -36,7 +36,7 @@ object DwgProcessor {
             // 此前该兜底返回原始字节扫描结果，对编码混乱/不可读的 DWG 会显示 10059 字/中文54
             // 这类假数字（与桌面"-"不符）。改返回零值 + needsPdf=true，UI 走 needsPdf 分支显示"-"，
             // 既不会让 app 崩溃（压缩包内层 DWG 仍会被统计、仅显示"-"），也不会误导用户。
-            Log.w("WordCount", "DWG process 异常兜底 $dName: ${e.javaClass.simpleName}: ${e.message}")
+            Diag.w( "DWG process 异常兜底 $dName: ${e.javaClass.simpleName}: ${e.message}")
             DwgProcessResult(0, 0, 0, 0, 1, "异常兜底", true, "process异常: ${e.message}", null, "")
         }
     }
@@ -85,7 +85,7 @@ object DwgProcessor {
             }
         } catch (e: Throwable) {
             diagnostics.append("convert_ex=${e.javaClass.simpleName}:${e.message?.take(120)}; ")
-            Log.e("WordCount", "DWG 转换请求失败 ${file.name}: ${e.javaClass.simpleName}: ${e.message}", e)
+            Diag.e( "DWG 转换请求失败 ${file.name}: ${e.javaClass.simpleName}: ${e.message}", e)
         }
         return DwgConvertOutcome(null, diagnostics.toString())
     }
@@ -118,7 +118,7 @@ object DwgProcessor {
                         val pyError = if (obj.has("error") && !obj.isNull("error")) obj.optString("error") else null
                         if (!pyError.isNullOrBlank()) {
                             diagnostics.append("py_err=${pyError.take(120)}; ")
-                            Log.e("WordCount", "DWG Python 返回错误 $dName: ${pyError.take(200)}")
+                            Diag.e( "DWG Python 返回错误 $dName: ${pyError.take(200)}")
                         }
                         val arr = obj.getJSONArray("items")
                         val items = ArrayList<String>(arr.length())
@@ -208,13 +208,14 @@ object DwgProcessor {
                             val pyFe = co.optInt("fe", 0)
                             val pyNc = co.optInt("nc", 0)
                             val pyChars = co.optInt("chars", 0)
+                            Diag.d("DWG analyze 主路径结果 $dName: items=${items.size} oleMarks=$oleMarks finalNeedsPdf=$finalNeedsPdf pyWords=$pyWords pyChars=$pyChars pyNeedsPdfOrig=$pyNeedsPdf")
                             val diag = "PY:${diagnostics}items=${items.size}"
-                            Log.d("WordCount", "DWG Python主路径 $dName: words=$pyWords fe=$pyFe nc=$pyNc chars=$pyChars pages=$pyPages($pyReason) items=${items.size}")
+                            Diag.d( "DWG Python主路径 $dName: words=$pyWords fe=$pyFe nc=$pyNc chars=$pyChars pages=$pyPages($pyReason) items=${items.size}")
                             return DwgProcessResult(pyWords, pyFe, pyNc, pyChars, pyPages, pyReason, finalNeedsPdf, diag, null, allItems.joinToString("\n"))
                         }
                     } catch (e: Throwable) {
                         diagnostics.append("py_ex=${e.javaClass.simpleName}:${e.message?.take(120)}; ")
-                        Log.e("WordCount", "DWG Python主路径失败 $dName: ${e.javaClass.simpleName}: ${e.message}", e)
+                        Diag.e( "DWG Python主路径失败 $dName: ${e.javaClass.simpleName}: ${e.message}", e)
                     }
                 } else {
                     if (dxfPathIn == null) diagnostics.append("dxf_path_null; ")
@@ -222,9 +223,10 @@ object DwgProcessor {
                 }
         } catch (e: Throwable) {
             diagnostics.append("analyze_ex=${e.javaClass.simpleName}:${e.message?.take(120)}; ")
-            Log.e("WordCount", "DWG 解析阶段异常 $dName: ${e.javaClass.simpleName}: ${e.message}", e)
+            Diag.e( "DWG 解析阶段异常 $dName: ${e.javaClass.simpleName}: ${e.message}", e)
         }
 
+        Diag.d("DWG 主路径无有效文字 $dName: items=${items.size} oleMarks=$oleMarks pyErr=${if (diagnostics.contains("py_err")) "Y" else "N"} pyEx=${if (diagnostics.contains("py_ex")) "Y" else "N"}，进入 Kotlin 兜底/失败分支")
         // v1.9.16 兜底：只要 DXF 文件存在且完整，无论 Python 主路径是否成功/返回空，
         // 都用 Kotlin 简易组码抽取再试一次，避免 service/后台/Python 异常导致直接 0 字。
         if (File(pyDxfPath).exists() && isDxfComplete(pyDxfPath)) {
@@ -271,19 +273,19 @@ object DwgProcessor {
                     if (fbWords > 0) {
                         val fbReason = "Kotlin组码兜底" + (if (diagnostics.isNotEmpty()) "·" + diagnostics.toString().take(60) else "")
                         val fbDiag = "FB:${diagnostics}"
-                        Log.d("WordCount", "DWG Kotlin组码兜底 $dName: words=$fbWords fe=$fbFe nc=$fbNc chars=$fbChars")
+                        Diag.d( "DWG Kotlin组码兜底 $dName: words=$fbWords fe=$fbFe nc=$fbNc chars=$fbChars")
                         return DwgProcessResult(fbWords, fbFe, fbNc, fbChars, 1, fbReason, false, fbDiag, null, cleaned)
                     }
                 }
                 diagnostics.append("fb_text_empty; ")
             } catch (e: Throwable) {
                 diagnostics.append("fb_ex=${e.javaClass.simpleName}:${e.message?.take(120)}; ")
-                Log.e("WordCount", "DWG Kotlin组码兜底失败 $dName: ${e.javaClass.simpleName}: ${e.message}")
+                Diag.e( "DWG Kotlin组码兜底失败 $dName: ${e.javaClass.simpleName}: ${e.message}")
             }
         }
 
         // 全部失败 -> 显示"-"，但把诊断信息带出来便于排查
-        Log.w("WordCount", "DWG $dName 全部路径失败：显示'-' diag=${diagnostics}")
+        Diag.w( "DWG $dName 全部路径失败：显示'-' diag=${diagnostics}")
         val failReason = "Python解析失败" + (if (diagnostics.isNotEmpty()) "·" + diagnostics.toString().take(60) else "")
         return DwgProcessResult(0, 0, 0, 0, 1, failReason, true, diagnostics.toString(), null, "")
     }

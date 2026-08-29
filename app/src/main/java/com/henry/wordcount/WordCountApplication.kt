@@ -47,6 +47,8 @@ class WordCountApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // v1.9.65: 初始化应用内诊断日志（全进程生效：main / :countservice / :dwgisolated）
+        Diag.init(this)
         // v1.5.13: :dwgisolated 进程只做 native dwg2pdf 转换，不初始化 Python（Chaquopy 在
         // 非主进程初始化会失败且浪费资源，其资源提取还可能干扰主进程）。
         // v1.9.20: 初始化常驻协程域（隔离进程不初始化 Python，但仍可用 scope；此处统一放隔离进程判断之后）

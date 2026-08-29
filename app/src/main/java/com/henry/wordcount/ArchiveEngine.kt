@@ -76,7 +76,7 @@ object ArchiveEngine {
                 }
             }
         } catch (e: Throwable) {
-            Log.w("WordCount", "ArchiveEngine.extract 异常 ${file.name}: ${e.message}")
+            Diag.w( "ArchiveEngine.extract 异常 ${file.name}: ${e.message}")
             null
         }
     }
@@ -165,13 +165,13 @@ object ArchiveEngine {
         dest.mkdirs()
         return try {
             val result = Unrar5j.extract(file.absolutePath, dest.absolutePath, null)
-            Log.d("WordCount", "RAR extract ${file.name}: total=${result?.totalFiles ?: -1} success=${result?.successCount ?: -1} isSuccess=${result?.isSuccess}")
+            Diag.d( "RAR extract ${file.name}: total=${result?.totalFiles ?: -1} success=${result?.successCount ?: -1} isSuccess=${result?.isSuccess}")
             if (result == null || (!result.isSuccess && result.successCount == 0)) {
-                Log.w("WordCount", "RAR 解压无成功文件: ${file.name} total=${result?.totalFiles ?: -1} success=${result?.successCount ?: -1}")
+                Diag.w( "RAR 解压无成功文件: ${file.name} total=${result?.totalFiles ?: -1} success=${result?.successCount ?: -1}")
                 null
             } else {
                 if ((result.totalFiles ?: 0) > result.successCount) {
-                    Log.w("WordCount", "RAR 部分解压: ${file.name} total=${result.totalFiles} success=${result.successCount}")
+                    Diag.w( "RAR 部分解压: ${file.name} total=${result.totalFiles} success=${result.successCount}")
                 }
                 val rarFiles = dest.walkTopDown().filter { it.isFile }.toList()
                 val rarTotal = rarFiles.size
@@ -189,11 +189,11 @@ object ArchiveEngine {
                     } catch (_: Throwable) {}
                     onProgress?.invoke(idx + 1, rarTotal)
                 }
-                Log.d("WordCount", "RAR processed ${file.name}: innerFiles=${inner.size}")
+                Diag.d( "RAR processed ${file.name}: innerFiles=${inner.size}")
                 aggregate(inner)
             }
         } catch (e: Throwable) {
-            Log.w("WordCount", "RAR 解析异常 ${file.name}: ${e.javaClass.simpleName}: ${e.message}")
+            Diag.w( "RAR 解析异常 ${file.name}: ${e.javaClass.simpleName}: ${e.message}")
             null
         } finally {
             runCatching { dest.deleteRecursively() }
@@ -312,7 +312,7 @@ object ArchiveEngine {
             val m = out.resMap
             if (m == null) {
                 // 单个内层文件无结果（如图片无文字/PDF全失败），记录后跳过，不影响其他文件
-                Log.d("WordCount", "processEntry skip '$name': resMap=null error=${out.error}")
+                Diag.d( "processEntry skip '$name': resMap=null error=${out.error}")
                 return null
             }
             val stats = m["stats"] as? Map<*, *> ?: emptyMap<String, Any>()
@@ -330,7 +330,7 @@ object ArchiveEngine {
             )
         } catch (e: Throwable) {
             // v1.5.90: 单个内层文件异常不得导致整个压缩包归零；记录后继续
-            Log.w("WordCount", "processEntry exception '$name': ${e.javaClass.simpleName}: ${e.message}")
+            Diag.w( "processEntry exception '$name': ${e.javaClass.simpleName}: ${e.message}")
             return null
         } finally {
             runCatching { tmp.delete() }
@@ -349,7 +349,7 @@ object ArchiveEngine {
             tmp.writeBytes(bytes)
             tmp
         } catch (e: Throwable) {
-            Log.w("WordCount", "writeTemp failed for '$name': ${e.javaClass.simpleName}: ${e.message}")
+            Diag.w( "writeTemp failed for '$name': ${e.javaClass.simpleName}: ${e.message}")
             null
         }
     }

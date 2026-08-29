@@ -31,6 +31,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -516,7 +517,7 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
                         Toast.makeText(context, "已用文字型PDF重新统计：${rec.chars}字", Toast.LENGTH_SHORT).show()
                     }
                 } catch (e: Throwable) {
-                    Log.w("WordCount", "选PDF重统计异常 ${e.message}")
+                    Diag.w( "选PDF重统计异常 ${e.message}")
                     withContext(Dispatchers.Main) {
                         Toast.makeText(context, "选PDF重统计失败：${e.message?.take(120)}", Toast.LENGTH_LONG).show()
                     }
@@ -639,6 +640,11 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
                             color = Color.Gray,
                             modifier = Modifier.padding(end = 16.dp))
                     }
+                }
+            }, actions = {
+                val diagCtx = LocalContext.current
+                IconButton(onClick = { Diag.exportAndShare(diagCtx) }) {
+                    Icon(Icons.Filled.BugReport, contentDescription = "导出诊断日志", tint = Color.Gray)
                 }
             })
         },
@@ -1367,7 +1373,7 @@ private fun extractDxfTextCompat(dxfPath: String): String {
             i += 2
         }
     } catch (e: Exception) {
-        Log.w("WordCount", "DXF 兼容提取异常: ${e.message}")
+        Diag.w( "DXF 兼容提取异常: ${e.message}")
     }
     return sb.toString()
 }
@@ -1438,7 +1444,7 @@ fun scanDwgRaw(dwgPath: String): String {
         }
         flushAscii(); flushCjk()
     } catch (e: Exception) {
-        Log.w("WordCount", "DWG 二进制扫描异常: ${e.message}")
+        Diag.w( "DWG 二进制扫描异常: ${e.message}")
     }
 
     return out.joinToString("\n")
@@ -1452,7 +1458,7 @@ private fun openWithOtherApp(context: android.content.Context, entry: FileEntry)
     try {
         val file = File(entry.cachePath)
         if (!file.exists()) {
-            Log.w("WordCount", "打开失败：缓存文件不存在 ${entry.displayName}")
+            Diag.w( "打开失败：缓存文件不存在 ${entry.displayName}")
             return
         }
         val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
@@ -1463,7 +1469,7 @@ private fun openWithOtherApp(context: android.content.Context, entry: FileEntry)
         }
         context.startActivity(Intent.createChooser(intent, "用其他应用打开"))
     } catch (e: Throwable) {
-        Log.w("WordCount", "打开文件失败 ${entry.displayName}: ${e.message}")
+        Diag.w( "打开文件失败 ${entry.displayName}: ${e.message}")
     }
 }
 
@@ -1473,7 +1479,7 @@ private fun openWithWord(context: android.content.Context, entry: FileEntry) {
     try {
         val file = File(entry.cachePath)
         if (!file.exists()) {
-            Log.w("WordCount", "用Word打开失败：缓存文件不存在 ${entry.displayName}")
+            Diag.w( "用Word打开失败：缓存文件不存在 ${entry.displayName}")
             return
         }
         val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
@@ -1496,7 +1502,7 @@ private fun openWithWord(context: android.content.Context, entry: FileEntry) {
             context.startActivity(Intent.createChooser(fallback, "用其他应用打开"))
         }
     } catch (e: Throwable) {
-        Log.w("WordCount", "用Word打开失败 ${entry.displayName}: ${e.message}")
+        Diag.w( "用Word打开失败 ${entry.displayName}: ${e.message}")
     }
 }
 
@@ -1507,7 +1513,7 @@ private fun openWithWps(context: android.content.Context, entry: FileEntry) {
     try {
         val file = File(entry.cachePath)
         if (!file.exists()) {
-            Log.w("WordCount", "用Wps打开失败：缓存文件不存在 ${entry.displayName}")
+            Diag.w( "用Wps打开失败：缓存文件不存在 ${entry.displayName}")
             return
         }
         val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
@@ -1528,7 +1534,7 @@ private fun openWithWps(context: android.content.Context, entry: FileEntry) {
             ).show()
         }
     } catch (e: Throwable) {
-        Log.w("WordCount", "用Wps打开失败 ${entry.displayName}: ${e.message}")
+        Diag.w( "用Wps打开失败 ${entry.displayName}: ${e.message}")
     }
 }
 
@@ -1550,7 +1556,7 @@ private suspend fun recomputeFromPdf(context: android.content.Context, pdfFile: 
             var bestWords = ktStats.first; var bestFe = ktStats.second; var bestNc = ktStats.third; var bestChars = ktStats.fourth
             var bestPages: Int? = ktRes.pages
             var bestDiag = "Kotlin提取(${bestChars}字)"
-            Log.d("WordCount", "recomputeFromPdf L1 $dName: chars=$bestChars words=$bestWords pages=$bestPages")
+            Diag.d( "recomputeFromPdf L1 $dName: chars=$bestChars words=$bestWords pages=$bestPages")
             // ── Level 2: Python pdfminer（文字型 PDF 主力）──
             try {
                 val pyResults = PythonEngine.countFiles(context, listOf(pdfFile.absolutePath))
@@ -1571,22 +1577,22 @@ private suspend fun recomputeFromPdf(context: android.content.Context, pdfFile: 
                             bestPages = pyPages ?: bestPages
                             bestDiag = "Python提取(${bestChars}字)"
                         }
-                        Log.d("WordCount", "recomputeFromPdf L2 $dName: chars=$pyChars pages=$pyPages")
+                        Diag.d( "recomputeFromPdf L2 $dName: chars=$pyChars pages=$pyPages")
                     } else {
-                        Log.w("WordCount", "recomputeFromPdf L2 ok=false $dName: ${py0["error"]}")
+                        Diag.w( "recomputeFromPdf L2 ok=false $dName: ${py0["error"]}")
                     }
                 }
             } catch (e: Throwable) {
-                Log.w("WordCount", "recomputeFromPdf Python异常 $dName: ${e.javaClass.simpleName}: ${e.message}")
+                Diag.w( "recomputeFromPdf Python异常 $dName: ${e.javaClass.simpleName}: ${e.message}")
             }
             if (bestChars <= 0) {
-                Log.w("WordCount", "recomputeFromPdf 未提取到文字 $dName")
+                Diag.w( "recomputeFromPdf 未提取到文字 $dName")
                 null
             } else {
                 RecomputedPdf(bestWords, bestFe, bestNc, bestChars, bestPages, bestDiag)
             }
         } catch (e: Throwable) {
-            Log.w("WordCount", "recomputeFromPdf 异常 $dName: ${e.message}")
+            Diag.w( "recomputeFromPdf 异常 $dName: ${e.message}")
             null
         }
     }
@@ -1749,10 +1755,10 @@ private fun resolveDisplayName(context: android.content.Context, uri: Uri): Stri
                 if (!path.isNullOrBlank()) {
                     val name = path.trim().substringAfterLast('/').substringAfterLast('\\')
                     if (name.isNotBlank() && name.contains('.') && !looksLikeHash(name)) {
-                        Log.d("WordCount", "resolveDisplayName s0(_data path OK): '$name'")
+                        Diag.d( "resolveDisplayName s0(_data path OK): '$name'")
                         return name.trim()
                     }
-                    Log.d("WordCount", "resolveDisplayName s0 _data 被hash拦截/无扩展名: '$name'")
+                    Diag.d( "resolveDisplayName s0 _data 被hash拦截/无扩展名: '$name'")
                 }
             }
         }
@@ -1768,10 +1774,10 @@ private fun resolveDisplayName(context: android.content.Context, uri: Uri): Stri
             if (cursor.moveToFirst() && cursor.columnCount > 0) {
                 val name = cursor.getString(0)
                 if (!name.isNullOrBlank() && !looksLikeHash(name)) {
-                    Log.d("WordCount", "resolveDisplayName s1(ContentResolver OK): '$name'")
+                    Diag.d( "resolveDisplayName s1(ContentResolver OK): '$name'")
                     return name.trim()
                 }
-                Log.d("WordCount", "resolveDisplayName s1 被hash拦截: '$name'")
+                Diag.d( "resolveDisplayName s1 被hash拦截: '$name'")
             }
         }
     } catch (_: Throwable) {}
@@ -1779,17 +1785,17 @@ private fun resolveDisplayName(context: android.content.Context, uri: Uri): Stri
     // 策略2: DocumentFile.fromSingleUri
     androidx.documentfile.provider.DocumentFile.fromSingleUri(context, uri)?.name?.let { name ->
         if (name.isNotBlank() && !looksLikeHash(name)) {
-            Log.d("WordCount", "resolveDisplayName s2(DocumentFile OK): '$name'")
+            Diag.d( "resolveDisplayName s2(DocumentFile OK): '$name'")
             return name.trim()
         }
-        Log.d("WordCount", "resolveDisplayName s2 被hash拦截/空: '$name'")
+        Diag.d( "resolveDisplayName s2 被hash拦截/空: '$name'")
     }
 
     // 策略2.5 (v1.5.55): 扫描 URI 全部片段（path/query/fragment）。
     // 微信/QQ 等分享时，ContentResolver 只返回内部缓存 ID，但原文件名可能还藏在 URI 里。
     scanUriForRealName(uri)?.let { name ->
         if (name.isNotBlank()) {
-            Log.d("WordCount", "resolveDisplayName s2.5(URI scan OK): '$name'")
+            Diag.d( "resolveDisplayName s2.5(URI scan OK): '$name'")
             return name.trim()
         }
     }
@@ -1806,7 +1812,7 @@ private fun resolveDisplayName(context: android.content.Context, uri: Uri): Stri
                 .removePrefix("home:")
                 .removePrefix("document:")
             if (extracted.isNotBlank() && extracted.length < 250 && !looksLikeHash(extracted)) {
-                Log.d("WordCount", "resolveDisplayName s3(URI path OK): '$extracted'")
+                Diag.d( "resolveDisplayName s3(URI path OK): '$extracted'")
                 return extracted.trim()
             }
         } catch (_: Throwable) {}
@@ -1825,7 +1831,7 @@ private fun resolveDisplayName(context: android.content.Context, uri: Uri): Stri
                     if (!title.isNullOrBlank() && !looksLikeHash(title) && title.length <= 150) {
                         val clean = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
                         if (clean.isNotBlank()) {
-                            Log.d("WordCount", "resolveDisplayName s4(PDF /Title): '$clean'")
+                            Diag.d( "resolveDisplayName s4(PDF /Title): '$clean'")
                             return "$clean.pdf"
                         }
                     }
@@ -1851,7 +1857,7 @@ private fun resolveDisplayName(context: android.content.Context, uri: Uri): Stri
             // 如果候选名包含 CJK 字符或明显不是纯数字ID，直接采用（跳过 looksLikeHash）
             if (candidate.isNotBlank() && candidate.length <= 200 &&
                 (candidate.any { it.code in 0x4E00..0x9FFF } || looksLikeRealFilename(candidate))) {
-                Log.d("WordCount", "resolveDisplayName s5(宽松路径): '$candidate'")
+                Diag.d( "resolveDisplayName s5(宽松路径): '$candidate'")
                 return candidate.trim()
             }
         } catch (_: Throwable) {}
@@ -1872,7 +1878,7 @@ private fun resolveDisplayName(context: android.content.Context, uri: Uri): Stri
     }
     val friendly = "$typeLabel${if (cachedFileCounter > 0) "_$cachedFileCounter" else ""}$friendlyExt"
     cachedFileCounter++
-    Log.w("WordCount", "resolveDisplayName 全部策略失败 → 兜底: '$friendly' (uri=$uri)")
+    Diag.w( "resolveDisplayName 全部策略失败 → 兜底: '$friendly' (uri=$uri)")
     return friendly
 }
 
@@ -2063,7 +2069,7 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFi
             || isNumberedOrGenericName(intentNameHint) -> resolvedName
         else -> intentNameHint
     }
-    Log.d("WordCount", "copyUriToCache originalName='$originalName' hint='${intentNameHint ?: ""}' resolved='$resolvedName'")
+    Diag.d( "copyUriToCache originalName='$originalName' hint='${intentNameHint ?: ""}' resolved='$resolvedName'")
 
     // v1.5.53 修正：basename <= 8 会误伤正常短文件名（如 Tenova.dwg、图.dwg），
     //   把它们全换成 "文档_<hash>.dwg" 导致用户无法识别。改为只拦截真正无意义的：
@@ -2091,7 +2097,7 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFi
             || directName.startsWith("文档") || directName.startsWith("压缩包")
             || directName.startsWith("CAD图纸")
         if (directName.isNotBlank() && !isSafeNetPrefix) {
-            Log.w("WordCount", "copyUriToCache 安全网直接显示内部ID: '$originalName' → '$directName'")
+            Diag.w( "copyUriToCache 安全网直接显示内部ID: '$originalName' → '$directName'")
             directName
         } else {
             val typeLabel = when (ext.lowercase()) {
@@ -2106,7 +2112,7 @@ private fun copyUriToCache(context: android.content.Context, uri: Uri): CachedFi
             // v1.1.50: 用文件路径hash生成短后缀（4位hex），确保同名文件可区分
             val shortHash = absoluteHashCode(originalName).toString(16).takeLast(4).uppercase()
             val result = "${typeLabel}_${shortHash}${safeExt}"
-            Log.w("WordCount", "copyUriToCache 安全网触发: '$originalName' → '$result' (baseName='$baseName' len=${baseName.length})")
+            Diag.w( "copyUriToCache 安全网触发: '$originalName' → '$result' (baseName='$baseName' len=${baseName.length})")
             result
         }
     } else {
@@ -2172,7 +2178,7 @@ private fun tryExtractInternalTitle(file: File, currentName: String): String {
                     if (!title.isNullOrBlank() && title.length <= 150 &&
                         !title.any { it.code < 0x20 }) {
                         val clean = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
-                        Log.d("WordCount", "DOCX内部标题: '$clean'")
+                        Diag.d( "DOCX内部标题: '$clean'")
                         return "$clean.docx"
                     }
                 }
@@ -2224,11 +2230,11 @@ private fun tryExtractInternalTitle(file: File, currentName: String): String {
                     // 优先用 CJK 标题，其次兜底
                     val chosen = cjkCandidate ?: fallbackCandidate
                     if (chosen != null) {
-                        Log.d("WordCount", "DOCX有意义的标题文本: '$chosen' (CJK=${
+                        Diag.d( "DOCX有意义的标题文本: '$chosen' (CJK=${
                             cjkCandidate != null}, fallback=${fallbackCandidate != null})")
                         return "$chosen.docx"
                     }
-                    Log.d("WordCount", "DOCX未找到有意义的标题文本，保留通用名")
+                    Diag.d( "DOCX未找到有意义的标题文本，保留通用名")
                 }
             } finally { zip.close() }
         }
@@ -2298,13 +2304,13 @@ private fun renderPdfPagesToPngs(pdfFile: File): List<File> {
     val pfd = try {
         ParcelFileDescriptor.open(pdfFile, ParcelFileDescriptor.MODE_READ_ONLY)
     } catch (e: Throwable) {
-        Log.w("WordCount", "renderPdfPagesToPngs 打开失败: ${e.message}")
+        Diag.w( "renderPdfPagesToPngs 打开失败: ${e.message}")
         return emptyList()
     }
     val renderer = try {
         PdfRenderer(pfd)
     } catch (e: Throwable) {
-        Log.w("WordCount", "renderPdfPagesToPngs 创建 Renderer 失败: ${e.message}")
+        Diag.w( "renderPdfPagesToPngs 创建 Renderer 失败: ${e.message}")
         runCatching { pfd.close() }
         return emptyList()
     }
@@ -2336,9 +2342,9 @@ private fun renderPdfPagesToPngs(pdfFile: File): List<File> {
                 page.close()
             }
         }
-        Log.d("WordCount", "renderPdfPagesToPngs: ${pdfFile.name} → ${pngs.size}/$limit 页")
+        Diag.d( "renderPdfPagesToPngs: ${pdfFile.name} → ${pngs.size}/$limit 页")
     } catch (e: Throwable) {
-        Log.w("WordCount", "renderPdfPagesToPngs 异常: ${e.message}")
+        Diag.w( "renderPdfPagesToPngs 异常: ${e.message}")
     } finally {
         runCatching { renderer.close() }
         runCatching { pfd.close() }
@@ -2540,7 +2546,7 @@ private fun addFiles(
             MainActivity.pendingUriNames.clear()
             val started = CountingService.startBatch(context, cf.map { it.file.absolutePath }, cf.map { it.displayName })
             if (!started) {
-                Log.w("WordCount", "CountingService 启动失败，回退本进程 inline 统计")
+                Diag.w( "CountingService 启动失败，回退本进程 inline 统计")
                 runInline()
             } else {
                 // 正常路径：结果由 CountingService 写入 wc_results.jsonl。
@@ -2558,14 +2564,14 @@ private fun addFiles(
                     if (done) {
                         finalizeBatch(context, heartbeatJob, busySet, mainProgress)
                     } else {
-                        Log.w("WordCount", "统计看门狗超时，强制收尾并恢复已产出结果")
+                        Diag.w( "统计看门狗超时，强制收尾并恢复已产出结果")
                         recoverResults(context, sink, mainProgress)
                         finalizeBatch(context, heartbeatJob, busySet, mainProgress)
                     }
                 }
             }
         } catch (e: Throwable) {
-            Log.e("WordCount", "addFiles 异常，回退 inline: ${e.message}", e)
+            Diag.e( "addFiles 异常，回退 inline: ${e.message}", e)
             try { runInline() } catch (_: Throwable) {}
         }
     }
@@ -2688,7 +2694,7 @@ internal suspend fun processDwgPipelined(
             }
         }
     } catch (e: Throwable) {
-        Log.w("WordCount", "DWG 流水线异常，回退串行: ${e.message}")
+        Diag.w( "DWG 流水线异常，回退串行: ${e.message}")
         dwgFiles.forEachIndexed { i, cf ->
             if (!control.gateBlocking()) return@forEachIndexed
                         try {
@@ -2713,7 +2719,7 @@ internal suspend fun processBatchToEntries(
 ) {
     try {
                 val pyStartResult = runCatching { PythonEngine.start(context) }
-                Log.d("WordCount", "PythonEngine.start: ${if (pyStartResult.isSuccess) "OK" else "FAIL: ${pyStartResult.exceptionOrNull()?.message}"}")
+                Diag.d( "PythonEngine.start: ${if (pyStartResult.isSuccess) "OK" else "FAIL: ${pyStartResult.exceptionOrNull()?.message}"}")
                 val files = cachedFiles.map { it.file }
             val imageFiles = mutableListOf<CachedFile>()
             val oldOfficeFiles = mutableListOf<CachedFile>()
@@ -2790,7 +2796,7 @@ internal suspend fun processBatchToEntries(
                         }
                         // 成功时各内层文件已通过 onInner 逐个 emit 为独立条目，无需再 emit 整包聚合条目
                     } catch (e: Throwable) {
-                        Log.w("WordCount", "压缩包解析失败 ${f.name}: ${e.message}")
+                        Diag.w( "压缩包解析失败 ${f.name}: ${e.message}")
                         emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = dName, cachePath = f.absolutePath, error = "压缩包解析失败（${e.message}）"))
                     }
                 }
@@ -2836,7 +2842,7 @@ internal suspend fun processBatchToEntries(
                                 outFe = (rawFe / ratio).toInt().coerceAtLeast(0)
                                 outNc = (rawNc / ratio).toInt().coerceAtLeast(0)
                                 outChars = (rawChars / ratio).toInt().coerceAtLeast(0)
-                                Log.d("WordCount", "docx: 使用 metaWords=${res.metaWords}(无VML权威值) 现算=$rawWords")
+                                Diag.d( "docx: 使用 metaWords=${res.metaWords}(无VML权威值) 现算=$rawWords")
                             } else if (res.metaWords > 0 && rawWords > (res.metaWords * 1.5).toInt()) {
                                 // 有 VML 但现算明显膨胀：回退到 metaWords
                                 outWords = res.metaWords
@@ -2844,18 +2850,18 @@ internal suspend fun processBatchToEntries(
                                 outFe = (rawFe / ratio).toInt().coerceAtLeast(0)
                                 outNc = (rawNc / ratio).toInt().coerceAtLeast(0)
                                 outChars = (rawChars / ratio).toInt().coerceAtLeast(0)
-                                Log.d("WordCount", "docx: 回退 metaWords=${res.metaWords}(现算${rawWords}膨胀>1.5x)")
+                                Diag.d( "docx: 回退 metaWords=${res.metaWords}(现算${rawWords}膨胀>1.5x)")
                             } else {
                                 // 默认：用现算值
                                 outWords = rawWords
                                 outFe = rawFe
                                 outNc = rawNc
                                 outChars = rawChars
-                                Log.d("WordCount", "docx: 现算=($rawWords,$rawFe,$rawNc,$rawChars) metaWords=${res.metaWords}")
+                                Diag.d( "docx: 现算=($rawWords,$rawFe,$rawNc,$rawChars) metaWords=${res.metaWords}")
                             }
                             val outPages = if (res.metaPages > 0) res.metaPages else res.pages
                             val outReason = if (res.pagesReason.isNotBlank()) res.pagesReason else null
-                            Log.d("WordCount", "docx: 现算=($rawWords,$rawFe,$rawNc,$rawChars) metaWords=${res.metaWords}(不使用) 输出=($outWords,$outFe,$outNc,$outChars) pages=$outPages")
+                            Diag.d( "docx: 现算=($rawWords,$rawFe,$rawNc,$rawChars) metaWords=${res.metaWords}(不使用) 输出=($outWords,$outFe,$outNc,$outChars) pages=$outPages")
                             // v1.3.3: 隐藏工作表单独统计（默认不计入合计，UI 勾选后才并入）
                             val hiddenStats = res.hiddenSheets.map { (n, t) ->
                                 val s = countTextKotlin(t)
@@ -2889,7 +2895,7 @@ internal suspend fun processBatchToEntries(
                             emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = finalDisplayName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                         }
                     } catch (e: Throwable) {
-                        Log.w("WordCount", "OOXML 解析失败 ${f.name}: ${e.message}")
+                        Diag.w( "OOXML 解析失败 ${f.name}: ${e.message}")
                         emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = dName, cachePath = f.absolutePath, error = "OOXML 解析失败（${e.message}）"))
                     }
                 }
@@ -2915,10 +2921,10 @@ internal suspend fun processBatchToEntries(
                         // ── Level 1: Kotlin PdfExtractor（快速预筛）──
                         val ktRes = PdfExtractor.extract(f)
                         val ktStats = countTextKotlin(ktRes.text)
-                        Log.d("WordCount", "PDF Level1(Kotlin) $dName: chars=${ktStats.fourth} words=${ktStats.first} reliable=${ktRes.reliable} pages=${ktRes.pages}")
+                        Diag.d( "PDF Level1(Kotlin) $dName: chars=${ktStats.fourth} words=${ktStats.first} reliable=${ktRes.reliable} pages=${ktRes.pages}")
                         // v1.5.66: 用系统 PdfRenderer 取可靠页数（Kotlin 的 countPagesSafe 对压缩流 PDF 会误判成 1 页）
                         val realPages = reliablePdfPageCount(f)
-                        Log.d("WordCount", "PDF 可靠页数 $dName: realPages=$realPages (ktPages=${ktRes.pages})")
+                        Diag.d( "PDF 可靠页数 $dName: realPages=$realPages (ktPages=${ktRes.pages})")
                         // v1.9.60: 与 FileProcessor 对齐——高密度可靠文字层直接秒出，跳过 Python pdfminer/OCR。
                         val denomPagesFast = if (realPages > 1) realPages else 1
                         val ktCharsPerPage = ktStats.fourth.toDouble() / denomPagesFast
@@ -2952,19 +2958,19 @@ internal suspend fun processBatchToEntries(
                         var pyDiag: String? = null
                         try {
                             pyDiag = PythonEngine.testPython(context)
-                            Log.d("WordCount", "PDF Python诊断 $dName: $pyDiag")
+                            Diag.d( "PDF Python诊断 $dName: $pyDiag")
                         } catch (e: Throwable) {
                             pyDiag = "Python诊断异常: ${e.javaClass.simpleName}: ${e.message}"
-                            Log.w("WordCount", "PDF Python诊断失败 $dName: $pyDiag")
+                            Diag.w( "PDF Python诊断失败 $dName: $pyDiag")
                         }
                         try {
                             val pyResults = PythonEngine.countFiles(context, listOf(f.absolutePath))
                             @Suppress("UNCHECKED_CAST")
                             val pyList = pyResults as? List<Map<String, Any?>>
-                            Log.d("WordCount", "PDF Level2(Python) $dName: raw=$pyResults")
+                            Diag.d( "PDF Level2(Python) $dName: raw=$pyResults")
                             if (!pyList.isNullOrEmpty()) {
                                 val py0 = pyList[0]
-                                Log.d("WordCount", "PDF Level2 $dName: py0_ok=${py0["ok"]} keys=${py0.keys}")
+                                Diag.d( "PDF Level2 $dName: py0_ok=${py0["ok"]} keys=${py0.keys}")
                                 if (py0["ok"] == true) {
                                     val pyData = py0["result"] as? Map<String, Any?>
                                     if (pyData != null) {
@@ -2976,20 +2982,20 @@ internal suspend fun processBatchToEntries(
                                         pyPages = (pyData["pages"] as? Number)?.toInt() ?: ktRes.pages
                                         pyOk = true
                                     } else {
-                                        Log.w("WordCount", "PDF Level2 $dName: pyData为null, raw result=${py0["result"]}")
+                                        Diag.w( "PDF Level2 $dName: pyData为null, raw result=${py0["result"]}")
                                     }
                                 } else {
                                     pyError = py0["error"]?.toString()
-                                    Log.w("WordCount", "PDF Level2 $dName: Python返回ok=false, error=$pyError")
+                                    Diag.w( "PDF Level2 $dName: Python返回ok=false, error=$pyError")
                                 }
                             } else {
-                                Log.w("WordCount", "PDF Level2 $dName: pyList为空或null")
+                                Diag.w( "PDF Level2 $dName: pyList为空或null")
                             }
                         } catch (e: Throwable) {
-                            Log.w("WordCount", "PDF Python pdfminer 异常: $dName - ${e.javaClass.simpleName}: ${e.message}")
+                            Diag.w( "PDF Python pdfminer 异常: $dName - ${e.javaClass.simpleName}: ${e.message}")
                         }
 
-                        Log.d("WordCount", "PDF $dName → KT:${ktStats.fourth}ch(fe=${ktStats.second}) PY:${pyChars}ch(fe=$pyFe)(pyOk=$pyOk) KT_rel=${ktRes.reliable}")
+                        Diag.d( "PDF $dName → KT:${ktStats.fourth}ch(fe=${ktStats.second}) PY:${pyChars}ch(fe=$pyFe)(pyOk=$pyOk) KT_rel=${ktRes.reliable}")
 
                         // ── 决策：选 Kotlin 或 Python 的较好结果 ──
                         //   pdfminer 通常更准确（处理了 ToUnicode CMap / ObjStm 等）
@@ -3004,7 +3010,7 @@ internal suspend fun processBatchToEntries(
                         val ktLooksLikeCidGarbage = ktStats.fourth > 100 && ktStats.second == 0
                                                 && ktStats.third > ktStats.fourth * 0.5
                         val usePython = pyOk && (pyChars > ktStats.fourth || ktLooksLikeCidGarbage)
-                        Log.d("WordCount", "PDF决策 $dName: pyOk=$pyOk pyChars=$pyChars ktChars=${ktStats.fourth} usePython=$usePython cidGarbage=$ktLooksLikeCidGarbage pyError=$pyError")
+                        Diag.d( "PDF决策 $dName: pyOk=$pyOk pyChars=$pyChars ktChars=${ktStats.fourth} usePython=$usePython cidGarbage=$ktLooksLikeCidGarbage pyError=$pyError")
 
                         // v1.3.66: 拼出可直接显示到界面的诊断信息（含 PdfExtractor 内部诊断）
                         var pdfDiag = buildString {
@@ -3046,7 +3052,7 @@ internal suspend fun processBatchToEntries(
                         val avgWordsPerPage = bestWords.toDouble() / maxOf(1, realPages)
                         val lowDensity = avgCharsPerPage < 800.0 || avgWordsPerPage < 200.0
                         val needOcr = bestChars < 10 || (!bestTextReliable && bestChars < 50) || looksLikeGarbage || isFailedChinesePdf || lowDensity || cjkLooksLikeCidGarbage
-                        Log.d("WordCount", "PDF OCR决策 $dName: bestChars=$bestChars bestFe=$bestFe bestPages=$bestPages realPages=$realPages avgChars/p=$avgCharsPerPage avgWords/p=$avgWordsPerPage lowDensity=$lowDensity needOcr=$needOcr (garbage=$looksLikeGarbage failedCn=$isFailedChinesePdf cidGarbage=$cjkLooksLikeCidGarbage)")
+                        Diag.d( "PDF OCR决策 $dName: bestChars=$bestChars bestFe=$bestFe bestPages=$bestPages realPages=$realPages avgChars/p=$avgCharsPerPage avgWords/p=$avgWordsPerPage lowDensity=$lowDensity needOcr=$needOcr (garbage=$looksLikeGarbage failedCn=$isFailedChinesePdf cidGarbage=$cjkLooksLikeCidGarbage)")
                         if (lowDensity) pdfDiag += "\nOCR触发: 低字数密度(avg ${"%.0f".format(avgWordsPerPage)}字/页<200)→按桌面口径强制全页OCR"
                         if (cjkLooksLikeCidGarbage) pdfDiag += "\nOCR触发: CJK常用字占比过低(${"%.2f".format(cjkCommonRatio)})，疑似CID/hex伪中文"
 
@@ -3098,7 +3104,7 @@ internal suspend fun processBatchToEntries(
                                 if (bestChars > 0) {
                                     // 有一些文本（虽然少）→ 降级使用
                                     val ocrDiag = PdfOcrEngine.lastDiag
-                                    Log.w("WordCount", "PDF 降级(文本少+OCR失败): $dName best=${bestChars}ch ocrDiag=$ocrDiag")
+                                    Diag.w( "PDF 降级(文本少+OCR失败): $dName best=${bestChars}ch ocrDiag=$ocrDiag")
                                     val resMap = mapOf(
                                         "name" to dName, "ext" to ".pdf",
                                         "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars),
@@ -3141,7 +3147,7 @@ internal suspend fun processBatchToEntries(
                             }
                         }
                     } catch (e: Throwable) {
-                        Log.w("WordCount", "PDF 解析失败 ${f.name}: ${e.message}")
+                        Diag.w( "PDF 解析失败 ${f.name}: ${e.message}")
                         emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf", displayName = dName, cachePath = f.absolutePath, error = "PDF 解析失败（${e.message}）"))
                     }
                 }
@@ -3204,7 +3210,7 @@ internal suspend fun processBatchToEntries(
                                 outFe = maxOf(0, docWords - outNc)
                                 outWords = docWords
                                 outChars = if (docChars > 0) docChars else stats.fourth
-                                Log.d("WordCount", "doc 用元数据: words=$docWords chars=$docChars pages=$docPages")
+                                Diag.d( "doc 用元数据: words=$docWords chars=$docChars pages=$docPages")
                             } else {
                                 outWords = stats.first
                                 outFe = stats.second
@@ -3232,7 +3238,7 @@ internal suspend fun processBatchToEntries(
                             emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap.toMap()))
                         }
                     } catch (e: Throwable) {
-                        Log.w("WordCount", "老格式解析失败 ${f.name}: ${e.message}")
+                        Diag.w( "老格式解析失败 ${f.name}: ${e.message}")
                         emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_o", displayName = dName, cachePath = f.absolutePath, error = "无法解析此老格式（${e.message}），建议另存为 .docx/.xlsx/.pptx"))
                     }
                 }
@@ -3270,7 +3276,7 @@ internal suspend fun processBatchToEntries(
                         emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                     },
                     onError = { i, f, dName, msg ->
-                        Log.w("WordCount", "DWG 扫描失败 ${f.name}: $msg")
+                        Diag.w( "DWG 扫描失败 ${f.name}: $msg")
                         emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_w", displayName = dName, cachePath = f.absolutePath, error = "无法统计.dwg文件（$msg）"))
                     }
                 )
@@ -3302,7 +3308,7 @@ internal suspend fun processBatchToEntries(
                             emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_t", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                         }
                     } catch (e: Throwable) {
-                        Log.w("WordCount", "TXT 读取失败 ${f.name}: ${e.javaClass.simpleName}: ${e.message}")
+                        Diag.w( "TXT 读取失败 ${f.name}: ${e.javaClass.simpleName}: ${e.message}")
                         emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_t", displayName = dName, cachePath = f.absolutePath,
                             error = "读取失败（${e.message}）"))
                     }
@@ -3333,17 +3339,17 @@ internal suspend fun processBatchToEntries(
                         }
                     } catch (e: OutOfMemoryError) {
                         Runtime.getRuntime().gc()
-                        Log.w("WordCount", "图片过大 OOM ${f.name}")
+                        Diag.w( "图片过大 OOM ${f.name}")
                         emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = dName, cachePath = f.absolutePath, error = "图片过大，内存不足"))
                     } catch (e: Throwable) {
-                        Log.w("WordCount", "OCR 失败 ${f.name}: ${e.javaClass.simpleName}: ${e.message}")
+                        Diag.w( "OCR 失败 ${f.name}: ${e.javaClass.simpleName}: ${e.message}")
                         emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_i", displayName = dName, cachePath = f.absolutePath, error = "图片识别失败（${e.message}）"))
                     }
                 }
             }
         } catch (e: Throwable) {
     } catch (e: Throwable) {
-        Log.e("WordCount", "文件处理异常: ${e.javaClass.simpleName}: ${e.message}", e)
+        Diag.e( "文件处理异常: ${e.javaClass.simpleName}: ${e.message}", e)
         onError("处理出错：${e.message}")
     }
 }
@@ -3932,7 +3938,7 @@ private fun openDocxFile(context: android.content.Context, path: String, mime: S
         }
         context.startActivity(Intent.createChooser(intent, "打开比对结果"))
     } catch (e: Throwable) {
-        Log.w("WordCount", "打开比对结果失败: ${e.message}")
+        Diag.w( "打开比对结果失败: ${e.message}")
     }
 }
 
@@ -3948,7 +3954,7 @@ private fun openImageFile(context: android.content.Context, path: String) {
         }
         context.startActivity(Intent.createChooser(intent, "打开长图"))
     } catch (e: Throwable) {
-        Log.w("WordCount", "打开长图失败: ${e.message}")
+        Diag.w( "打开长图失败: ${e.message}")
     }
 }
 
@@ -3965,7 +3971,7 @@ private fun shareDocxFile(context: android.content.Context, path: String, mime: 
         }
         context.startActivity(Intent.createChooser(intent, "分享比对结果"))
     } catch (e: Throwable) {
-        Log.w("WordCount", "分享比对结果失败: ${e.message}")
+        Diag.w( "分享比对结果失败: ${e.message}")
     }
 }
 
