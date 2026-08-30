@@ -85,44 +85,67 @@ class WordCountApplication : Application() {
     }
 
     /**
-     * v1.9.69: 在跨进程文件锁保护下启动 Python。
+     * v1.9.70: 在跨进程文件锁保护下启动 Python，并在锁内完成关键模块的首次 import。
      * 主进程（main）与 :countservice 可能同时冷启动并各自调用 Python.start()，
      * 两者都会往 files/chaquopy 提取资源；文件锁把提取串行化，避免 AssetFinder 损坏。
-     * 若首次启动失败且 Python 尚未启动，则清空缓存后重试一次。
+     * 之前 v1.9.69 只锁了 Python.start()，但 cad_core 等模块的首次 import 是 Chaquopy
+     * AssetFinder 的懒加载，仍可能在 :countservice 里并发损坏 → FileNotFoundError。
+     * 现在把 wordcount + cad_core 的首次 import 也锁进去，失败时清缓存重试。
      */
     private fun startPythonLocked() {
         val lockFile = File(filesDir, ".chaquopy_start.lock")
         lockFile.parentFile?.mkdirs()
         var raf: RandomAccessFile? = null
         var lock: FileLock? = null
-        try {
-            raf = RandomAccessFile(lockFile, "rw")
-            lock = raf.channel.lock()
-            if (!Python.isStarted()) {
-                Python.start(AndroidPlatform(this))
-            }
-            pythonStartError = null
-            Log.d("WordCountApp", "Python 已在 Application.onCreate 主线程启动（进程=${resolveProcessName()}）")
-        } catch (e: Throwable) {
-            pythonStartError = "${e.javaClass.simpleName}: ${e.message}"
-            Log.e("WordCountApp", "Python.start 失败: $pythonStartError", e)
-            // 启动失败且尚未 started 时，清空缓存再试一次（可能是旧版残留资源损坏）
-            if (!Python.isStarted()) {
-                try {
-                    Diag.w("Python.start 失败，清空 Chaquopy 缓存后重试: $pythonStartError")
-                    clearChaquopyCache()
-                    Python.start(AndroidPlatform(this))
-                    pythonStartError = null
-                    Log.d("WordCountApp", "Python.start 重试成功")
-                } catch (e2: Throwable) {
-                    pythonStartError = "$pythonStartError; 重试失败: ${e2.javaClass.simpleName}: ${e2.message}"
-                    Log.e("WordCountApp", "Python.start 重试失败", e2)
+        var attempts = 0
+        var started = false
+        while (attempts < 2 && !started) {
+            attempts++
+            try {
+                if (raf == null) {
+                    raf = RandomAccessFile(lockFile, "rw")
                 }
+                lock = raf.channel.lock()
+                if (!Python.isStarted()) {
+                    Python.start(AndroidPlatform(this))
+                }
+                // 关键：在锁内完成模块预热，强制 AssetFinder 懒加载也串行化。
+                pythonPrewarm()
+                pythonStartError = null
+                started = true
+                Log.d("WordCountApp", "Python 已在 Application.onCreate 主线程启动并预热（进程=${resolveProcessName()}）")
+            } catch (e: Throwable) {
+                pythonStartError = "${e.javaClass.simpleName}: ${e.message}"
+                Log.e("WordCountApp", "Python.start/预热失败(第 $attempts 次): $pythonStartError", e)
+                if (attempts < 2) {
+                    if (!Python.isStarted()) {
+                        try {
+                            Diag.w("Python 启动/预热失败，清空 Chaquopy 缓存后重试: $pythonStartError")
+                            clearChaquopyCache()
+                        } catch (e2: Throwable) {
+                            Log.e("WordCountApp", "清空缓存失败", e2)
+                        }
+                    } else {
+                        Diag.w("Python 已启动但预热失败，将直接重试预热: $pythonStartError")
+                    }
+                }
+            } finally {
+                runCatching { lock?.release() }
+                lock = null
             }
-        } finally {
-            runCatching { lock?.release() }
-            runCatching { raf?.close() }
         }
+        runCatching { raf?.close() }
+        if (!started) {
+            Diag.e("Python 启动/预热连续 $attempts 次失败，后续 DWG/PDF 将退化到 Kotlin 兜底")
+        }
+    }
+
+    /** v1.9.70: 在文件锁内强制预热关键 Python 模块，完成 Chaquopy AssetFinder 懒加载。 */
+    private fun pythonPrewarm() {
+        val py = Python.getInstance()
+        py.getModule("wordcount")
+        py.getModule("cad_core")
+        Log.d("WordCountApp", "Python 模块预热完成（wordcount + cad_core）")
     }
 
     /** 获取当前进程名，仅用于日志。 */
