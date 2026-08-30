@@ -30,6 +30,7 @@ class CountingService : Service() {
 
     companion object {
         const val CHANNEL_ID = "wordcount_counting"
+        const val CHANNEL_ID_COMPLETE = "wordcount_complete"
         const val NOTI_ID = 101
         const val BATCH_END_MARKER = "{\"type\":\"batch_end\"}"
 
@@ -94,10 +95,18 @@ class CountingService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             try {
                 val nm = getSystemService(NotificationManager::class.java)
+                // 进度前台通知：低重要性，不发声不震动
                 val ch = NotificationChannel(CHANNEL_ID, "字数统计中", NotificationManager.IMPORTANCE_LOW)
                 ch.setShowBadge(false)
                 ch.description = "让统计在后台也能持续进行"
                 nm.createNotificationChannel(ch)
+                // 完成通知：默认重要性 + 系统默认铃声，可在系统设置里改铃声
+                val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                val chComplete = NotificationChannel(CHANNEL_ID_COMPLETE, "统计完成", NotificationManager.IMPORTANCE_DEFAULT)
+                chComplete.setShowBadge(false)
+                chComplete.description = "文件统计完成时提醒"
+                chComplete.setSound(soundUri, null)
+                nm.createNotificationChannel(chComplete)
             } catch (e: Throwable) {
                 Log.w("WordCountCS", "createNotificationChannel failed: ${e.message}")
             }
@@ -288,8 +297,8 @@ class CountingService : Service() {
         }
     }
 
-    /** v1.9.38: 统计完成后发送一条带系统默认通知铃声的完成通知。
-     *  v1.9.52: 先取消“正在统计”通知(NOTI_ID)，避免完成通知与旧进度通知并存。 */
+    /** v1.9.75: 完成通知走独立 CHANNEL_ID_COMPLETE（IMPORTANCE_DEFAULT + 系统默认铃声），
+     *  修复 Android O+ 上因进度通道为 LOW 导致完成通知无声的问题。 */
     private fun showCompletionNotification() {
         // v1.9.62: 被"停止"中断的批次不再弹"统计完成"通知（用户要求停止即清通知）
         if (batchControl.stopped) {
@@ -300,7 +309,7 @@ class CountingService : Service() {
             val nm = getSystemService(NotificationManager::class.java) ?: return
             nm.cancel(NOTI_ID)
             val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-            val noti = NotificationCompat.Builder(this, CHANNEL_ID)
+            val noti = NotificationCompat.Builder(this, CHANNEL_ID_COMPLETE)
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setContentTitle("WordCount 统计完成")
                 .setContentText("全部文件已统计完成")

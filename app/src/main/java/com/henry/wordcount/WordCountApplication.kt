@@ -72,16 +72,27 @@ class WordCountApplication : Application() {
         }
     }
 
-    /** v1.9.69: 递归删除 Chaquopy 在 files/chaquopy 下的提取目录。 */
+    /**
+     * v1.9.75: 递归删除 Chaquopy 提取目录，并清掉 Chaquopy 记录资产哈希的 SharedPreferences。
+     * 只删目录不删 Preferences 会导致 Chaquopy 认为文件已存在/已匹配，跳过提取 → AssetFinder/scripts 缺失。
+     */
     private fun clearChaquopyCache(): Boolean {
+        var ok = true
         val dir = File(filesDir, "chaquopy")
-        return try {
+        try {
             if (dir.exists()) dir.deleteRecursively()
-            true
         } catch (e: Throwable) {
-            Diag.w("清空 Chaquopy 缓存失败: ${e.javaClass.simpleName}: ${e.message}")
-            false
+            ok = false
+            Diag.w("清空 Chaquopy 缓存目录失败: ${e.javaClass.simpleName}: ${e.message}")
         }
+        try {
+            getSharedPreferences("chaquopy", Context.MODE_PRIVATE).edit().clear().apply()
+            Diag.d("已清空 SharedPreferences(\"chaquopy\") 的资产哈希记录")
+        } catch (e: Throwable) {
+            ok = false
+            Diag.w("清空 SharedPreferences(\"chaquopy\") 失败: ${e.javaClass.simpleName}: ${e.message}")
+        }
+        return ok
     }
 
     /**
