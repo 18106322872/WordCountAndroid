@@ -102,7 +102,7 @@ class WordCountApplication : Application() {
                 Python.start(AndroidPlatform(this))
             }
             pythonStartError = null
-            Log.d("WordCountApp", "Python 已在 Application.onCreate 主线程启动（进程=${getProcessName()}）")
+            Log.d("WordCountApp", "Python 已在 Application.onCreate 主线程启动（进程=${resolveProcessName()}）")
         } catch (e: Throwable) {
             pythonStartError = "${e.javaClass.simpleName}: ${e.message}"
             Log.e("WordCountApp", "Python.start 失败: $pythonStartError", e)
@@ -126,7 +126,7 @@ class WordCountApplication : Application() {
     }
 
     /** 获取当前进程名，仅用于日志。 */
-    private fun getProcessName(): String {
+    private fun resolveProcessName(): String {
         return try {
             val am = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
             am.runningAppProcesses?.firstOrNull { it.pid == android.os.Process.myPid() }?.processName ?: "?"
