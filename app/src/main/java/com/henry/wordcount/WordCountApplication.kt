@@ -85,12 +85,16 @@ class WordCountApplication : Application() {
     }
 
     /**
-     * v1.9.70: 在跨进程文件锁保护下启动 Python，并在锁内完成关键模块的首次 import。
+     * v1.9.71: 在跨进程文件锁保护下启动 Python，并在锁内完成关键模块的首次 import。
      * 主进程（main）与 :countservice 可能同时冷启动并各自调用 Python.start()，
      * 两者都会往 files/chaquopy 提取资源；文件锁把提取串行化，避免 AssetFinder 损坏。
-     * 之前 v1.9.69 只锁了 Python.start()，但 cad_core 等模块的首次 import 是 Chaquopy
-     * AssetFinder 的懒加载，仍可能在 :countservice 里并发损坏 → FileNotFoundError。
-     * 现在把 wordcount + cad_core 的首次 import 也锁进去，失败时清缓存重试。
+     *
+     * 此前 v1.9.70 的问题：
+     * ① wordcount.py 缺 import re，预热时直接 NameError；
+     * ② clearChaquopyCache() 在锁外执行，:countservice 启动时可能把主进程刚提取好的资源清掉，
+     *   导致 Python.start() 后 AssetFinder/scripts 仍不存在 → FileNotFoundError。
+     *
+     * 现在把"版本升级检测+清空缓存"也移进锁内，并打印每次尝试的完整异常以便诊断。
      */
     private fun startPythonLocked() {
         val lockFile = File(filesDir, ".chaquopy_start.lock")
@@ -106,27 +110,42 @@ class WordCountApplication : Application() {
                     raf = RandomAccessFile(lockFile, "rw")
                 }
                 lock = raf.channel.lock()
-                if (!Python.isStarted()) {
-                    Python.start(AndroidPlatform(this))
+                Diag.d("获取 Chaquopy 启动锁（尝试 $attempts，进程=${resolveProcessName()}）")
+
+                // 关键：多进程共享 files/chaquopy，清空缓存必须在锁内做，
+                // 否则一个进程刚提取好，另一个进程把它删了。
+                if (shouldClearChaquopyCache()) {
+                    Diag.d("检测到版本升级，在锁内清空 Chaquopy 缓存目录以强制重新提取")
+                    clearChaquopyCache()
+                    markVersionCode()
                 }
+
+                if (!Python.isStarted()) {
+                    Diag.d("调用 Python.start()（尝试 $attempts）")
+                    Python.start(AndroidPlatform(this))
+                    Diag.d("Python.start() 返回")
+                } else {
+                    Diag.d("Python.isStarted() 已为 true，跳过 Python.start()")
+                }
+
                 // 关键：在锁内完成模块预热，强制 AssetFinder 懒加载也串行化。
                 pythonPrewarm()
                 pythonStartError = null
                 started = true
-                Log.d("WordCountApp", "Python 已在 Application.onCreate 主线程启动并预热（进程=${resolveProcessName()}）")
+                Diag.d("Python 已启动并预热完成（进程=${resolveProcessName()}）")
             } catch (e: Throwable) {
                 pythonStartError = "${e.javaClass.simpleName}: ${e.message}"
-                Log.e("WordCountApp", "Python.start/预热失败(第 $attempts 次): $pythonStartError", e)
+                Diag.e("Python 启动/预热失败（尝试 $attempts/$attempts）: $pythonStartError", e)
                 if (attempts < 2) {
                     if (!Python.isStarted()) {
                         try {
-                            Diag.w("Python 启动/预热失败，清空 Chaquopy 缓存后重试: $pythonStartError")
+                            Diag.w("Python 尚未 started，清空 Chaquopy 缓存后重试: $pythonStartError")
                             clearChaquopyCache()
                         } catch (e2: Throwable) {
-                            Log.e("WordCountApp", "清空缓存失败", e2)
+                            Diag.e("清空缓存失败: ${e2.javaClass.simpleName}: ${e2.message}", e2)
                         }
                     } else {
-                        Diag.w("Python 已启动但预热失败，将直接重试预热: $pythonStartError")
+                        Diag.w("Python 已 started 但预热失败，将直接重试预热: $pythonStartError")
                     }
                 }
             } finally {
@@ -169,12 +188,8 @@ class WordCountApplication : Application() {
             Log.d("WordCountApp", "跳过 Python 初始化（隔离进程）")
             return
         }
-        // v1.9.69: 升级后清空旧 Chaquopy 缓存，再用文件锁串行化多进程启动。
-        if (shouldClearChaquopyCache()) {
-            Diag.d("检测到版本升级，清空 Chaquopy 缓存目录以强制重新提取")
-            clearChaquopyCache()
-            markVersionCode()
-        }
+        // v1.9.71: 缓存清理已移入 startPythonLocked() 的文件锁内，
+        // 避免 main / :countservice 互相清空已提取资源。
         startPythonLocked()
     }
 }

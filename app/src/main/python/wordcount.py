@@ -179,6 +179,7 @@ rapidocr_onnxruntime 包内置，无需联网下载。
 
 
 import os
+import re
 import traceback
 
 
