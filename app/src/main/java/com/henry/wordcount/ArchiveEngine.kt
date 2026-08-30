@@ -53,25 +53,26 @@ object ArchiveEngine {
     /**
      * v1.9.63: 新增 gate / onInner 回调。
      *  - gate: 返回 false 表示"已停止"，调用方应立即终止整包（暂停时 gate 会阻塞到继续）。
-     *  - onInner: 每个内层文件统计完成后立即回调，供上层"边统计边 emit 条目"，
-     *    这样暂停时主界面就能显示已经统计出来的字数（此前整包只产出一个聚合条目，
-     *    统计中途暂停汇总永远为 0）。
+     *  - onEntries: 开始统计前返回内层文件列表（不含目录），供上层先 emit"骨架"占位。
+     *  - onInner: 每个内层文件统计完成后立即回调，上层按名称替换对应占位，实现"统计一个加一个"，
+     *    暂停时也能看到全部文件名和已统计结果（v1.9.68）。
      */
     suspend fun extract(file: File, cacheDir: File, context: Context? = null, onProgress: ((Int, Int) -> Unit)? = null,
-                        gate: (() -> Boolean)? = null, onInner: ((InnerResult) -> Unit)? = null): ArchiveResult? {
+                        gate: (() -> Boolean)? = null, onEntries: ((List<String>) -> Unit)? = null,
+                        onInner: ((InnerResult) -> Unit)? = null): ArchiveResult? {
         return try {
             val ext = file.extension.lowercase()
             when {
-                ext == "zip" || (ext.isBlank() && isZipMagic(file)) -> fromZipCommonsCompress(file, cacheDir, context, onProgress, gate, onInner)
-                ext == "rar" || (ext.isBlank() && isRarMagic(file)) -> fromRar(file, cacheDir, context, onProgress, gate, onInner)
-                ext in setOf("gz", "tgz") -> fromGzip(file, cacheDir, context, gate, onInner)
-                ext == "tar" || (ext.isBlank() && isTarMagic(file)) -> fromTarDirect(file, cacheDir, context, gate, onInner)
-                ext == "7z" -> fromSevenZip(file, cacheDir, context, gate, onInner)
+                ext == "zip" || (ext.isBlank() && isZipMagic(file)) -> fromZipCommonsCompress(file, cacheDir, context, onProgress, gate, onEntries, onInner)
+                ext == "rar" || (ext.isBlank() && isRarMagic(file)) -> fromRar(file, cacheDir, context, onProgress, gate, onEntries, onInner)
+                ext in setOf("gz", "tgz") -> fromGzip(file, cacheDir, context, gate, onEntries, onInner)
+                ext == "tar" || (ext.isBlank() && isTarMagic(file)) -> fromTarDirect(file, cacheDir, context, gate, onEntries, onInner)
+                ext == "7z" -> fromSevenZip(file, cacheDir, context, gate, onEntries, onInner)
                 else -> {
                     // 兜底：按 magic bytes 再试一次
-                    if (isZipMagic(file)) fromZipCommonsCompress(file, cacheDir, context, onProgress, gate, onInner)
-                    else if (isRarMagic(file)) fromRar(file, cacheDir, context, onProgress, gate, onInner)
-                    else if (isGzipMagic(file)) fromGzip(file, cacheDir, context, gate, onInner)
+                    if (isZipMagic(file)) fromZipCommonsCompress(file, cacheDir, context, onProgress, gate, onEntries, onInner)
+                    else if (isRarMagic(file)) fromRar(file, cacheDir, context, onProgress, gate, onEntries, onInner)
+                    else if (isGzipMagic(file)) fromGzip(file, cacheDir, context, gate, onEntries, onInner)
                     else null
                 }
             }
@@ -128,18 +129,18 @@ object ArchiveEngine {
 
     // ──────────────────── ZIP (commons-compress) ────────────────────
     private suspend fun fromZipCommonsCompress(file: File, cacheDir: File, context: Context?, onProgress: ((Int, Int) -> Unit)? = null,
-                                                gate: (() -> Boolean)? = null, onInner: ((InnerResult) -> Unit)? = null): ArchiveResult {
+                                                gate: (() -> Boolean)? = null, onEntries: ((List<String>) -> Unit)? = null,
+                                                onInner: ((InnerResult) -> Unit)? = null): ArchiveResult {
         val inner = mutableListOf<InnerResult>()
         org.apache.commons.compress.archivers.zip.ZipFile(file).use { zis ->
-            val entries = zis.entries
-            val zipTotal = zis.entries.toList().size
-            var zipDone = 0
-            while (entries.hasMoreElements()) {
+            val allEntries = zis.entries.toList()
+            val fileEntries = allEntries.filter { !it.isDirectory }
+            if (fileEntries.isNotEmpty()) onEntries?.invoke(fileEntries.map { it.name })
+            val zipTotal = fileEntries.size
+            for ((idx, entry) in fileEntries.withIndex()) {
                 if (gate?.invoke() == false) break
-                val entry = entries.nextElement() as ZipArchiveEntry
-                zipDone++
+                val zipDone = idx + 1
                 onProgress?.invoke(zipDone, zipTotal)
-                if (entry.isDirectory) continue
                 val bytes = zis.getInputStream(entry)?.readBytes() ?: continue
                 val ir = processEntry(entry.name, bytes, cacheDir, context)
                 if (ir != null) { inner.add(ir); onInner?.invoke(ir) }
@@ -159,7 +160,8 @@ object ArchiveEngine {
 
     // ──────────────────── RAR (unrar5j，支持 RAR4/RAR5) ────────────────────
     private suspend fun fromRar(file: File, cacheDir: File, context: Context?, onProgress: ((Int, Int) -> Unit)? = null,
-                                gate: (() -> Boolean)? = null, onInner: ((InnerResult) -> Unit)? = null): ArchiveResult? {
+                                gate: (() -> Boolean)? = null, onEntries: ((List<String>) -> Unit)? = null,
+                                onInner: ((InnerResult) -> Unit)? = null): ArchiveResult? {
         val inner = mutableListOf<InnerResult>()
         val dest = File(cacheDir, "rar_${System.currentTimeMillis()}")
         dest.mkdirs()
@@ -174,6 +176,8 @@ object ArchiveEngine {
                     Diag.w( "RAR 部分解压: ${file.name} total=${result.totalFiles} success=${result.successCount}")
                 }
                 val rarFiles = dest.walkTopDown().filter { it.isFile }.toList()
+                val rarNames = rarFiles.map { it.relativeTo(dest).path.replace('\\', '/') }
+                if (rarNames.isNotEmpty()) onEntries?.invoke(rarNames)
                 val rarTotal = rarFiles.size
                 for ((idx, f) in rarFiles.withIndex()) {
                     // v1.9.63: 内层文件边界检查暂停/停止闸门——暂停时阻塞到继续，停止时终止整包。
@@ -202,16 +206,20 @@ object ArchiveEngine {
 
     // ──────────────────── GZ / TGZ ────────────────────
     private suspend fun fromGzip(file: File, cacheDir: File, context: Context?,
-                                 gate: (() -> Boolean)? = null, onInner: ((InnerResult) -> Unit)? = null): ArchiveResult {
+                                 gate: (() -> Boolean)? = null, onEntries: ((List<String>) -> Unit)? = null,
+                                 onInner: ((InnerResult) -> Unit)? = null): ArchiveResult {
         val bytes = file.readBytes()
         val decompressed = gunzipCompat(bytes)
         val inner = mutableListOf<InnerResult>()
         val isTar = decompressed.size > 262 &&
                 String(decompressed.copyOfRange(257, 262), StandardCharsets.ISO_8859_1) == "ustar"
         if (isTar || file.extension.lowercase() == "tgz") {
+            val names = collectTarNames(decompressed)
+            if (names.isNotEmpty()) onEntries?.invoke(names)
             processTar(decompressed, cacheDir, inner, context, gate, onInner)
         } else {
             val baseName = file.name.removeSuffix(".gz").removeSuffix(".GZ")
+            onEntries?.invoke(listOf(baseName))
             val ir = processEntry(baseName, decompressed, cacheDir, context)
             if (ir != null) { inner.add(ir); onInner?.invoke(ir) }
         }
@@ -220,17 +228,23 @@ object ArchiveEngine {
 
     // ──────────────────── TAR ────────────────────
     private suspend fun fromTarDirect(file: File, cacheDir: File, context: Context?,
-                                      gate: (() -> Boolean)? = null, onInner: ((InnerResult) -> Unit)? = null): ArchiveResult {
+                                      gate: (() -> Boolean)? = null, onEntries: ((List<String>) -> Unit)? = null,
+                                      onInner: ((InnerResult) -> Unit)? = null): ArchiveResult {
         val bytes = file.readBytes()
         val inner = mutableListOf<InnerResult>()
+        val names = collectTarNames(bytes)
+        if (names.isNotEmpty()) onEntries?.invoke(names)
         processTar(bytes, cacheDir, inner, context, gate, onInner)
         return aggregate(inner)
     }
 
     /** 7Z（commons-compress SevenZFile） */
     private suspend fun fromSevenZip(file: File, cacheDir: File, context: Context?,
-                                     gate: (() -> Boolean)? = null, onInner: ((InnerResult) -> Unit)? = null): ArchiveResult {
+                                     gate: (() -> Boolean)? = null, onEntries: ((List<String>) -> Unit)? = null,
+                                     onInner: ((InnerResult) -> Unit)? = null): ArchiveResult {
         val inner = mutableListOf<InnerResult>()
+        val names = collectSevenZipNames(file)
+        if (names.isNotEmpty()) onEntries?.invoke(names)
         SevenZFile(file).use { sevenz ->
             while (true) {
                 if (gate?.invoke() == false) break
@@ -278,6 +292,48 @@ object ArchiveEngine {
                 else -> { pendingLongName = null }
             }
         }
+    }
+
+    /** v1.9.68: TAR 预扫描，只收集文件名（不含目录），用于提前 emit 骨架。 */
+    private fun collectTarNames(bytes: ByteArray): List<String> {
+        val names = mutableListOf<String>()
+        var pos = 0
+        var pendingLongName: String? = null
+        while (pos + 512 <= bytes.size) {
+            val header = bytes.copyOfRange(pos, pos + 512)
+            pos += 512
+            val name = readTarName(header)
+            val sizeStr = String(header.copyOfRange(124, 136), StandardCharsets.ISO_8859_1).trim()
+            val size = octalToLong(sizeStr)
+            val typeFlag = (header[156].toInt() and 0xFF).toChar()
+            if (name.isEmpty() && size <= 0) break
+            val dataSize = if (size < 0) 0 else size
+            val rounded = ((dataSize + 511) / 512) * 512
+            val data = if (dataSize > 0 && pos + dataSize <= bytes.size) bytes.copyOfRange(pos, pos + dataSize.toInt()) else ByteArray(0)
+            pos += rounded.toInt()
+            when (typeFlag) {
+                'L' -> { pendingLongName = String(data, StandardCharsets.UTF_8).trimEnd('\u0000') }
+                '0', '\u0000' -> {
+                    val finalName = pendingLongName?.let { if (name.isNotEmpty()) "$it/$name" else it } ?: name
+                    pendingLongName = null
+                    if (finalName.isNotBlank()) names.add(finalName)
+                }
+                else -> { pendingLongName = null }
+            }
+        }
+        return names
+    }
+
+    /** v1.9.68: 7Z 预扫描，只收集文件名（不含目录），用于提前 emit 骨架。 */
+    private fun collectSevenZipNames(file: File): List<String> {
+        val names = mutableListOf<String>()
+        SevenZFile(file).use { sevenz ->
+            while (true) {
+                val entry = sevenz.nextEntry ?: break
+                if (!entry.isDirectory && entry.name.isNotBlank()) names.add(entry.name)
+            }
+        }
+        return names
     }
 
     private fun readTarName(header: ByteArray): String {

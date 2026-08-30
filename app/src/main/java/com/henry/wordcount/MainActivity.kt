@@ -275,7 +275,9 @@ data class InnerResult(
     val words: Int, val fe: Int, val nc: Int, val chars: Int,
     val pages: Int?,
     /** v1.5.86: 内层文件（如栅格化 DWG）无法直接提取中文时置 true，UI 提示"必须用PDF统计"且不计入合计 */
-    val needsPdf: Boolean = false
+    val needsPdf: Boolean = false,
+    /** v1.9.68: false 表示仅占位（未统计），true 表示已填充结果 */
+    val done: Boolean = true
 )
 
 /** 单个工作表统计（含隐藏表）：名称 + 字数 */
@@ -2784,71 +2786,74 @@ internal suspend fun processBatchToEntries(
                     val dName = cf.displayName
                     if (!control.gateBlocking()) return@forEachIndexed
                                         try {
-                                                                // v1.9.3: onProgress 在 IO 线程被 invoke，更新 Compose State 需切到 Main 线程
-                                                                // v1.9.62: 压缩包在"内层文件边界"也要能暂停——该回调由解压工作线程
-                                                                // 逐个内层文件触发，在此阻塞即可让整条压缩包流水线停下来（继续时立即放行）。
-                                                                // v1.9.66: 改回"聚合条目 + 可展开内层明细"：先 emit 一个聚合条目（统计中），
-                                                                // 每个 inner 完成后更新同一 id 的聚合条目；主界面通过 same-id 替换实现实时刷新，
-                                                                // 服务进程 partialEmit=false，只写最终结果，避免 wc_results.jsonl 重复 id。
-                                                                val archiveId = "arch::${f.absolutePath}"
-                                                                val archiveExt = f.extension.lowercase().let { if (it.isBlank()) "" else ".${it}" }
-                                                                val archiveInner = mutableListOf<InnerResult>()
-                                                                fun buildEntry(final: Boolean): FileEntry {
-                                                                    val innerMaps = archiveInner.map { ir ->
-                                                                        mapOf(
-                                                                            "name" to ir.name,
-                                                                            "stats" to mapOf("words" to ir.words, "fe" to ir.fe, "nc" to ir.nc, "chars" to ir.chars),
-                                                                            "meta" to mapOf("pages" to ir.pages, "needs_pdf" to ir.needsPdf)
-                                                                        )
-                                                                    }
-                                                                    val totalWords = archiveInner.sumOf { it.words }
-                                                                    val totalFe = archiveInner.sumOf { it.fe }
-                                                                    val totalNc = archiveInner.sumOf { it.nc }
-                                                                    val totalChars = archiveInner.sumOf { it.chars }
-                                                                    val totalPages = archiveInner.sumOf { it.pages ?: estimatePages(it.chars) }
-                                                                    val aggResMap = mapOf(
-                                                                        "name" to dName,
-                                                                        "ext" to archiveExt,
-                                                                        "is_archive" to true,
-                                                                        "stats" to mapOf("words" to totalWords, "fe" to totalFe, "nc" to totalNc, "chars" to totalChars),
-                                                                        "meta" to mapOf("inner" to innerMaps, "needs_pdf" to archiveInner.any { it.needsPdf }),
-                                                                        "pages" to totalPages
+                                                            // v1.9.68: 压缩包先 emit 骨架（所有内层文件名列出），每统计完一个替换对应占位，
+                                                            // 暂停时也能看到全部文件名和已统计结果，与电脑版行为一致。
+                                                            val archiveId = "arch::${f.absolutePath}"
+                                                            val archiveExt = f.extension.lowercase().let { if (it.isBlank()) "" else ".${it}" }
+                                                            val archiveInner = mutableListOf<InnerResult>()
+                                                            fun buildEntry(final: Boolean): FileEntry {
+                                                                val innerMaps = archiveInner.map { ir ->
+                                                                    mapOf(
+                                                                        "name" to ir.name,
+                                                                        "stats" to mapOf("words" to ir.words, "fe" to ir.fe, "nc" to ir.nc, "chars" to ir.chars),
+                                                                        "meta" to mapOf("pages" to ir.pages, "needs_pdf" to ir.needsPdf)
                                                                     )
-                                                                    val fr = toFileResult(aggResMap, f.absolutePath)
-                                                                    return FileEntry(id = archiveId, displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = aggResMap)
                                                                 }
-                                                                if (partialEmit) emit(buildEntry(final = false))
-                                                                val res = ArchiveEngine.extract(f, context.cacheDir, context,
-                                                                    onProgress = archProg@{ done, total ->
-                                                                        if (!control.gateBlocking()) return@archProg
-                                                                        onProgress(dName, done, total)
-                                                                    },
-                                                                    gate = { control.gateBlocking() },
-                                                                    onInner = { inner ->
-                                                                        archiveInner.add(InnerResult(
-                                                                            name = inner.name,
-                                                                            words = inner.words, fe = inner.fe, nc = inner.nc, chars = inner.chars,
-                                                                            pages = inner.pages,
-                                                                            needsPdf = inner.needsPdf
-                                                                        ))
-                                                                        if (partialEmit) emit(buildEntry(final = false))
-                                                                    }
+                                                                val doneInner = archiveInner.filter { it.done }
+                                                                val totalWords = doneInner.sumOf { it.words }
+                                                                val totalFe = doneInner.sumOf { it.fe }
+                                                                val totalNc = doneInner.sumOf { it.nc }
+                                                                val totalChars = doneInner.sumOf { it.chars }
+                                                                val totalPages = doneInner.sumOf { it.pages ?: estimatePages(it.chars) }
+                                                                val aggResMap = mapOf(
+                                                                    "name" to dName,
+                                                                    "ext" to archiveExt,
+                                                                    "is_archive" to true,
+                                                                    "stats" to mapOf("words" to totalWords, "fe" to totalFe, "nc" to totalNc, "chars" to totalChars),
+                                                                    "meta" to mapOf("inner" to innerMaps, "needs_pdf" to archiveInner.any { it.needsPdf && it.done }),
+                                                                    "pages" to totalPages
                                                                 )
-                                                                if (res == null) {
-                                                                    val ext = f.extension.lowercase()
-                                                                    val isSupported = ext in setOf("zip", "rar", "7z", "tar", "gz", "tgz")
-                                                                    val errMsg = if (isSupported) {
-                                                                        if (ext == "rar")
-                                                                            "RAR 解析失败（文件可能损坏、密码保护或为空）"
-                                                                        else
-                                                                            "压缩包解析失败（文件可能损坏或密码保护）"
-                                                                    } else
-                                                                        "暂不支持此格式（.$ext）。支持：ZIP / RAR4 / 7Z / TAR / GZ"
-                                                                    emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = dName, cachePath = f.absolutePath,
-                                                                        error = errMsg))
-                                                                } else {
-                                                                    emit(buildEntry(final = true))
+                                                                val fr = toFileResult(aggResMap, f.absolutePath)
+                                                                return FileEntry(id = archiveId, displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = aggResMap)
+                                                            }
+                                                            val res = ArchiveEngine.extract(f, context.cacheDir, context,
+                                                                onProgress = archProg@{ done, total ->
+                                                                    if (!control.gateBlocking()) return@archProg
+                                                                    onProgress(dName, done, total)
+                                                                },
+                                                                gate = { control.gateBlocking() },
+                                                                onEntries = { names ->
+                                                                    archiveInner.addAll(names.map { full ->
+                                                                        InnerResult(name = full.substringAfterLast('/'), words = 0, fe = 0, nc = 0, chars = 0, pages = null, needsPdf = false, done = false)
+                                                                    })
+                                                                    if (partialEmit) emit(buildEntry(final = false))
+                                                                },
+                                                                onInner = { inner ->
+                                                                    val idx = archiveInner.indexOfFirst { it.name == inner.name && !it.done }
+                                                                    if (idx >= 0) {
+                                                                        archiveInner[idx] = InnerResult(name = inner.name, words = inner.words, fe = inner.fe, nc = inner.nc, chars = inner.chars, pages = inner.pages, needsPdf = inner.needsPdf, done = true)
+                                                                    } else {
+                                                                        archiveInner.add(InnerResult(name = inner.name, words = inner.words, fe = inner.fe, nc = inner.nc, chars = inner.chars, pages = inner.pages, needsPdf = inner.needsPdf, done = true))
+                                                                    }
+                                                                    if (partialEmit) emit(buildEntry(final = false))
                                                                 }
+                                                            )
+                                                            if (res == null) {
+                                                                val ext = f.extension.lowercase()
+                                                                val isSupported = ext in setOf("zip", "rar", "7z", "tar", "gz", "tgz")
+                                                                val errMsg = if (isSupported) {
+                                                                    if (ext == "rar")
+                                                                        "RAR 解析失败（文件可能损坏、密码保护或为空）"
+                                                                    else
+                                                                        "压缩包解析失败（文件可能损坏或密码保护）"
+                                                                } else
+                                                                    "暂不支持此格式（.${ext}）。支持：ZIP / RAR4 / 7Z / TAR / GZ"
+                                                                emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = dName, cachePath = f.absolutePath,
+                                                                    error = errMsg))
+                                                            } else {
+                                                                emit(buildEntry(final = true))
+                                                            }
+                                        }
                     } catch (e: Throwable) {
                         Diag.w( "压缩包解析失败 ${f.name}: ${e.message}")
                         emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = dName, cachePath = f.absolutePath, error = "压缩包解析失败（${e.message}）"))
