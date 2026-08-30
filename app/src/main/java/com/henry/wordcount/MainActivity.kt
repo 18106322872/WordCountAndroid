@@ -2853,7 +2853,6 @@ internal suspend fun processBatchToEntries(
                                                             } else {
                                                                 emit(buildEntry(final = true))
                                                             }
-                                        }
                     } catch (e: Throwable) {
                         Diag.w( "压缩包解析失败 ${f.name}: ${e.message}")
                         emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_arch", displayName = dName, cachePath = f.absolutePath, error = "压缩包解析失败（${e.message}）"))
