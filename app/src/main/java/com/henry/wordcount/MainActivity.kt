@@ -2566,8 +2566,7 @@ private fun addFiles(
                     val idx = entries.indexOfFirst { it.id == e.id }
                     if (idx >= 0) entries[idx] = e else entries.add(e)
                 } },
-                onError = { msg -> scope.launch { snackbar.showSnackbar(msg) } },
-                partialEmit = true)
+                onError = { msg -> scope.launch { snackbar.showSnackbar(msg) } })
             finalizeBatch(context, heartbeatJob, busySet, mainProgress)
         }
 
@@ -2745,9 +2744,7 @@ internal suspend fun processBatchToEntries(
     onProgress: (name: String, done: Int, total: Int) -> Unit,
     emit: (FileEntry) -> Unit,
     onError: (String) -> Unit,
-    control: BatchControl = BatchControl(),
-    // v1.9.66: 主界面 inline 路径需要边统计边更新聚合条目；服务进程只写最终结果。
-    partialEmit: Boolean = false
+    control: BatchControl = BatchControl()
 ) {
     try {
                 val pyStartResult = runCatching { PythonEngine.start(context) }
@@ -2826,7 +2823,7 @@ internal suspend fun processBatchToEntries(
                                                                     archiveInner.addAll(names.map { full ->
                                                                         InnerResult(name = full.substringAfterLast('/'), words = 0, fe = 0, nc = 0, chars = 0, pages = null, needsPdf = false, done = false)
                                                                     })
-                                                                    if (partialEmit) emit(buildEntry(final = false))
+                                                                    emit(buildEntry(final = false))
                                                                 },
                                                                 onInner = { inner ->
                                                                     val idx = archiveInner.indexOfFirst { it.name == inner.name && !it.done }
@@ -2835,7 +2832,7 @@ internal suspend fun processBatchToEntries(
                                                                     } else {
                                                                         archiveInner.add(InnerResult(name = inner.name, words = inner.words, fe = inner.fe, nc = inner.nc, chars = inner.chars, pages = inner.pages, needsPdf = inner.needsPdf, done = true))
                                                                     }
-                                                                    if (partialEmit) emit(buildEntry(final = false))
+                                                                    emit(buildEntry(final = false))
                                                                 }
                                                             )
                                                             if (res == null) {
