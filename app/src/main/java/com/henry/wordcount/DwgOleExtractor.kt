@@ -40,7 +40,12 @@ object DwgOleExtractor {
         "310", "311", "312", "313", "314", "315", "316", "317", "318", "319"
     )
     private val PRES_NAMES = listOf("CONTENTS", "OlePres000", "OlePres001", "OlPres000", "OlePres")
-    private const val MAX_BITMAPS_PER_FILE = 20
+    // v1.9.80: 20 → 6。单个 DWG 最多 OCR 的预览位图数。
+    // 旧值 20 配合「1920 不够 30 字再跑 2560」的双档策略，单文件最坏要跑 40+ 次 PaddleOCR
+    // （每张 2560px 位图约 10MB），实测单文件耗时 12~17 分钟并在第 5 个文件 OOM 崩溃。
+    // 实测 OLE 预览图之间文字高度重复（addLines 按行去重），6 张已能覆盖绝大部分唯一文本，
+    // 而 OLE 通道对中文(fe)的实际贡献仅 0~4 字，削减的收益远大于损失。
+    private const val MAX_BITMAPS_PER_FILE = 6
     private const val MAX_OCR_TEXT_CHARS = 12000
 
     // ─────────── v1.9.62: OLE 收获通用逻辑（office / EMF矢量文字 / 位图OCR 三路并存） ───────────
@@ -552,7 +557,10 @@ object DwgOleExtractor {
             // 首档结果过短（<30 字）时再用 2560 档重试一次，取更丰富的一份。
             val t1 = recognizeAt(bmp, 1920, context)
             val len1 = t1?.trim()?.length ?: 0
-            if (len1 >= 30) return t1
+            // v1.9.80: 只要 1920 档识别出任何文字就直接采用，不再为「补足 30 字」再跑一次 2560 档。
+            // 2560 档单张位图约 10MB 且 PaddleOCR 耗时翻倍，是单文件 40+ 次 OCR 与 OOM 崩溃的主因；
+            // 改为仅在首档完全识别不出文字（0 字）时才升级到 2560 档重试，保留小图细字的兜底能力。
+            if (len1 > 0) return t1
             val t2 = recognizeAt(bmp, 2560, context)
             val len2 = t2?.trim()?.length ?: 0
             if (len2 > len1) t2 else (t1 ?: t2)

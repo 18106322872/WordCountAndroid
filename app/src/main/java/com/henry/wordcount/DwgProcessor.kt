@@ -110,10 +110,20 @@ object DwgProcessor {
         try {
             if (dxfPathIn != null && File(pyDxfPath).exists() && File(pyDxfPath).length() > 0) {
                     pyPathTried = true
+                    // v1.9.80: 分段计时，定位「统计极慢」的真实耗时环节；同时打印 cleaned 条数与
+                    // Python 计数异常（cntErr），查清 pyWords 恒为 0 的根因（此前从未打印出来）。
+                    val timingsSb = StringBuilder()
+                    var tMark = System.currentTimeMillis()
+                    fun mark(tag: String) {
+                        val now = System.currentTimeMillis()
+                        timingsSb.append("$tag=${now - tMark}ms ")
+                        tMark = now
+                    }
                     try {
                         // v1.9.39: 传 outDir 让 cad_core 把内嵌 IMAGE 导出为 PNG；后续 DwgImageOcrExtractor 跑 ML Kit OCR
                             val imgOutDir = "${context.cacheDir}/dwg_imgs/${file.nameWithoutExtension}_${System.currentTimeMillis()}"
                             val pyJson = PythonEngine.extractCadDxf(context, pyDxfPath, file.absolutePath, imgOutDir)
+                        mark("dxfParse")
                         val obj = JSONObject(pyJson)
                         val pyError = if (obj.has("error") && !obj.isNull("error")) obj.optString("error") else null
                         if (!pyError.isNullOrBlank()) {
@@ -157,25 +167,36 @@ object DwgProcessor {
                         } catch (e: Throwable) {
                             diagnostics.append("ole_office_ex=${e.javaClass.simpleName}:${e.message}; ")
                         }
+                        mark("oleOffice")
                         // v1.9.39: OLE office 与位图 OCR 不再互斥。FA-00003 等含大量嵌入位图(图例/截图/LOGO)
                         // 的 DWG 此前因 oleOfficeOk=true 直接跳过位图 OCR 而漏字（桌面 RapidOCR 全量 OCR +4669 字）。
+                        var oleDxfLen = 0
                         try {
                             val oleRes = DwgOleExtractor.extractOleText(pyDxfPath, context = context)
+                            oleDxfLen = oleRes.text.length
                             // v1.9.53: 诊断 FA-31018 类「仅 OLE 位图」0 字——记录两条 OLE 路径实际返回
-                            diagnostics.append("ole_dxf(obj=${oleRes.objects},txt=${oleRes.text.length}); ")
+                            diagnostics.append("ole_dxf(obj=${oleRes.objects},txt=$oleDxfLen,bmp=${oleRes.bitmapsOcred}); ")
                             if (oleRes.text.isNotBlank()) {
                                 for (ln in oleRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
                                 oleMarks.add("OLE-ocr")
                             }
                         } catch (_: Throwable) {}
-                        try {
-                            val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath, context = context)
-                            diagnostics.append("ole_dwg(cfb=${oleRes2.objects},txt=${oleRes2.text.length}); ")
-                            if (oleRes2.text.isNotBlank()) {
-                                for (ln in oleRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
-                                oleMarks.add("DWG-OLE-ocr")
-                            }
-                        } catch (_: Throwable) {}
+                        mark("oleOcr")
+                        // v1.9.80: DXF 通道已取到 OLE 文字时跳过 DWG CFB 通道。两条通道抽的是同一批
+                        // 嵌入对象，再跑一遍等于把同样的位图重复 OCR，是单文件 40+ 次 OCR 的来源之一。
+                        if (oleDxfLen <= 0) {
+                            try {
+                                val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath, context = context)
+                                diagnostics.append("ole_dwg(cfb=${oleRes2.objects},txt=${oleRes2.text.length}); ")
+                                if (oleRes2.text.isNotBlank()) {
+                                    for (ln in oleRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
+                                    oleMarks.add("DWG-OLE-ocr")
+                                }
+                            } catch (_: Throwable) {}
+                            mark("oleDwg")
+                        } else {
+                            diagnostics.append("ole_dwg(skip:DXF通道已取到文字); ")
+                        }
                         // v1.9.39: DWG 内嵌 IMAGE 实体 OCR（对齐桌面 RapidOCR IMAGE 口径）。
                         if (imgPngs.isNotEmpty()) {
                             try {
@@ -191,6 +212,7 @@ object DwgProcessor {
                             try {
                                 imgPngs.forEach { java.io.File(it).delete() }
                             } catch (_: Throwable) {}
+                            mark("imgOcr")
                         }
                         if (allItems.isNotEmpty()) {
                             // 合并后确有文字：仅当"文字全部来自 OLE/IMAGE、矢量 items 为空"时，
@@ -217,7 +239,11 @@ object DwgProcessor {
                             val finalFe = if (pyFe > 0) pyFe else kFe
                             val finalNc = if (pyNc > 0) pyNc else kNc
                             val finalChars = if (pyChars > 0) pyChars else kChars
-                            Diag.d("DWG analyze 主路径结果 $dName: items=${items.size} oleMarks=$oleMarks finalNeedsPdf=$finalNeedsPdf pyWords=$pyWords kWords=$kWords finalWords=$finalWords")
+                            mark("count")
+                            Diag.d("DWG analyze 主路径结果 $dName: items=${items.size} cleaned=${cleanedItems.size} oleMarks=$oleMarks finalNeedsPdf=$finalNeedsPdf pyWords=$pyWords kWords=$kWords finalWords=$finalWords")
+                            // v1.9.80: 分段耗时 + Python 计数异常。此前 count_err 只进 diagnostics 从不打印，
+                            // 导致 pyWords 恒为 0 却查不到原因；现单独打一行，下次日志即可定位。
+                            Diag.d("DWG 分段耗时 $dName: $timingsSb| cntErr=${cntErr?.take(150)}")
                             val diag = "PY:${diagnostics}items=${items.size}"
                             Diag.d( "DWG Python主路径 $dName: words=$finalWords(py=$pyWords,k=$kWords) fe=$finalFe nc=$finalNc chars=$finalChars pages=$pyPages($pyReason) items=${items.size}")
                             return DwgProcessResult(finalWords, finalFe, finalNc, finalChars, pyPages, pyReason, finalNeedsPdf, diag, null, allItems.joinToString("\n"))
