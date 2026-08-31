@@ -2826,7 +2826,9 @@ internal suspend fun processBatchToEntries(
                                                                     emit(buildEntry(final = false))
                                                                 },
                                                                 onInner = { inner ->
-                                                                    val idx = archiveInner.indexOfFirst { it.name == inner.name && !it.done }
+                                                                    // v1.9.77 FIX：优先匹配未完成的同名占位；若已全部完成（如重试/替换场景）则回退匹配
+                                                                    // 任意同名项做更新，杜绝同一文件出现两条进度（v1.9.76 偶有"双 0 进度"回归）。
+                                                                    val idx = archiveInner.indexOfFirst { it.name == inner.name && !it.done }.let { if (it < 0) archiveInner.indexOfFirst { it.name == inner.name } else it }
                                                                     if (idx >= 0) {
                                                                         archiveInner[idx] = InnerResult(name = inner.name, words = inner.words, fe = inner.fe, nc = inner.nc, chars = inner.chars, pages = inner.pages, needsPdf = inner.needsPdf, done = true)
                                                                     } else {

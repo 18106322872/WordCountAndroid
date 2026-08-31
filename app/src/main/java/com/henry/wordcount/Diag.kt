@@ -53,6 +53,11 @@ object Diag {
         synchronized(lock) {
             val f = logFile(label)
             if (f.exists() && f.length() > MAX_FILE) {
+                // v1.9.77 FIX：超出封顶必须关闭并丢弃旧 writer 后再截断重建，
+                // 否则旧 BufferedWriter 仍持有被截断文件的句柄、从旧偏移继续写入，
+                // 导致日志文件无界增长（曾出现 468MB）→ I/O 抖动引发统计极慢 / ANR / 卡死退出。
+                try { writers[label]?.close() } catch (_: Throwable) {}
+                writers.remove(label)
                 try { f.writeText("") } catch (_: Throwable) {}
             }
             val w = writers[label] ?: run {

@@ -208,10 +208,19 @@ object DwgProcessor {
                             val pyFe = co.optInt("fe", 0)
                             val pyNc = co.optInt("nc", 0)
                             val pyChars = co.optInt("chars", 0)
-                            Diag.d("DWG analyze 主路径结果 $dName: items=${items.size} oleMarks=$oleMarks finalNeedsPdf=$finalNeedsPdf pyWords=$pyWords pyChars=$pyChars pyNeedsPdfOrig=$pyNeedsPdf")
+                            // v1.9.77 FIX：Python 主路径偶发计 0（Chaquopy 跨进程计数异常 / extract 返回空 items）
+                            // 兜底——合并文本确有内容时，用 Kotlin countTextKotlin 重新计数（与 v1.9.69~1.9.75
+                            // Kotlin 组码兜底口径一致，且此处计入 OLE/IMAGE 文本，更接近桌面真值），保证不回归为 0 字。
+                            // 取 Python 与 Kotlin 的较大值：Python 正常时信任 Python，Python 误 0 时退回 Kotlin。
+                            val (kWords, kFe, kNc, kChars) = countTextKotlin(mergedAll)
+                            val finalWords = if (pyWords > 0) pyWords else kWords
+                            val finalFe = if (pyFe > 0) pyFe else kFe
+                            val finalNc = if (pyNc > 0) pyNc else kNc
+                            val finalChars = if (pyChars > 0) pyChars else kChars
+                            Diag.d("DWG analyze 主路径结果 $dName: items=${items.size} oleMarks=$oleMarks finalNeedsPdf=$finalNeedsPdf pyWords=$pyWords kWords=$kWords finalWords=$finalWords")
                             val diag = "PY:${diagnostics}items=${items.size}"
-                            Diag.d( "DWG Python主路径 $dName: words=$pyWords fe=$pyFe nc=$pyNc chars=$pyChars pages=$pyPages($pyReason) items=${items.size}")
-                            return DwgProcessResult(pyWords, pyFe, pyNc, pyChars, pyPages, pyReason, finalNeedsPdf, diag, null, allItems.joinToString("\n"))
+                            Diag.d( "DWG Python主路径 $dName: words=$finalWords(py=$pyWords,k=$kWords) fe=$finalFe nc=$finalNc chars=$finalChars pages=$pyPages($pyReason) items=${items.size}")
+                            return DwgProcessResult(finalWords, finalFe, finalNc, finalChars, pyPages, pyReason, finalNeedsPdf, diag, null, allItems.joinToString("\n"))
                         }
                     } catch (e: Throwable) {
                         diagnostics.append("py_ex=${e.javaClass.simpleName}:${e.message?.take(120)}; ")
