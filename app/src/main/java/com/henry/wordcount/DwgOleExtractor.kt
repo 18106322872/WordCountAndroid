@@ -45,7 +45,13 @@ object DwgOleExtractor {
     // （每张 2560px 位图约 10MB），实测单文件耗时 12~17 分钟并在第 5 个文件 OOM 崩溃。
     // 实测 OLE 预览图之间文字高度重复（addLines 按行去重），6 张已能覆盖绝大部分唯一文本，
     // 而 OLE 通道对中文(fe)的实际贡献仅 0~4 字，削减的收益远大于损失。
-    private const val MAX_BITMAPS_PER_FILE = 6
+    // v1.9.81: 6 → 12。采样解码（见 decodeBmpManual）把单张 OCR 从 ~50s 降到亚秒级，
+    // 恢复 v1.9.80 因削减位图上限而丢失的 OLE 字数（FA-00003 曾 2994→1711），
+    // 同时保留下方 OLE_DEADLINE_MS 墙钟截止作为最坏情况保护。
+    private const val MAX_BITMAPS_PER_FILE = 12
+    // v1.9.81: OLE 全程墙钟截止。FA-00003 实测 oleOcr=315s（大 DXF 逐行扫描+多张 OCR），
+    // 超时即停止继续扫后续 blob / 位图，保证单文件 OLE 阶段不再拖到分钟级。
+    private const val OLE_DEADLINE_MS = 120_000L
     private const val MAX_OCR_TEXT_CHARS = 12000
 
     // ─────────── v1.9.62: OLE 收获通用逻辑（office / EMF矢量文字 / 位图OCR 三路并存） ───────────
@@ -227,13 +233,19 @@ object DwgOleExtractor {
      */
     fun extractOleText(dxfPath: String, maxBitmaps: Int = MAX_BITMAPS_PER_FILE, context: Context? = null): OleExtractResult {
         return try {
-            val blobs = findOleBlobs(dxfPath)
+            val deadline = System.currentTimeMillis() + OLE_DEADLINE_MS
+            val blobs = findOleBlobs(dxfPath, deadline)
             if (blobs.isEmpty()) return OleExtractResult("", 0, 0)
 
             // v1.9.62: 统一走 harvestBlob——office / EMF矢量文字 / 位图OCR 三路并存
             val st = HarvestState()
             for (blob in blobs) {
                 if (st.allLines.size >= MAX_OCR_TEXT_CHARS) break
+                // v1.9.81: 墙钟截止，最坏情况不再拖到分钟级
+                if (System.currentTimeMillis() > deadline) {
+                    Log.d(TAG, "DwgOleExtractor OLE 截止时间已到，停止处理剩余 ${blobs.size - blobs.indexOf(blob) - 1} 个 blob")
+                    break
+                }
                 try {
                     harvestBlob(blob, context, maxBitmaps, st)
                 } catch (e: Throwable) {
@@ -418,7 +430,7 @@ object DwgOleExtractor {
     // ───────────────────────── DXF 扫描：OLE2FRAME 310–319 ─────────────────────────
 
     /** 流式扫描 DXF，收集每个 OLE2FRAME 实体的 310–319 hex → 还原 CFB 字节。 */
-    private fun findOleBlobs(dxfPath: String): List<ByteArray> {
+    private fun findOleBlobs(dxfPath: String, deadlineMs: Long = Long.MAX_VALUE): List<ByteArray> {
         val file = File(dxfPath)
         if (!file.exists() || file.length() == 0L) return emptyList()
         val blobs = mutableListOf<ByteArray>()
@@ -429,9 +441,15 @@ object DwgOleExtractor {
             var curValue = ""
             var inOle = false
             var hexParts = mutableListOf<String>()
-            reader.forEachLine { raw ->
-                val line = raw.trim()
-                if (line.isEmpty()) return@forEachLine
+            // v1.9.81: 手动迭代替代 forEachLine，可在大 DXF 逐行扫描中途检查墙钟截止
+            // （FA-00003 类 222MB DXF 全文扫描本身就要数分钟）
+            reader.useLines { lines ->
+                val it = lines.iterator()
+                scan@ while (it.hasNext()) {
+                    val raw = it.next()
+                    if (System.currentTimeMillis() > deadlineMs) break@scan
+                    val line = raw.trim()
+                    if (line.isEmpty()) continue@scan
                 if (state == 0) {
                     curCode = line
                     state = 1
@@ -456,6 +474,7 @@ object DwgOleExtractor {
                             hexParts = mutableListOf()
                         }
                     }
+                }
                 }
             }
             if (inOle) flushOle(hexParts, blobs)
@@ -646,23 +665,35 @@ object DwgOleExtractor {
                 pal
             } else IntArray(0)
 
-            val bmp = Bitmap.createBitmap(absW, absH, Bitmap.Config.ARGB_8888)
-            val pixels = IntArray(absW * absH)
+            // v1.9.81: 巨型预览图采样解码。AutoCAD OLE 预览图最大可达 20000×20000（4 亿像素），
+            // 此前逐像素 Kotlin 循环 + IntArray 全量分配，单张耗时 50 秒以上且分配数百 MB
+            // （FA-00003 单文件 oleOcr=315s 与第 5 个文件 OOM 崩溃的主因之一）。
+            // OCR 最终只需 1920 长边（约 2M 像素），采样到 ≤4M 像素对识别零损失。
+            val totalPx = absW.toLong() * absH.toLong()
+            val step = if (totalPx <= 4_000_000L) 1
+                       else maxOf(2, kotlin.math.ceil(kotlin.math.sqrt(totalPx / 4_000_000.0)).toInt())
+            val outW = (absW + step - 1) / step
+            val outH = (absH + step - 1) / step
+            val bmp = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+            val pixels = IntArray(outW * outH)
             var idx = 0
-            for (row in 0 until absH) {
+            var row = 0
+            while (row < absH) {
                 // height 为正：底图行在文件最前，需翻转；为负：顶图向下
                 val srcRow = if (h >= 0) (absH - 1 - row) else row
                 val rowBase = pixelOff + srcRow * stride
-                for (col in 0 until absW) {
+                var col = 0
+                while (col < absW) {
                     if (bpp <= 8) {
                         // 索引色：按位取出调色板下标（1/4/8-bit 打包，行按 4 字节对齐）
                         val bitPos = col * bpp
                         val byteOff = rowBase + (bitPos ushr 3)
-                        if (byteOff < 0 || byteOff >= data.size) { pixels[idx++] = 0xFF000000.toInt(); continue }
+                        if (byteOff < 0 || byteOff >= data.size) { pixels[idx++] = 0xFF000000.toInt(); col += step; continue }
                         val raw = data[byteOff].toInt() and 0xFF
                         val shift = 8 - bpp - (bitPos and 7)
                         val palIdx = (raw ushr shift) and ((1 shl bpp) - 1)
                         pixels[idx++] = if (palIdx < palette.size) palette[palIdx] else 0xFF000000.toInt()
+                        col += step
                         continue
                     }
                     val px = if (bpp == 24) {
@@ -689,9 +720,11 @@ object DwgOleExtractor {
                         }
                     }
                     pixels[idx++] = px
+                    col += step
                 }
+                row += step
             }
-            bmp.setPixels(pixels, 0, absW, 0, 0, absW, absH)
+            bmp.setPixels(pixels, 0, outW, 0, 0, outW, outH)
             bmp
         } catch (e: Throwable) {
             Log.w(TAG, "DwgOleExtractor.decodeBmpManual 失败: ${e.message}")

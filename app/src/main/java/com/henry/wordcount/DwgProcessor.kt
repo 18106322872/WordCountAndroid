@@ -16,6 +16,10 @@ import java.io.File
  * v1.5.81: 从 MainActivity 提取为共享对象，供 ArchiveEngine 复用。
  */
 object DwgProcessor {
+    // v1.9.81: 超大 DXF 守卫。FA-31003/FA-31018 类 DWG 转 DXF 后可达 200MB+，
+    // Python ezdxf 解析单文件实测 17 分钟且 OOM 崩溃（:countservice 被杀→整批重来）。
+    // 超过该值直接跳过 Python 主路径，走 Kotlin 组码兜底（含 OLE/IMAGE，快一个量级以上）。
+    private const val MAX_PY_DXF_BYTES = 64L * 1024 * 1024
     data class DwgProcessResult(
         val words: Int,
         val fe: Int,
@@ -108,7 +112,8 @@ object DwgProcessor {
         var pySuccessWithText = false
 
         try {
-            if (dxfPathIn != null && File(pyDxfPath).exists() && File(pyDxfPath).length() > 0) {
+            val dxfLen = if (dxfPathIn != null && File(pyDxfPath).exists()) File(pyDxfPath).length() else 0L
+            if (dxfPathIn != null && dxfLen > 0 && dxfLen <= MAX_PY_DXF_BYTES) {
                     pyPathTried = true
                     // v1.9.80: 分段计时，定位「统计极慢」的真实耗时环节；同时打印 cleaned 条数与
                     // Python 计数异常（cntErr），查清 pyWords 恒为 0 的根因（此前从未打印出来）。
@@ -243,7 +248,7 @@ object DwgProcessor {
                             Diag.d("DWG analyze 主路径结果 $dName: items=${items.size} cleaned=${cleanedItems.size} oleMarks=$oleMarks finalNeedsPdf=$finalNeedsPdf pyWords=$pyWords kWords=$kWords finalWords=$finalWords")
                             // v1.9.80: 分段耗时 + Python 计数异常。此前 count_err 只进 diagnostics 从不打印，
                             // 导致 pyWords 恒为 0 却查不到原因；现单独打一行，下次日志即可定位。
-                            Diag.d("DWG 分段耗时 $dName: $timingsSb| cntErr=${cntErr?.take(150)}")
+                            Diag.d("DWG 分段耗时 $dName: dxfMB=${File(pyDxfPath).length() / 1048576} $timingsSb| cntErr=${cntErr?.takeLast(150)}")
                             val diag = "PY:${diagnostics}items=${items.size}"
                             Diag.d( "DWG Python主路径 $dName: words=$finalWords(py=$pyWords,k=$kWords) fe=$finalFe nc=$finalNc chars=$finalChars pages=$pyPages($pyReason) items=${items.size}")
                             return DwgProcessResult(finalWords, finalFe, finalNc, finalChars, pyPages, pyReason, finalNeedsPdf, diag, null, allItems.joinToString("\n"))
@@ -252,6 +257,9 @@ object DwgProcessor {
                         diagnostics.append("py_ex=${e.javaClass.simpleName}:${e.message?.take(120)}; ")
                         Diag.e( "DWG Python主路径失败 $dName: ${e.javaClass.simpleName}: ${e.message}", e)
                     }
+                } else if (dxfLen > MAX_PY_DXF_BYTES) {
+                    diagnostics.append("dxf_too_big(${dxfLen / 1048576}MB,skip_py); ")
+                    Diag.w("DWG DXF 过大跳过Python解析 $dName: ${dxfLen / 1048576}MB，走 Kotlin 兜底")
                 } else {
                     if (dxfPathIn == null) diagnostics.append("dxf_path_null; ")
                     else diagnostics.append("dxf_incomplete_or_empty; ")

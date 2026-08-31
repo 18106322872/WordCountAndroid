@@ -30,6 +30,10 @@ object Diag {
     private val writers = mutableMapOf<String, BufferedWriter?>()
     private val lock = Any()
     private const val MAX_FILE = 2_000_000L
+    // v1.9.81: 并发导出守卫。多次点击「导出诊断」时若两个导出协程同时运行，
+    // 后启动的会截断 out 文件、先启动的持旧偏移继续写 → 文件变成带数百 MB 空字节洞的稀疏文件
+    // （实测导出文件 306MB，其中 99% 是 \x00）。用 CAS 标志保证同一时刻只有一个导出。
+    private val exporting = java.util.concurrent.atomic.AtomicBoolean(false)
 
     fun init(context: Context) {
         try {
@@ -94,13 +98,29 @@ object Diag {
     suspend fun exportAndShare(context: Context) {
         val c = context.applicationContext
         init(c)
+        // v1.9.81: 已有导出在进行中则直接忽略本次点击
+        if (!exporting.compareAndSet(false, true)) {
+            Log.w("WordCount", "诊断日志导出进行中，忽略重复请求")
+            return
+        }
+        try {
+            doExport(context, c)
+        } finally {
+            exporting.set(false)
+        }
+    }
+
+    private suspend fun doExport(context: Context, c: Context) {
         val out = File(c.cacheDir, "wc_diag_export.log")
         val ver = try {
             c.packageManager.getPackageInfo(c.packageName, 0).versionName ?: "?"
         } catch (_: Throwable) { "?" }
         val files = withContext(Dispatchers.IO) {
+            // v1.9.81: 排除导出文件自身。此前 wc_diag_export.log 匹配 wc_diag_* 过滤器被列入
+            // 合并清单，多次导出时把上一次的导出内容嵌进本次（滚雪球），并发时更是产生
+            // 巨型空字节洞（实测 306MB / 99% 是 \x00）。
             (c.cacheDir.listFiles { _, name ->
-                name.startsWith("wc_diag_") && name.endsWith(".log")
+                name.startsWith("wc_diag_") && name.endsWith(".log") && name != "wc_diag_export.log"
             } ?: emptyArray()).sortedBy { it.name }
         }
         try {
