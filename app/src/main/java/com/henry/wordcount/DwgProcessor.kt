@@ -16,10 +16,11 @@ import java.io.File
  * v1.5.81: 从 MainActivity 提取为共享对象，供 ArchiveEngine 复用。
  */
 object DwgProcessor {
-    // v1.9.81: 超大 DXF 守卫。FA-31003/FA-31018 类 DWG 转 DXF 后可达 200MB+，
-    // Python ezdxf 解析单文件实测 17 分钟且 OOM 崩溃（:countservice 被杀→整批重来）。
-    // 超过该值直接跳过 Python 主路径，走 Kotlin 组码兜底（含 OLE/IMAGE，快一个量级以上）。
-    private const val MAX_PY_DXF_BYTES = 64L * 1024 * 1024
+    // v1.9.83: 关闭 64MB 硬上限。v1.9.81 引入的该守卫把 68~81MB 的 DXF 直接跳过 Python 解析，
+    // 导致这些文件丢失 OLE/IMAGE 文字、字数远低于桌面；而 35~64MB 的文件仍要 10~16 分钟解析，
+    // 说明大小不是慢的真因。恢复之前「全部走 Python 主路径」的行为，先保证字数准确；
+    // 若后续仍有超大 DXF（如 FA-31018 的 222MB）OOM，再按真实 dxfMB 数据加动态守卫。
+    private const val MAX_PY_DXF_BYTES = Long.MAX_VALUE
     data class DwgProcessResult(
         val words: Int,
         val fe: Int,

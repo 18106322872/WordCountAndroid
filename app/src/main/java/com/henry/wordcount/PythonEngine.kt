@@ -183,12 +183,21 @@ object PythonEngine {
         }
     }
 
-    /** v1.9.11: 用桌面同源 count_items 对 items 计数，返回 JSON {"fe","nc","chars","words"} */
+    /**
+     * v1.9.11: 用桌面同源 count_items 对 items 计数，返回 JSON {"fe","nc","chars","words"}
+     * v1.9.83 FIX: Chaquopy 把 Kotlin List<String> 转成不可迭代的 java.util.ArrayList 代理，
+     * 导致 Python 端 `for it in items:` 抛 TypeError: 'ArrayList' object is not iterable，
+     * pyWords 恒为 0。改为显式构建 Python list 再传入。
+     */
     fun countCadItems(context: Context, items: List<String>): String {
         return withRetry(context) {
             val py = Python.getInstance()
             val mod = py.getModule("cad_core")
-            mod.callAttr("count_items_json", items).toString()
+            val pyList = py.builtins.callAttr("list")
+            for (item in items) {
+                pyList.callAttr("append", item)
+            }
+            mod.callAttr("count_items_json", pyList).toString()
         }
     }
 
