@@ -3,6 +3,8 @@ import android.content.Context
 import android.util.Log
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
 /**
  * DWG 文件完整统计处理器。
  *
@@ -21,6 +23,12 @@ object DwgProcessor {
     // 说明大小不是慢的真因。恢复之前「全部走 Python 主路径」的行为，先保证字数准确；
     // 若后续仍有超大 DXF（如 FA-31018 的 222MB）OOM，再按真实 dxfMB 数据加动态守卫。
     private const val MAX_PY_DXF_BYTES = Long.MAX_VALUE
+
+    // v1.9.84: Python ezdxf 解析单文件耗时随 DXF 大小非线性暴涨（35~44MB≈200~250s，
+    // 49~59MB≈720~940s，68~81MB 逾 1000s），且不响应协程取消（原生阻塞调用 withTimeoutOrNull 无效）。
+    // 用「独立线程跑 Python + CompletableFuture.get(timeout)」实现真超时：预算内走最准的 ezdxf 主路径，
+    // 超时（极少数巨型文件）自动放弃并落入下方 Kotlin 流式扫描兜底，杜绝单文件卡 16 分钟拖垮整批。
+    private const val PY_PARSE_BUDGET_MS = 240_000L
     data class DwgProcessResult(
         val words: Int,
         val fe: Int,
@@ -128,7 +136,33 @@ object DwgProcessor {
                     try {
                         // v1.9.39: 传 outDir 让 cad_core 把内嵌 IMAGE 导出为 PNG；后续 DwgImageOcrExtractor 跑 ML Kit OCR
                             val imgOutDir = "${context.cacheDir}/dwg_imgs/${file.nameWithoutExtension}_${System.currentTimeMillis()}"
-                            val pyJson = PythonEngine.extractCadDxf(context, pyDxfPath, file.absolutePath, imgOutDir)
+                            // v1.9.84: 独立线程跑 Python 解析 + 真实超时。CompletableFuture.get(timeout) 在超时后
+                            // 立即返回（后台线程继续跑完 Python 不影响后续），我们据此转 Kotlin 兜底。
+                            val fut = CompletableFuture<String>()
+                            val pyThread = Thread {
+                                try {
+                                    fut.complete(PythonEngine.extractCadDxf(context, pyDxfPath, file.absolutePath, imgOutDir))
+                                } catch (e: Throwable) {
+                                    fut.completeExceptionally(e)
+                                }
+                            }
+                            pyThread.start()
+                            val pyJsonOrNull = try {
+                                fut.get(PY_PARSE_BUDGET_MS, TimeUnit.MILLISECONDS)
+                            } catch (e: java.util.concurrent.TimeoutException) {
+                                diagnostics.append("py_timeout(${PY_PARSE_BUDGET_MS / 1000}s); ")
+                                Diag.w("DWG Python 解析超时 ${PY_PARSE_BUDGET_MS / 1000}s，$dName 转 Kotlin 兜底（后台线程继续跑完 Python）")
+                                null
+                            } catch (e: java.util.concurrent.ExecutionException) {
+                                diagnostics.append("py_ex=${e.javaClass.simpleName}:${e.message}; ")
+                                Diag.e("DWG Python 解析异常 $dName: ${e.message}")
+                                null
+                            }
+                            if (pyJsonOrNull == null) {
+                                // 落入 Kotlin 兜底分支：抛异常让外层 catch 接管（进入 extractDxfTextsSimple + OLE/IMAGE）
+                                throw RuntimeException("py_parse_timeout")
+                            }
+                            val pyJson = pyJsonOrNull
                         mark("dxfParse")
                         val obj = JSONObject(pyJson)
                         val pyError = if (obj.has("error") && !obj.isNull("error")) obj.optString("error") else null
