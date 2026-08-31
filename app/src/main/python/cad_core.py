@@ -52,7 +52,7 @@ def count_items(items):
             total_fe += fe
             total_nc += nc
             total_ch += ch
-        else:  # ("table", rows)
+        elif isinstance(it, (list, tuple)):  # ("table", rows)
             rows = it[1] if len(it) > 1 else []
             for row in rows:
                 for cell in row:
@@ -60,6 +60,15 @@ def count_items(items):
                     total_fe += fe
                     total_nc += nc
                     total_ch += ch
+        else:
+            # v1.9.82: Chaquopy 从 Kotlin 传进来的 List<String>，元素在部分机型/版本上并非 Python str
+            # （而是 java.lang.String 代理），此前会掉进 ("table", rows) 分支执行 it[1] 抛
+            # TypeError -> count_items_json 走 exception 分支返回全 0，手机端表现为 pyWords 恒为 0、
+            # 只能靠 Kotlin countTextKotlin 兜底。此处对任何非 str / 非序列元素统一 str() 后按普通文本计数。
+            fe, nc, ch = count_unit(str(it))
+            total_fe += fe
+            total_nc += nc
+            total_ch += ch
     return {"fe": total_fe, "nc": total_nc, "chars": total_ch,
             "words": total_fe + total_nc}
 

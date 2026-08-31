@@ -353,10 +353,23 @@ object DwgProcessor {
     /** v1.9.3: DXF 简易 gc=1/3 兜底抽取（流式 BufferedReader，避免大 DXF OOM）。
      *  当 DwgDxfParser 复杂结构化解析在某些真机上漏抽文字时，直接按 DXF 组码 1/3
      *  顺序对原始字节做 GB18030/UTF-8 双解码抽取。流式处理 200MB 以下文件不爆内存。 */
+    // v1.9.81: 组码集合提到对象级常量。此前每读一行 DXF 就 new 两个 HashSet，
+    // 一个 200MB/千万行的 DXF 会在热循环里产生数千万次临时分配，是兜底路径的主要耗时。
+    // 必须显式声明 Set<String?>：curType 是可空 String?，若推断为 Set<String> 则 contains 传 null 编译不过。
+    private val DXF_TEXT_TYPES: Set<String?> = setOf("TEXT", "MTEXT", "ATTDEF", "ATTRIB", "MULTILEADER")
+    private val DXF_TEXT_CODES: Set<String?> = setOf("1", "3", "7", "9", "304", "302")
+    // v1.9.81: 去重集合与输出缓冲的内存上限（巨型 DXF 防 OOM）。达到上限后停止去重、直接追加，
+    // 宁可少量重复也不让 HashSet 吃光堆内存。
+    private const val MAX_SEEN_LINES = 150_000
+    private const val MAX_OUT_CHARS = 3_000_000
+
     private fun extractDxfTextsSimple(path: String): String {
         return try {
             val f = java.io.File(path)
-            if (!f.exists() || f.length() <= 0 || f.length() > 200L * 1024 * 1024) return ""
+            // v1.9.81: 上限 200MB → 512MB。读取是流式 BufferedReader，内存占用只与去重集合/输出上限有关；
+            // 此前 200MB 硬上限会让 FA-31018/FA-31003 这类超大 DXF 直接返回空串 → 主路径被 64MB 守卫跳过后
+            // 兜底也拿不到文字 → 字数从 1302 掉成 0。
+            if (!f.exists() || f.length() <= 0 || f.length() > 512L * 1024 * 1024) return ""
             val out = StringBuilder()
             val seen = HashSet<String>()  // v1.9.6: 行级去重，防止块炸开编号膨胀
             var curType: String? = null
@@ -366,14 +379,22 @@ object DwgProcessor {
                     val value = br.readLine() ?: break
                     val gc = code.trim()
                     if (gc == "0") { curType = value.trim(); code = br.readLine(); continue }
-                    if ((gc in setOf("1", "3", "7", "9", "304", "302")) && curType in setOf("TEXT", "MTEXT", "ATTDEF", "ATTRIB", "MULTILEADER")) {
+                    if (gc in DXF_TEXT_CODES && curType in DXF_TEXT_TYPES) {
                         val s = value.trim()
-                        if (s.isNotEmpty()) {
+                        if (s.isNotEmpty() && out.length < MAX_OUT_CHARS) {
                             val b = s.toByteArray(Charsets.ISO_8859_1)
-                            val u8 = try { String(b, 0, b.size, Charsets.UTF_8) } catch (_: Throwable) { s }
-                            val gb = try { String(b, 0, b.size, charset("GB18030")) } catch (_: Throwable) { s }
-                            val decoded = if (countOfFarEast(gb) >= countOfFarEast(u8)) gb else u8
-                            if (seen.add(decoded)) {
+                            // v1.9.81: 纯 ASCII 直接取用，跳过 GB18030/UTF-8 双解码。
+                            // 图纸文字绝大多数是 ASCII，省掉每行两次 String 构造（千万行级省数秒~数十秒）。
+                            var hasHigh = false
+                            for (i in b.indices) { if (b[i] < 0) { hasHigh = true; break } }
+                            val decoded = if (!hasHigh) s else {
+                                val u8 = try { String(b, 0, b.size, Charsets.UTF_8) } catch (_: Throwable) { s }
+                                val gb = try { String(b, 0, b.size, charset("GB18030")) } catch (_: Throwable) { s }
+                                if (countOfFarEast(gb) >= countOfFarEast(u8)) gb else u8
+                            }
+                            if (seen.size < MAX_SEEN_LINES) {
+                                if (seen.add(decoded)) out.append(decoded).append("\n")
+                            } else {
                                 out.append(decoded).append("\n")
                             }
                         }
