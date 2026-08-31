@@ -345,7 +345,11 @@ SCRIPTS_DIR = os.path.join(SKILL_DIR, "scripts")
 
 
 
-if SCRIPTS_DIR not in sys.path:
+# v1.9.76: Android Chaquopy 上 wordcount.py 的 __file__ 位于 files/chaquopy/AssetFinder/app/ 下，
+# SKILL_DIR 会变成 AssetFinder/，SCRIPTS_DIR 变成 AssetFinder/scripts。该路径不是 Chaquopy 合法 asset，
+# 插入 sys.path 会触发 AssetFinder hook 抛 FileNotFoundError，导致 import wordcount 失败。
+# 桌面端 __file__ 在普通目录，SCRIPTS_DIR 为普通路径，不受影响。
+if SCRIPTS_DIR not in sys.path and "chaquopy/AssetFinder" not in SCRIPTS_DIR:
 
 
 
