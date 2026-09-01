@@ -173,7 +173,9 @@ class MainActivity : ComponentActivity() {
                 val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
                     ?: return false
                 @Suppress("DEPRECATION")
-                val running = am.runningServices(Int.MAX_VALUE) ?: return false
+                // 注意：getRunningServices(Int) 带参数，Kotlin 不会生成属性访问语法，
+                // 必须显式写 getRunningServices(...)，写 runningServices(...) 会 Unresolved reference。
+                val running = am.getRunningServices(Int.MAX_VALUE) ?: return false
                 running.any { it.service.className == "com.henry.wordcount2.CountingService" }
             } catch (e: Throwable) {
                 // 查询失败时保守判定为「正在统计」，宁可不清理也不误删正在用的临时文件
