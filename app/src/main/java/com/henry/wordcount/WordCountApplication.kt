@@ -9,6 +9,7 @@ import com.chaquo.python.android.AndroidPlatform
 import java.io.File
 import java.io.RandomAccessFile
 import java.nio.channels.FileLock
+import kotlinx.coroutines.launch
 
 /**
  * v1.3.80: 按 Chaquopy 官方推荐，Python 解释器在 Application.onCreate()（主线程）
@@ -178,6 +179,59 @@ class WordCountApplication : Application() {
         Log.d("WordCountApp", "Python 模块预热完成（wordcount + cad_core）")
     }
 
+    /**
+     * v1.9.89: 对齐桌面版 wordcount.py 的 _cleanup_wordcount_tempdirs —— 启动时清理
+     * cacheDir 下超过 24 小时未使用的 WordCount 临时产物：
+     *   - 解包临时目录 arc_* / rar_*（ArchiveEngine 异常中断/崩溃后残留）
+     *   - DWG IMAGE OCR 输出目录 dwg_imgs/*（v1.9.86 确定性目录，整批结束后残留）
+     *   - 其他 wc_ 前缀临时目录
+     * 只删「最后修改时间 > 24h」的目录，绝不误删当前会话正在使用的目录
+     * （桌面同款 max_age_hours=24 保护）。返回 (removed, freedBytes)。
+     */
+    private fun cleanupTempFiles(): Pair<Int, Long> {
+        val cache = cacheDir ?: return 0 to 0L
+        val ageLimit = System.currentTimeMillis() - 24L * 60 * 60 * 1000
+        val prefixes = listOf("arc_", "rar_", "wc_")
+        val entries = try { cache.listFiles() } catch (_: Throwable) { null } ?: return 0 to 0L
+        var removed = 0
+        var freed = 0L
+        for (d in entries) {
+            if (!d.isDirectory) continue
+            val isCandidate = prefixes.any { d.name.startsWith(it) } ||
+                    (d.name == "dwg_imgs")
+            if (!isCandidate) continue
+            // dwg_imgs 是二级目录（dwg_imgs/<文件名>/），逐个子目录判定年龄
+            val targets = if (d.name == "dwg_imgs") {
+                d.listFiles()?.toList() ?: emptyList()
+            } else {
+                listOf(d)
+            }
+            for (t in targets) {
+                try {
+                    if (t.lastModified() > ageLimit) continue
+                    val size = tempDirSize(t)
+                    if (t.deleteRecursively()) {
+                        removed++
+                        freed += size
+                    }
+                } catch (_: Throwable) {}
+            }
+        }
+        if (removed > 0) {
+            Diag.d("临时文件清理: 删除 $removed 个过期临时目录, 释放 ${freed / 1024}KB")
+        }
+        return removed to freed
+    }
+
+    /** 递归统计目录占用字节数。 */
+    private fun tempDirSize(dir: File): Long {
+        var s = 0L
+        try {
+            dir.walkTopDown().forEach { if (it.isFile) s += it.length() }
+        } catch (_: Throwable) {}
+        return s
+    }
+
     /** 获取当前进程名，仅用于日志。 */
     private fun resolveProcessName(): String {
         return try {
@@ -198,6 +252,11 @@ class WordCountApplication : Application() {
         if (isDwgIsolatedProcess()) {
             Log.d("WordCountApp", "跳过 Python 初始化（隔离进程）")
             return
+        }
+        // v1.9.89: 启动时后台清理过期临时文件（对齐桌面 _cleanup_wordcount_tempdirs，
+        // 24h 年龄保护，不阻塞启动；主进程执行即可，隔离进程已提前 return）
+        appScope.launch {
+            runCatching { cleanupTempFiles() }
         }
         // v1.9.71: 缓存清理已移入 startPythonLocked() 的文件锁内，
         // 避免 main / :countservice 互相清空已提取资源。

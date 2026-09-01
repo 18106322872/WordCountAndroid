@@ -41,6 +41,21 @@ object PdfOcrEngine {
 
     private const val MAX_PAGES = 40
     private const val MAX_DIM = 4096         // v1.5.91: 4K 渲染上限
+    // v1.9.89: 页级并行 OCR（对齐桌面 v1.8.92 _pdf_image_ocr 页级并行）——
+    //   · 每页一个任务占用一个池 worker，渲染 + 预处理并行（每任务独立打开 PdfRenderer，
+    //     避免共享实例并发渲染；开销仅几 ms）；
+    //   · ML Kit 路径全并行（recognizer.process 线程安全）；PaddleOCR 路径
+    //     PaddleOcr.recognize 内部锁串行（Paddle-Lite predictor 非线程安全，多实例内存
+    //     翻倍有 OOM 风险；锁串行 + 渲染/预处理并行即接近桌面提速效果）；
+    //   · 并行度 2：Android 内存/发热约束，2 页渲染峰值可控（实测渲染+预处理常占
+    //     OCR 总耗时 30~50%，并行后整文件耗时显著下降）。
+    private const val PDF_OCR_PARALLEL = 2
+    /** v1.9.89: 页级并行任务池（daemon 线程，防进程残留，对齐桌面 _DaemonThreadPoolExecutor）。 */
+    private val pdfOcrPool: java.util.concurrent.ExecutorService by lazy {
+        java.util.concurrent.Executors.newFixedThreadPool(PDF_OCR_PARALLEL) { r ->
+            Thread(r, "pdf-ocr-pool").apply { isDaemon = true }
+        }
+    }
     // v1.7.1: 分块 1100px，在常见工程图页面上可达 3x2=6 块；每块放大到 2560px，
     // 给 detLongSize=1920 的检测模型提供超采样源图，避免 v1.7.0 因 1920 源图信息量
     // 不足导致小字漏检、字数反而下降的问题。
@@ -282,17 +297,47 @@ object PdfOcrEngine {
     // ══════════════════ 1) PaddleOCR 强引擎路径 ══════════════════
 
     /**
+     * v1.9.89: 单页渲染辅助——独立打开 PdfRenderer 渲染第 i 页为 Bitmap。
+     * 供页级并行任务调用（每任务独立打开，避免共享 PdfRenderer 并发渲染冲突）。
+     * 失败返回 null。
+     */
+    private fun renderPageSysBitmap(file: File, i: Int, forPrintMode: Boolean): Bitmap? {
+        return try {
+            val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+            val renderer = PdfRenderer(pfd)
+            try {
+                val page = renderer.openPage(i)
+                try {
+                    val w = page.width; val h = page.height
+                    if (w <= 0 || h <= 0) return null
+                    val baseScale = computeScale(w, h)
+                    val rawScale = if (forPrintMode) baseScale * 3f else baseScale * 2f
+                    val scale = min(rawScale, MAX_DIM.toFloat() / max(w, h).toFloat())
+                    val bw = max(1, (w * scale).toInt()); val bh = max(1, (h * scale).toInt())
+                    val bmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) ?: return null
+                    val renderMode = if (forPrintMode) PdfRenderer.Page.RENDER_MODE_FOR_PRINT else PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY
+                    page.render(bmp, null, null, renderMode)
+                    bmp
+                } finally { page.close() }
+            } finally { runCatching { renderer.close() }; runCatching { pfd.close() } }
+        } catch (_: Throwable) { null }
+    }
+
+    /**
      * v1.9.52: 对齐桌面版 RapidOCR 整页识别口径。
      * 进入此函数的 PDF 已被上层判定为图纸类/图片型/文字层污染，直接整页渲染 → PaddleOCR，
      * 不再先跑 ML Kit 再兜底 PaddleOCR。进度在每页识别完成后回调，杜绝"走到 N/N 还卡"。
+     *
+     * v1.9.89: Stage 1 改为页级并行（渲染+预处理并行，PaddleOcr.recognize 内部锁串行识别），
+     * 对齐桌面 v1.8.92 页级并行提速；Stage 2 Pdfium 兜底保留串行（仅全空时触发，极少发生）。
      */
     private fun renderAndRecognizeStrong(context: Context, file: File, forPrintMode: Boolean, onProgress: ((Int, Int) -> Unit)?): PdfOcrResult? {
         val diag = StringBuilder()
         val sb = StringBuilder()
         var anyText = false
-        var pageCount = 0
         var blankCount = 0
         var errorCount = 0
+        var pageCount = 0
 
         fun processBitmap(bmp: Bitmap, source: String, pageIdx: Int) {
             try {
@@ -321,45 +366,62 @@ object PdfOcrEngine {
             }
         }
 
-        // Stage 1: 系统 PdfRenderer（2x/3x 渲染）
-        var sysPfd: ParcelFileDescriptor? = null
-        var sysRenderer: PdfRenderer? = null
+        // Stage 1: 系统 PdfRenderer（2x/3x 渲染），v1.9.89 页级并行
         try {
-            sysPfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-            sysRenderer = PdfRenderer(sysPfd)
-            pageCount = sysRenderer.pageCount
+            val pfd0 = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+            val r0 = PdfRenderer(pfd0)
+            pageCount = r0.pageCount
+            runCatching { r0.close() }; runCatching { pfd0.close() }
             val limit = min(pageCount, MAX_PAGES)
             diag.append("Strong(Paddle): ${pageCount}页 print=$forPrintMode")
-            for (i in 0 until limit) {
-                try {
-                    val page = sysRenderer.openPage(i)
-                    try {
-                        val w = page.width; val h = page.height
-                        if (w <= 0 || h <= 0) continue
-                        val baseScale = computeScale(w, h)
-                        val rawScale = if (forPrintMode) baseScale * 3f else baseScale * 2f
-                        val scale = min(rawScale, MAX_DIM.toFloat() / max(w, h).toFloat())
-                        val bw = max(1, (w * scale).toInt()); val bh = max(1, (h * scale).toInt())
-                        val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { errorCount++; diag.append(" [p${i+1}:创建位图失败]"); continue }
+            if (limit > 0) {
+                val futures = (0 until limit).map { i ->
+                    pdfOcrPool.submit(java.util.concurrent.Callable {
                         try {
-                            val renderMode = if (forPrintMode) PdfRenderer.Page.RENDER_MODE_FOR_PRINT else PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY
-                            page.render(bmp, null, null, renderMode)
-                            processBitmap(bmp, "Sys", i)
-                        } finally { bmp.recycle() }
-                    } finally { page.close() }
-                } catch (_: Throwable) { errorCount++ }
-                onProgress?.invoke(i + 1, pageCount)
+                            val bmp = renderPageSysBitmap(file, i, forPrintMode)
+                            if (bmp == null) null
+                            else try {
+                                if (isBlankBitmap(bmp)) Triple(i, "", true)
+                                else {
+                                    val dark = darkPixelRatio(bmp)
+                                    val needsInvert = dark > 95.0
+                                    val baseBmp = if (needsInvert) (invertBitmap(bmp) ?: bmp) else bmp
+                                    val enhanced = enhanceBitmap(baseBmp) ?: baseBmp
+                                    val raw = try {
+                                        recognizeTiledGeneric(enhanced, upscalePx = 1280) { PaddleOcr.recognize(it) ?: "" }
+                                    } catch (_: Throwable) { "" }
+                                    val text = filterStrongCjkNoise(raw)
+                                    if (enhanced !== baseBmp && enhanced !== bmp) enhanced.recycle()
+                                    if (baseBmp !== bmp) baseBmp.recycle()
+                                    Triple(i, text, false)
+                                }
+                            } finally { bmp.recycle() }
+                        } catch (_: Throwable) { null }
+                    })
+                }
+                for ((idx, f) in futures.withIndex()) {
+                    val r = try { f.get(600, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Throwable) { null }
+                    onProgress?.invoke(idx + 1, pageCount)
+                    if (r == null) { errorCount++; diag.append(" [p${idx+1}:Err]"); continue }
+                    val (_, text, blank) = r
+                    if (blank) { blankCount++; diag.append(" [p${idx+1}:空白]"); continue }
+                    if (text.isNotBlank()) {
+                        sb.append(text).append('\n')
+                        anyText = true
+                        lastStrongChars += text.length
+                        diag.append(" p${idx + 1}:Sys=${text.length}")
+                    } else {
+                        diag.append(" p${idx + 1}:Sys空")
+                    }
+                }
             }
         } catch (e: Throwable) {
             diag.append(" [sysErr:${e.javaClass.simpleName}]")
             lastFailReason = FailReason.RENDER_FAILED
             lastFailDetail = e.javaClass.simpleName + ": " + e.message
-        } finally {
-            runCatching { sysRenderer?.close() }
-            runCatching { sysPfd?.close() }
         }
 
-        // Stage 2: PdfiumCore 兜底（系统渲染失败或全空时）
+        // Stage 2: PdfiumCore 兜底（系统渲染失败或全空时，串行——极少触发）
         if (!anyText && pageCount > 0) {
             try {
                 val core = PdfiumCore(context)
@@ -401,10 +463,13 @@ object PdfOcrEngine {
     /**
      * v1.9.52: PaddleOCR 模型缺失/初始化失败时的纯 ML Kit 兜底。
      * 同样保证进度在每页 OCR 完成后回调，不再卡 N/N。
+     *
+     * v1.9.89: 页级并行——ML Kit recognizer.process 线程安全，渲染+识别全并行
+     * （每任务独立打开 PdfRenderer），对齐桌面 v1.8.92 页级并行提速。
      */
     private fun renderWithSystemMlKit(context: Context, file: File, forPrintMode: Boolean, onProgress: ((Int, Int) -> Unit)?): PdfOcrResult? {
         val diag = StringBuilder()
-        val pfd = try {
+        val pfd0 = try {
             ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
         } catch (e: Throwable) {
             lastFailReason = FailReason.RENDER_FAILED
@@ -412,77 +477,78 @@ object PdfOcrEngine {
             lastDiag = "SysRenderer(MLKit): $lastFailDetail"
             return null
         }
-        val renderer = try { PdfRenderer(pfd) } catch (e: Throwable) {
-            runCatching { pfd.close() }
+        val renderer0 = try { PdfRenderer(pfd0) } catch (e: Throwable) {
+            runCatching { pfd0.close() }
             lastFailReason = FailReason.RENDER_FAILED
             lastFailDetail = "PdfRenderer创建失败: ${e.javaClass.simpleName}"
             lastDiag = "SysRenderer(MLKit): $lastFailDetail"
             return null
         }
-        var result: PdfOcrResult? = null
-        try {
-            val pageCount = renderer.pageCount
-            val limit = min(pageCount, MAX_PAGES)
-            val sb = StringBuilder()
-            var anyRenderedContent = false; var pageErrors = 0
-            var blankCount = 0; var ocrEmptyCount = 0
+        val pageCount = renderer0.pageCount
+        runCatching { renderer0.close() }; runCatching { pfd0.close() }
+        val limit = min(pageCount, MAX_PAGES)
+        val sb = StringBuilder()
+        var anyRenderedContent = false; var pageErrors = 0
+        var blankCount = 0; var ocrEmptyCount = 0
 
-            diag.append("SysRenderer(MLKit): ${pageCount}页(forPrint=$forPrintMode)")
+        diag.append("SysRenderer(MLKit): ${pageCount}页(forPrint=$forPrintMode)")
 
-            for (i in 0 until limit) {
-                try {
-                    val page = renderer.openPage(i)
+        // v1.9.89: 页级并行提交（渲染 + 反色 + 分块 OCR 全在 worker 线程；
+        // ML Kit recognizer.process 线程安全，可并发。结果按页序收集保证文字顺序稳定）
+        if (limit > 0) {
+            val futures = (0 until limit).map { i ->
+                pdfOcrPool.submit(java.util.concurrent.Callable {
                     try {
-                        val w = page.width; val h = page.height
-                        if (w <= 0 || h <= 0) continue
-                        val baseScale = computeScale(w, h)
-                        val rawScale = if (forPrintMode) baseScale * 3f else baseScale * 2f
-                        val scale = min(rawScale, MAX_DIM.toFloat() / max(w, h).toFloat())
-                        val bw = max(1, (w * scale).toInt()); val bh = max(1, (h * scale).toInt())
-                        val bmp = try { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { pageErrors++; diag.append(" [p${i+1}:创建位图失败]"); continue }
-                        try {
-                            val renderMode = if (forPrintMode) PdfRenderer.Page.RENDER_MODE_FOR_PRINT else PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY
-                            page.render(bmp, null, null, renderMode)
-                            if (isBlankBitmap(bmp)) { blankCount++; continue }
-                            anyRenderedContent = true
-
-                            val darkRatio = darkPixelRatio(bmp)
-                            val needsInvert = darkRatio > 95.0
-                            var ocrBmp: Bitmap = bmp
-                            var inverted: Bitmap? = null
-                            if (needsInvert) {
-                                inverted = invertBitmap(bmp)
-                                if (inverted != null) ocrBmp = inverted
+                        val bmp = renderPageSysBitmap(file, i, forPrintMode)
+                        if (bmp == null) null
+                        else try {
+                            if (isBlankBitmap(bmp)) Triple(i, "", true)
+                            else {
+                                val darkRatio = darkPixelRatio(bmp)
+                                val needsInvert = darkRatio > 95.0
+                                var ocrBmp: Bitmap = bmp
+                                var inverted: Bitmap? = null
+                                if (needsInvert) {
+                                    inverted = invertBitmap(bmp)
+                                    if (inverted != null) ocrBmp = inverted
+                                }
+                                val t = try { recognizeTiled(ocrBmp) } catch (_: Throwable) { "" }
+                                inverted?.recycle()
+                                Triple(i, t, false)
                             }
-
-                            val ocrResult = try { recognizeTiled(ocrBmp) } catch (_: Throwable) { "" }
-                            if (ocrResult.isNotBlank()) {
-                                sb.append(ocrResult).append('\n')
-                                diag.append(" p${i+1}:${ocrResult.length}字")
-                            } else {
-                                ocrEmptyCount++
-                                diag.append(" [p${i+1}:OCR空结果 ${bw}x${bh}]")
-                            }
-                            inverted?.recycle()
-                        } catch (_: Throwable) { pageErrors++ } finally { bmp.recycle() }
-                    } finally { page.close() }
-                } catch (_: Throwable) { pageErrors++ }
-                onProgress?.invoke(i + 1, pageCount)
+                        } finally { bmp.recycle() }
+                    } catch (_: Throwable) { null }
+                })
             }
-
-            diag.append(" | 渲染:${if (anyRenderedContent) "有内容" else "全空白"} 空白:$blankCount OCR空:$ocrEmptyCount 错误:$pageErrors")
-
-            val text = sb.toString().trim()
-            if (text.isNotBlank()) result = PdfOcrResult(text, pageCount)
-            else if (anyRenderedContent) lastFailReason = FailReason.OCR_EMPTY
-            else if (pageErrors > 0) lastFailReason = FailReason.RENDER_PARTIAL
-            else lastFailReason = FailReason.RENDER_BLANK
-        } catch (e: Throwable) {
-            lastFailReason = FailReason.RENDER_FAILED
-            lastFailDetail = e.javaClass.simpleName + ": " + e.message
-        } finally {
-            runCatching { renderer.close() }; runCatching { pfd.close() }
+            for ((idx, f) in futures.withIndex()) {
+                val r = try { f.get(600, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Throwable) { null }
+                onProgress?.invoke(idx + 1, pageCount)
+                if (r == null) {
+                    pageErrors++
+                    diag.append(" [p${idx+1}:任务异常]")
+                    continue
+                }
+                val (_, text, blank) = r
+                if (blank) { blankCount++; continue }
+                anyRenderedContent = true
+                if (text.isNotBlank()) {
+                    sb.append(text).append('\n')
+                    diag.append(" p${idx + 1}:${text.length}字")
+                } else {
+                    ocrEmptyCount++
+                    diag.append(" [p${idx+1}:OCR空结果]")
+                }
+            }
         }
+
+        diag.append(" | 渲染:${if (anyRenderedContent) "有内容" else "全空白"} 空白:$blankCount OCR空:$ocrEmptyCount 错误:$pageErrors")
+
+        val text = sb.toString().trim()
+        var result: PdfOcrResult? = null
+        if (text.isNotBlank()) result = PdfOcrResult(text, pageCount)
+        else if (anyRenderedContent) lastFailReason = FailReason.OCR_EMPTY
+        else if (pageErrors > 0) lastFailReason = FailReason.RENDER_PARTIAL
+        else lastFailReason = FailReason.RENDER_BLANK
         lastDiag = diag.toString()
         return result
     }
