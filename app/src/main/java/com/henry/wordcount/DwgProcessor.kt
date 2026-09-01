@@ -135,7 +135,13 @@ object DwgProcessor {
                     }
                     try {
                         // v1.9.39: 传 outDir 让 cad_core 把内嵌 IMAGE 导出为 PNG；后续 DwgImageOcrExtractor 跑 ML Kit OCR
-                            val imgOutDir = "${context.cacheDir}/dwg_imgs/${file.nameWithoutExtension}_${System.currentTimeMillis()}"
+                        // v1.9.86: 每个 DWG 用独立且确定性的输出目录，避免超时/兜底时扫描到别的文件 PNG。
+                            val imgOutDir = "${context.cacheDir}/dwg_imgs/${file.nameWithoutExtension}"
+                            try {
+                                val imgOutDirFile = java.io.File(imgOutDir)
+                                if (imgOutDirFile.exists()) imgOutDirFile.deleteRecursively()
+                                imgOutDirFile.mkdirs()
+                            } catch (_: Throwable) {}
                             // v1.9.84: 独立线程跑 Python 解析 + 真实超时。CompletableFuture.get(timeout) 在超时后
                             // 立即返回（后台线程继续跑完 Python 不影响后续），我们据此转 Kotlin 兜底。
                             val fut = CompletableFuture<String>()
@@ -331,10 +337,12 @@ object DwgProcessor {
                     val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath, context = context)
                     if (oleRes2.text.isNotBlank()) { for (ln in oleRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) } }
                 } catch (_: Throwable) {}
-                // v1.9.39: 兜底分支也跑 IMAGE OCR（用 cacheDir 已有 PNG，可能不存在则跳过）
+                // v1.9.86: 兜底分支只扫当前 DWG 的确定性 IMAGE 目录，杜绝把别的文件/上一轮残留 PNG 重复 OCR。
                 try {
-                    val imgOutDir2 = java.io.File("${context.cacheDir}/dwg_imgs")
-                    val pngs2 = if (imgOutDir2.exists()) imgOutDir2.listFiles { f -> f.isFile && f.extension == "png" }?.map { it.absolutePath } ?: emptyList() else emptyList()
+                    val imgOutDir2 = java.io.File("${context.cacheDir}/dwg_imgs/${file.nameWithoutExtension}")
+                    val pngs2 = if (imgOutDir2.exists()) {
+                        imgOutDir2.walkTopDown().filter { it.isFile && it.extension == "png" }.map { it.absolutePath }.toList()
+                    } else emptyList()
                     if (pngs2.isNotEmpty()) {
                         val imgRes2 = DwgImageOcrExtractor.extract(context, pngs2)
                         if (imgRes2.text.isNotBlank()) {
@@ -345,8 +353,16 @@ object DwgProcessor {
                 if (fbLines.isNotEmpty()) {
                     val merged = fbLines.joinToString("\n")
                     val cleaned = PdfOcrEngine.stripNoiseFarEast(merged)
+                    // v1.9.86: 兜底分支也用 Python countCadItems 计数，与主路径口径一致（避免 Kotlin countTextKotlin 分词差异）。
+                    val cleanedItems = cleaned.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                    val co = try { JSONObject(PythonEngine.countCadItems(context, cleanedItems)) } catch (_: Throwable) { JSONObject() }
+                    val cntErr = if (co.has("error") && !co.isNull("error")) co.optString("error") else null
+                    if (!cntErr.isNullOrBlank()) diagnostics.append("count_err=${cntErr.take(80)}; ")
+                    val fbWords = co.optInt("words", 0)
+                    val fbFe = co.optInt("fe", 0)
+                    val fbNc = co.optInt("nc", 0)
+                    val fbChars = co.optInt("chars", 0)
                     val (_, feBefore, _, charsBefore) = countTextKotlin(merged)
-                    val (fbWords, fbFe, fbNc, fbChars) = countTextKotlin(cleaned)
                     diagnostics.append("strip=${feBefore}->${fbFe}/${charsBefore};")
                     if (fbWords > 0) {
                         val fbReason = "Kotlin组码兜底" + (if (diagnostics.isNotEmpty()) "·" + diagnostics.toString().take(60) else "")

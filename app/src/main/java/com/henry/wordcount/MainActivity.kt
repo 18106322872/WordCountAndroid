@@ -2579,12 +2579,13 @@ private fun addFiles(
                 runInline()
             } else {
                 // 正常路径：结果由 CountingService 写入 wc_results.jsonl。
-                // 主进程轮询该文件恢复结果；看门狗兜底：60 分钟内未见到 BATCH_END 则强制收尾。
+                // 主进程轮询该文件恢复结果；看门狗兜底：120 分钟内未见到 BATCH_END 则强制收尾。
                 recoverPollingJob = scope.launch {
                     var done = false
                     var elapsed = 0L
-                    // v1.9.41: 看门狗超时 30→60 分钟，避免超大/低密度 PDF 在强引擎 OCR 阶段被提前收尾而漏统计。
-                    while (isActive && !done && elapsed < 60 * 60 * 1000L) {
+                    // v1.9.86: 看门狗超时 60→120 分钟。v1.9.85 引入 240s Python 解析超时后，超大 DWG 批量统计
+                    //  worst-case 耗时可能超过 60 分钟（28 文件 × ~4 分钟），导致看门狗提前收尾、大量文件显示 0 字。
+                    while (isActive && !done && elapsed < 120 * 60 * 1000L) {
                         // v1.9.55: 轮询间隔 1500ms → 500ms，让主界面进度更贴近通知栏进度。
                         delay(500L)
                         elapsed += 500L
