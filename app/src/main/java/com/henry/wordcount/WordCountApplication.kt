@@ -180,18 +180,22 @@ class WordCountApplication : Application() {
     }
 
     /**
-     * v1.9.92: 由 private 改为 public，支持手动清理入口（右上角选项菜单）。
-     * v1.9.89: 对齐桌面版 wordcount.py 的 _cleanup_wordcount_tempdirs —— 启动时清理
-     * cacheDir 下超过 maxAgeHours 小时未使用的 WordCount 临时产物：
+     * v1.9.93: 对齐桌面版 v1.8.83 最终清理逻辑：
+     *   - 启动时自动清理仍用 24h 年龄保护；
+     *   - 手动清理入口可指定 maxAgeHours=0，清理所有匹配的 WordCount 残留（不限年龄）；
+     *   - 增加 protectRecentMinutes 保护，跳过最近 N 分钟仍有修改的目录，避免误删正在统计的目录。
+     * v1.9.89: 对齐桌面版 wordcount.py 的 _cleanup_wordcount_tempdirs —— 清理
+     * cacheDir 下 WordCount 临时产物：
      *   - 解包临时目录 arc_* / rar_*（ArchiveEngine 异常中断/崩溃后残留）
      *   - DWG IMAGE OCR 输出目录 dwg_imgs 下各子目录（v1.9.86 确定性目录，整批结束后残留）
      *   - 其他 wc_ 前缀临时目录
-     * 默认仍只删「最后修改时间 > 24h」的目录，绝不误删当前会话正在使用的目录
-     * （桌面同款 max_age_hours=24 保护）。返回 (removed, freedBytes)。
+     * 返回 (removed, freedBytes)。
      */
-    fun cleanupTempFiles(maxAgeHours: Int = 24): Pair<Int, Long> {
+    fun cleanupTempFiles(maxAgeHours: Int = 24, protectRecentMinutes: Int = 0): Pair<Int, Long> {
         val cache = cacheDir ?: return 0 to 0L
-        val ageLimit = System.currentTimeMillis() - maxAgeHours * 60L * 60 * 1000
+        val now = System.currentTimeMillis()
+        val ageLimit = if (maxAgeHours <= 0) Long.MAX_VALUE else now - maxAgeHours * 60L * 60 * 1000
+        val recentLimit = if (protectRecentMinutes <= 0) Long.MAX_VALUE else now - protectRecentMinutes * 60L * 1000
         val prefixes = listOf("arc_", "rar_", "wc_")
         val entries = try { cache.listFiles() } catch (_: Throwable) { null } ?: return 0 to 0L
         var removed = 0
@@ -201,7 +205,7 @@ class WordCountApplication : Application() {
             val isCandidate = prefixes.any { d.name.startsWith(it) } ||
                     (d.name == "dwg_imgs")
             if (!isCandidate) continue
-            // dwg_imgs 是二级目录（dwg_imgs/<文件名>/），逐个子目录判定年龄
+            // dwg_imgs 是二级目录（dwg_imgs/<文件名>/），逐个子目录判定
             val targets = if (d.name == "dwg_imgs") {
                 d.listFiles()?.toList() ?: emptyList()
             } else {
@@ -209,7 +213,11 @@ class WordCountApplication : Application() {
             }
             for (t in targets) {
                 try {
-                    if (t.lastModified() > ageLimit) continue
+                    val mtime = t.lastModified()
+                    // 太新：未达到 maxAgeHours 指定年龄
+                    if (mtime > ageLimit) continue
+                    // 最近仍有修改：按 protectRecentMinutes 保护，避免误删正在统计的目录
+                    if (mtime >= recentLimit) continue
                     val size = tempDirSize(t)
                     if (t.deleteRecursively()) {
                         removed++
@@ -219,7 +227,7 @@ class WordCountApplication : Application() {
             }
         }
         if (removed > 0) {
-            Diag.d("临时文件清理: 删除 $removed 个过期临时目录, 释放 ${freed / 1024}KB")
+            Diag.d("临时文件清理: 删除 $removed 个临时目录, 释放 ${freed / 1024}KB")
         }
         return removed to freed
     }

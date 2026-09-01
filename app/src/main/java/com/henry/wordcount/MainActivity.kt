@@ -690,12 +690,13 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
                             onClick = {
                                 expanded = false
                                 scope.launch(Dispatchers.IO) {
-                                    val (removed, freed) = app?.cleanupTempFiles() ?: (0 to 0L)
+                                    // 手动清理对齐桌面版 v1.8.83：不限年龄，但保护最近 60 分钟有修改的目录
+                                    val (removed, freed) = app?.cleanupTempFiles(maxAgeHours = 0, protectRecentMinutes = 60) ?: (0 to 0L)
                                     scope.launch(Dispatchers.Main) {
                                         val msg = if (removed > 0) {
-                                            "已清理 $removed 个过期临时目录，释放 ${freed / 1024 / 1024}MB"
+                                            "已清理 $removed 个临时目录，释放 ${freed / 1024 / 1024}MB"
                                         } else {
-                                            "没有超过 24 小时的临时文件"
+                                            "没有可清理的临时文件（或目录正在使用）"
                                         }
                                         Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
                                     }
