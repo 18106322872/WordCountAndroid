@@ -13,7 +13,6 @@ import com.equationl.paddleocr4android.callback.OcrRunCallback
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.concurrent.synchronized
 
 /**
  * 方案 C 的"最强引擎"实现：PaddleOCR（equationl/paddleocr4android，Paddle-Lite 后端，PP-OCRv4 模型）。
@@ -101,36 +100,40 @@ object PaddleOcr : StrongOcr {
      * v1.9.89: Paddle-Lite predictor 非线程安全，页级并行下多 worker 并发调用会崩溃/结果错乱。
      * 因此整段识别加锁串行；渲染/预处理在锁外并行（见 PdfOcrEngine 页级并行），
      * 多页总耗时 ≈ 单页识别 × 页数（识别是瓶颈），但渲染时间被摊薄，且避免多模型实例内存翻倍 OOM。
+     * 注：synchronized 调用与 ensureInit 同款（无需 import kotlin.concurrent.synchronized，
+     * 该项目已验证该 import 反而 Unresolved；inline lambda 内裸 return 为非局部返回，直接返回本函数）。
      */
-    override fun recognize(bitmap: Bitmap): String? = synchronized(lock) {
-        val engine = ocr ?: return@synchronized null
-        var text: String? = null
-        var err: Throwable? = null
-        var rawSize = -1
-        var rawText: String? = null
-        val latch = CountDownLatch(1)
-        engine.run(bitmap, object : OcrRunCallback {
-            override fun onSuccess(result: OcrResult) {
-                text = result.simpleText
-                rawSize = result.outputRawResult?.size ?: 0
-                rawText = result.outputRawResult?.mapNotNull { it.label }?.joinToString("\n")
-                latch.countDown()
-            }
-            override fun onFail(e: Throwable) {
-                err = e
-                latch.countDown()
-            }
-        })
-        latch.await(120, TimeUnit.SECONDS)
-        val result = if (err == null) {
-            // v1.5.102: 若 simpleText 为空但 raw result 有文本，用 raw result 兜底。
-            val simple = text?.trim() ?: ""
-            val raw = rawText?.trim() ?: ""
-            if (simple.isNotEmpty()) simple else if (raw.isNotEmpty()) raw else null
-        } else null
-        lastRunInfo = "bmp=${bitmap.width}x${bitmap.height} simple=${text?.length ?: -1} raw=$rawSize err=${err?.message ?: "none"} out=${result?.length ?: 0}"
-        Log.d("WordCount", "PaddleOcr.recognize: $lastRunInfo")
-        result
+    override fun recognize(bitmap: Bitmap): String? {
+        synchronized(lock) {
+            val engine = ocr ?: return null
+            var text: String? = null
+            var err: Throwable? = null
+            var rawSize = -1
+            var rawText: String? = null
+            val latch = CountDownLatch(1)
+            engine.run(bitmap, object : OcrRunCallback {
+                override fun onSuccess(result: OcrResult) {
+                    text = result.simpleText
+                    rawSize = result.outputRawResult?.size ?: 0
+                    rawText = result.outputRawResult?.mapNotNull { it.label }?.joinToString("\n")
+                    latch.countDown()
+                }
+                override fun onFail(e: Throwable) {
+                    err = e
+                    latch.countDown()
+                }
+            })
+            latch.await(120, TimeUnit.SECONDS)
+            val result = if (err == null) {
+                // v1.5.102: 若 simpleText 为空但 raw result 有文本，用 raw result 兜底。
+                val simple = text?.trim() ?: ""
+                val raw = rawText?.trim() ?: ""
+                if (simple.isNotEmpty()) simple else if (raw.isNotEmpty()) raw else null
+            } else null
+            lastRunInfo = "bmp=${bitmap.width}x${bitmap.height} simple=${text?.length ?: -1} raw=$rawSize err=${err?.message ?: "none"} out=${result?.length ?: 0}"
+            Log.d("WordCount", "PaddleOcr.recognize: $lastRunInfo")
+            return result
+        }
     }
 
     fun dispose() {
