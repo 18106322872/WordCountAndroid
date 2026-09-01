@@ -2579,13 +2579,14 @@ private fun addFiles(
                 runInline()
             } else {
                 // 正常路径：结果由 CountingService 写入 wc_results.jsonl。
-                // 主进程轮询该文件恢复结果；看门狗兜底：120 分钟内未见到 BATCH_END 则强制收尾。
+                // 主进程轮询该文件恢复结果；看门狗兜底：45 分钟内未见到 BATCH_END 则强制收尾。
                 recoverPollingJob = scope.launch {
                     var done = false
                     var elapsed = 0L
-                    // v1.9.86: 看门狗超时 60→120 分钟。v1.9.85 引入 240s Python 解析超时后，超大 DWG 批量统计
-                    //  worst-case 耗时可能超过 60 分钟（28 文件 × ~4 分钟），导致看门狗提前收尾、大量文件显示 0 字。
-                    while (isActive && !done && elapsed < 120 * 60 * 1000L) {
+                    // v1.9.88: 看门狗超时 120→45 分钟。DWG 批内已有 beginBatch 的 40 分钟硬预算
+                    // （动态分配 + Kotlin 流式快路径保证每个文件出数），45 分钟看门狗仅兜底
+                    // 「批次里的非 DWG 文件 + DWG 转换/收尾」余量，不再作为 DWG 慢的遮羞布。
+                    while (isActive && !done && elapsed < 45 * 60 * 1000L) {
                         // v1.9.55: 轮询间隔 1500ms → 500ms，让主界面进度更贴近通知栏进度。
                         delay(500L)
                         elapsed += 500L
@@ -2676,6 +2677,9 @@ internal suspend fun processDwgPipelined(
         }
         return
     }
+    // v1.9.88: 批量预算——40 分钟硬约束从「本批第一个 DWG 开始转换」起算（转换也占用预算），
+    // 覆盖整批所有 DWG；消费者每完成一个文件 endFile() 配平，perFileBudgetMs 据此动态收紧。
+    DwgProcessor.beginBatch(total)
     try {
         kotlinx.coroutines.coroutineScope {
             val channel = kotlinx.coroutines.channels.Channel<Pair<Int, DwgProcessor.DwgConvertOutcome?>>(capacity = 1)
@@ -2717,6 +2721,9 @@ internal suspend fun processDwgPipelined(
                         onResult(idx, cf.file, cf.displayName, res)
                     } catch (e: Throwable) {
                         onError(idx, cf.file, cf.displayName, e.message)
+                    } finally {
+                        // v1.9.88: 无论成功/失败都配平预算计数，保证后续文件预算计算准确
+                        DwgProcessor.endFile()
                     }
                     done++
                     try { onProgress(cf.displayName, done, total) } catch (_: Throwable) {}
@@ -2732,6 +2739,9 @@ internal suspend fun processDwgPipelined(
                 onResult(i, cf.file, cf.displayName, res)
             } catch (ex: Throwable) {
                 onError(i, cf.file, cf.displayName, ex.message)
+            } finally {
+                // v1.9.88: 串行回退也要配平预算计数
+                DwgProcessor.endFile()
             }
         }
     }

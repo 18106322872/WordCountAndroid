@@ -123,13 +123,11 @@ object OoXmlEngine {
             Log.d("WordCount", "docx fallback 精确去重后补充了 $addedCount 条新文本")
         }
 
-        // v1.3.95：补齐此前漏统计的 docx 内容（对齐桌面版 wordcount.py 口径，用户清单要求计入）：
-        //   - 页眉 / 页脚（header*.xml / footer*.xml）
-        //   - 脚注 / 尾注（footnotes.xml / endnotes.xml）
-        //   - 内嵌图表文字（word/charts/chartN.xml 的 <a:t>：图表标题/轴标题/系列名）
-        //   - SmartArt / 图示文字（word/diagrams/dataN.xml 的 <a:t>）
-        // 全部经空白归一化后的子串去重追加，避免与正文/彼此重复计数。
-        appendDocxExtraXml(zip, sb, normAcc)
+        // v1.9.88: 移除 v1.3.95 的 appendDocxExtraXml（页眉/页脚/脚注/尾注/图表/SmartArt 补充）。
+        // 对齐桌面版 wordcount.py「无 Word COM」口径：extract_docx 只统计 word/document.xml
+        // （正文+文本框+表格），Word「字数统计」对话框的「包括文本框、脚注和尾注」**不包括**
+        // 页眉页脚，且桌面版现算路径从不读 footnotes.xml/endnotes.xml/charts/diagrams——
+        // 补充这些文件导致 Android 字数高于电脑版与 Word 真值，属历史偏差，现予移除。
 
         val text = sb.toString()
         // ── 页数统计（v1.1.14 重写：智能排版感知）──
@@ -218,91 +216,10 @@ object OoXmlEngine {
     }
 
     /**
-     * v1.3.95：补齐 docx 此前漏统计的内容并去重追加到 sb。
-     * 覆盖项（用户清单 + 桌面版 wordcount.py 口径）：
-     *   - 页眉 / 页脚：word/headerN.xml、word/footerN.xml（<w:p>/<w:r>/<w:t> 同正文语法）
-     *   - 脚注 / 尾注：word/footnotes.xml、word/endnotes.xml
-     *   - 内嵌图表文字：word/charts/chartN.xml 的 <a:t>（图表标题/轴标题/系列名）
-     *   - SmartArt / 图示文字：word/diagrams/dataN.xml 的 <a:t>
-     * 这些文件中的文本可能与正文重复（页眉页脚被复用），故统一用 existingTokens 去重。
-     *
-     * @param existingTokens 已提取文本 token 集合（会被追加新 token，供后续继续去重）
+     * v1.9.88: 原 v1.3.95 的 appendDocxExtraXml / appendWpmlFragments（页眉/页脚/脚注/尾注/图表/
+     * SmartArt 补充）已整体移除——对齐桌面版 wordcount.py「无 Word COM」口径，仅统计 document.xml。
+     * 删除理由见 extractDocx 内注释。
      */
-    private fun appendDocxExtraXml(zip: ZipFile, sb: StringBuilder, normAcc: StringBuilder) {
-        // 1) 页眉 / 页脚 / 脚注 / 尾注：均为 OOXML wordprocessingML，用与正文相同的片段提取
-        val wpmlNames = mutableListOf<String>()
-        try {
-            val entries = Collections.list(zip.entries())
-            for (e in entries) {
-                val n = e.name
-                if (!n.startsWith("word/")) continue
-                if (n.startsWith("word/header") && n.endsWith(".xml")) wpmlNames.add(n)
-                else if (n.startsWith("word/footer") && n.endsWith(".xml")) wpmlNames.add(n)
-                else if (n == "word/footnotes.xml") wpmlNames.add(n)
-                else if (n == "word/endnotes.xml") wpmlNames.add(n)
-            }
-        } catch (_: Throwable) { }
-        var extra = 0
-        for (name in wpmlNames) {
-            val xml = readEntry(zip, name) ?: continue
-            extra += appendWpmlFragments(xml, sb, normAcc)
-        }
-        if (extra > 0) Log.d("WordCount", "docx 页眉/页脚/脚注/尾注 补充了 $extra 条文本")
-
-        // 2) 图表 / SmartArt：DrawingML，文字在 <a:t> 中
-        var aExtra = 0
-        try {
-            val entries = Collections.list(zip.entries())
-            for (e in entries) {
-                val n = e.name.lowercase()
-                val isChart = n.startsWith("word/charts/chart") && n.endsWith(".xml")
-                val isDiagram = n.startsWith("word/diagrams/data") && n.endsWith(".xml")
-                if (!isChart && !isDiagram) continue
-                val xml = readEntry(zip, e.name) ?: continue
-                // <a:t> 内容不含子标签（纯文本叶子），用 [^<]* 即可
-                """<a:t[^>]*>([^<]*)</a:t>""".toRegex().findAll(xml).forEach {
-                    val t = decodeXml(it.groupValues[1]).trim()
-                    val tNorm = t.replace(Regex("\\s+"), "")
-                    if (tNorm.isNotEmpty() && normAcc.indexOf(tNorm) < 0) {
-                        sb.append(t).append(' ')
-                        normAcc.append(tNorm)
-                        aExtra++
-                    }
-                }
-            }
-        } catch (_: Throwable) { }
-        if (aExtra > 0) Log.d("WordCount", "docx 图表/SmartArt 补充了 $aExtra 条文本")
-    }
-
-    /**
-     * v1.3.95：从 wordprocessingML（页眉/页脚/脚注/尾注）XML 中提取尚未出现的文本片段，
-     * 去重追加到 sb，返回新增条数。解析逻辑与 appendDocxXmlText 一致（<w:p>/<w:r>/<w:t>）。
-     */
-    private fun appendWpmlFragments(xml: String, sb: StringBuilder, normAcc: StringBuilder): Int {
-        var added = 0
-        val paraRe = """(?s)<w:p[ >].*?</w:p>""".toRegex()
-        val runRe = """(?s)<w:r[ >].*?</w:r>""".toRegex()
-        val tRe = """(?s)<w:t[^>]*>(.*?)</w:t>""".toRegex()
-        paraRe.findAll(xml).forEach { paraMatch ->
-            val paraXml = paraMatch.value
-            runRe.findAll(paraXml).forEach { runMatch ->
-                val runXml = runMatch.value
-                tRe.findAll(runXml).forEach { tMatch ->
-                    val raw = decodeXml(tMatch.groupValues[1])
-                    val clean = raw.replace("""<[^>]+>""", "")
-                        .replace("""&[a-z]+;""".toRegex(), "")
-                        .trim()
-                    if (clean.isNotEmpty() && clean.any { it.code >= 32 } && normAcc.indexOf(clean.replace(Regex("\\s+"), "")) < 0) {
-                        val norm = clean.replace(Regex("\\s+"), "")
-                        sb.append(clean).append(' ')
-                        normAcc.append(norm)
-                        added++
-                    }
-                }
-            }
-        }
-        return added
-    }
 
     /**
      * v1.1.14: 基于文档实际页面尺寸的智能页数估算。

@@ -29,6 +29,83 @@ object DwgProcessor {
     // 用「独立线程跑 Python + CompletableFuture.get(timeout)」实现真超时：预算内走最准的 ezdxf 主路径，
     // 超时（极少数巨型文件）自动放弃并落入下方 Kotlin 流式扫描兜底，杜绝单文件卡 16 分钟拖垮整批。
     private const val PY_PARSE_BUDGET_MS = 240_000L
+
+    // ===== v1.9.88: 批量总时长预算（硬约束：28 个 DWG ≤ 40 分钟）=====
+    // 用户明确要求：超过 40 分钟「时间太长了已经没有意义」。因此不再给单文件固定 240s，
+    // 而是在**整批 40 分钟预算内动态分配**：先到先得多，落后时自动压缩后续文件预算、降级可选阶段。
+    // 必保阶段：矢量文字（Python ezdxf 主路径 / Kotlin 组码兜底）+ OLE office 文本。
+    // 可选阶段（剩余预算不足时跳过）：OLE 位图 OCR、IMAGE 实体 OCR。
+    const val DWG_BATCH_BUDGET_MS = 40 * 60 * 1000L
+    @Volatile private var batchDeadlineMs = 0L
+    @Volatile private var batchPending = 0
+
+    /** 单文件地板预算：无论多紧张都至少留这么多给「Kotlin 抽取 + 转换」，保证不 0 字。 */
+    const val PER_FILE_FLOOR_MS = 20_000L
+
+    /** 低于此预算就不启动 Python 解析——启动也必然超时，纯属浪费。 */
+    const val PY_MIN_START_MS = 45_000L
+
+    @Volatile private var pyRunaway: Thread? = null
+
+    /**
+     * v1.9.88 关键修复：被放弃的 Python 线程仍持有 GIL 并继续跑完解析。
+     * 此时任何新的 Python 调用（extractOleOffice / countCadItems / 下一个文件的
+     * extractCadDxf）都会**阻塞等待它**，这正是 v1.9.85/1.9.86 里
+     * 「超时后反而更慢」的根因：每个大文件白等 240s，还把后续文件一并拖住。
+     * 这里显式跟踪失控线程，活着就整体让路给纯 Kotlin 路径。
+     */
+    fun notePyRunaway(t: Thread) { pyRunaway = t }
+
+    /** 失控 Python 线程是否仍在跑：是则禁用一切 Python 调用。 */
+    fun pyBusy(): Boolean {
+        val t = pyRunaway ?: return false
+        return try { t.isAlive } catch (_: Throwable) { false }
+    }
+
+    /** 批量开始前调用：设定整批预算与文件数。
+     *  v1.9.88: 已有预算在跑（嵌套压缩包 / 多压缩包连续处理）时只追加计数、不重置 deadline——
+     *  40 分钟硬预算从「本批第一个 DWG 开始转换」起算，覆盖整批所有 DWG。 */
+    fun beginBatch(totalFiles: Int, budgetMs: Long = DWG_BATCH_BUDGET_MS) {
+        if (batchDeadlineMs > 0L) {
+            batchPending += totalFiles
+            return
+        }
+        batchDeadlineMs = System.currentTimeMillis() + budgetMs
+        batchPending = totalFiles
+        pyRunaway = null
+    }
+
+    /** 每处理完一个文件调用一次，收缩待处理计数。 */
+    fun endFile() {
+        if (batchPending > 0) batchPending--
+    }
+
+    /** 当前文件可用预算 = 剩余总时间 / 剩余文件数，并夹在 [20s, 240s]。 */
+    fun perFileBudgetMs(): Long {
+        if (batchDeadlineMs <= 0L) return PY_PARSE_BUDGET_MS
+        val remain = batchDeadlineMs - System.currentTimeMillis()
+        val files = if (batchPending > 0) batchPending else 1
+        return (remain / files).coerceIn(PER_FILE_FLOOR_MS, PY_PARSE_BUDGET_MS)
+    }
+
+    /** 剩余总预算（毫秒），用于判断是否还跑得起可选阶段。 */
+    fun remainBatchMs(): Long {
+        if (batchDeadlineMs <= 0L) return Long.MAX_VALUE
+        return batchDeadlineMs - System.currentTimeMillis()
+    }
+
+    /**
+     * 可选阶段（OLE 位图 OCR / IMAGE OCR）还能花多少毫秒：
+     * 必须先给剩余每个文件留够地板预算，剩下的才是可自由支配的余量。
+     * 返回 0 表示该阶段应跳过。
+     */
+    fun optionalStageMs(): Long {
+        if (batchDeadlineMs <= 0L) return Long.MAX_VALUE
+        val files = if (batchPending > 0) batchPending else 1
+        val spare = remainBatchMs() - PER_FILE_FLOOR_MS * files
+        return if (spare > 0L) spare else 0L
+    }
+
     data class DwgProcessResult(
         val words: Int,
         val fe: Int,
@@ -133,7 +210,16 @@ object DwgProcessor {
                         timingsSb.append("$tag=${now - tMark}ms ")
                         tMark = now
                     }
-                    try {
+                    // v1.9.88: 只有「预算够 + Python 空闲」才启动 Python 解析。
+                    // 预算不够时启动必然超时，等于白烧几十秒；Python 被失控线程占着时
+                    // 启动则是排队空等（v1.9.85 每个大文件白等 240s 的真因）。
+                    val pyBudget = perFileBudgetMs()
+                    val pyRun = pyBudget >= PY_MIN_START_MS && !pyBusy()
+                    if (!pyRun) {
+                        diagnostics.append("py_skip(b=${pyBudget / 1000}s,busy=${pyBusy()}); ")
+                        Diag.w("DWG 跳过 Python 解析 $dName: 预算 ${pyBudget / 1000}s / Python忙=${pyBusy()}，直接走 Kotlin 块展开")
+                    }
+                    if (pyRun) try {
                         // v1.9.39: 传 outDir 让 cad_core 把内嵌 IMAGE 导出为 PNG；后续 DwgImageOcrExtractor 跑 ML Kit OCR
                         // v1.9.86: 每个 DWG 用独立且确定性的输出目录，避免超时/兜底时扫描到别的文件 PNG。
                             val imgOutDir = "${context.cacheDir}/dwg_imgs/${file.nameWithoutExtension}"
@@ -154,10 +240,14 @@ object DwgProcessor {
                             }
                             pyThread.start()
                             val pyJsonOrNull = try {
-                                fut.get(PY_PARSE_BUDGET_MS, TimeUnit.MILLISECONDS)
+                                fut.get(pyBudget, TimeUnit.MILLISECONDS)
                             } catch (e: java.util.concurrent.TimeoutException) {
-                                diagnostics.append("py_timeout(${PY_PARSE_BUDGET_MS / 1000}s); ")
-                                Diag.w("DWG Python 解析超时 ${PY_PARSE_BUDGET_MS / 1000}s，$dName 转 Kotlin 兜底（后台线程继续跑完 Python）")
+                                // v1.9.88: 记录失控线程——它仍持 GIL 跑完剩余解析，
+                                // 后续文件的 Python 调用若不等它就会排队空等。记下后
+                                // pyBusy() 返回 true，后续文件自动转纯 Kotlin 快渠道。
+                                notePyRunaway(pyThread)
+                                diagnostics.append("py_timeout(${pyBudget / 1000}s); ")
+                                Diag.w("DWG Python 解析超时 ${pyBudget / 1000}s，$dName 转 Kotlin 块展开（后台线程继续跑完 Python）")
                                 null
                             } catch (e: java.util.concurrent.ExecutionException) {
                                 diagnostics.append("py_ex=${e.javaClass.simpleName}:${e.message}; ")
@@ -199,66 +289,93 @@ object DwgProcessor {
                         val allItems = ArrayList(items)
                         val oleMarks = ArrayList<String>()
                         var oleOfficeOk = false
-                        try {
-                            val oleJson = PythonEngine.extractOleOffice(context, pyDxfPath)
-                            val oo = JSONObject(oleJson)
-                            val oleErr = if (oo.has("error") && !oo.isNull("error")) oo.optString("error") else null
-                            if (!oleErr.isNullOrBlank()) diagnostics.append("ole_err=${oleErr.take(80)}; ")
-                            val joined = oo.optString("joined", "")
-                            if (joined.isNotBlank()) {
-                                for (ln in joined.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
-                                oleMarks.add("OLE-office")
-                                oleOfficeOk = true
+                        // v1.9.88: Python 失控线程占着 GIL 时跳过 extractOleOffice——启动也是排队空等
+                        // （v1.9.85 每个大文件白等 240s 的真因）。OLE office 文本由 Kotlin 侧
+                        // DwgOleExtractor（EMF 矢量 / 预览位图 OCR 通道）尽力覆盖。
+                        if (!pyBusy()) {
+                            try {
+                                val oleJson = PythonEngine.extractOleOffice(context, pyDxfPath)
+                                val oo = JSONObject(oleJson)
+                                val oleErr = if (oo.has("error") && !oo.isNull("error")) oo.optString("error") else null
+                                if (!oleErr.isNullOrBlank()) diagnostics.append("ole_err=${oleErr.take(80)}; ")
+                                val joined = oo.optString("joined", "")
+                                if (joined.isNotBlank()) {
+                                    for (ln in joined.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
+                                    oleMarks.add("OLE-office")
+                                    oleOfficeOk = true
+                                }
+                            } catch (e: Throwable) {
+                                diagnostics.append("ole_office_ex=${e.javaClass.simpleName}:${e.message}; ")
                             }
-                        } catch (e: Throwable) {
-                            diagnostics.append("ole_office_ex=${e.javaClass.simpleName}:${e.message}; ")
+                        } else {
+                            diagnostics.append("ole_office_skip(pybusy); ")
                         }
                         mark("oleOffice")
                         // v1.9.39: OLE office 与位图 OCR 不再互斥。FA-00003 等含大量嵌入位图(图例/截图/LOGO)
                         // 的 DWG 此前因 oleOfficeOk=true 直接跳过位图 OCR 而漏字（桌面 RapidOCR 全量 OCR +4669 字）。
                         var oleDxfLen = 0
-                        try {
-                            val oleRes = DwgOleExtractor.extractOleText(pyDxfPath, context = context)
-                            oleDxfLen = oleRes.text.length
-                            // v1.9.53: 诊断 FA-31018 类「仅 OLE 位图」0 字——记录两条 OLE 路径实际返回
-                            diagnostics.append("ole_dxf(obj=${oleRes.objects},txt=$oleDxfLen,bmp=${oleRes.bitmapsOcred}); ")
-                            if (oleRes.text.isNotBlank()) {
-                                for (ln in oleRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
-                                oleMarks.add("OLE-ocr")
-                            }
-                        } catch (_: Throwable) {}
+                        // v1.9.88: 可选阶段预算——剩余时间不足时跳过 OCR，只保留矢量文字 + OLE office。
+                        // OLE 位图 OCR 与 IMAGE OCR 是单文件最耗时环节（每张位图 1~10s+），预算紧张时
+                        // 必须让路，保证整批 40 分钟硬约束。
+                        val optMs = optionalStageMs()
+                        if (optMs > 0) {
+                            try {
+                                val oleRes = DwgOleExtractor.extractOleText(pyDxfPath, context = context)
+                                oleDxfLen = oleRes.text.length
+                                // v1.9.53: 诊断 FA-31018 类「仅 OLE 位图」0 字——记录两条 OLE 路径实际返回
+                                diagnostics.append("ole_dxf(obj=${oleRes.objects},txt=$oleDxfLen,bmp=${oleRes.bitmapsOcred}); ")
+                                if (oleRes.text.isNotBlank()) {
+                                    for (ln in oleRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
+                                    oleMarks.add("OLE-ocr")
+                                }
+                            } catch (_: Throwable) {}
+                        } else {
+                            diagnostics.append("ole_ocr_skip(b=${optMs / 1000}s); ")
+                        }
                         mark("oleOcr")
                         // v1.9.80: DXF 通道已取到 OLE 文字时跳过 DWG CFB 通道。两条通道抽的是同一批
                         // 嵌入对象，再跑一遍等于把同样的位图重复 OCR，是单文件 40+ 次 OCR 的来源之一。
                         if (oleDxfLen <= 0) {
-                            try {
-                                val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath, context = context)
-                                diagnostics.append("ole_dwg(cfb=${oleRes2.objects},txt=${oleRes2.text.length}); ")
-                                if (oleRes2.text.isNotBlank()) {
-                                    for (ln in oleRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
-                                    oleMarks.add("DWG-OLE-ocr")
-                                }
-                            } catch (_: Throwable) {}
+                            if (optMs > 0) {
+                                try {
+                                    val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath, context = context)
+                                    diagnostics.append("ole_dwg(cfb=${oleRes2.objects},txt=${oleRes2.text.length}); ")
+                                    if (oleRes2.text.isNotBlank()) {
+                                        for (ln in oleRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
+                                        oleMarks.add("DWG-OLE-ocr")
+                                    }
+                                } catch (_: Throwable) {}
+                            } else {
+                                diagnostics.append("ole_dwg_skip(budget); ")
+                            }
                             mark("oleDwg")
                         } else {
                             diagnostics.append("ole_dwg(skip:DXF通道已取到文字); ")
                         }
                         // v1.9.39: DWG 内嵌 IMAGE 实体 OCR（对齐桌面 RapidOCR IMAGE 口径）。
                         if (imgPngs.isNotEmpty()) {
-                            try {
-                                val imgRes = DwgImageOcrExtractor.extract(context, imgPngs)
-                                if (imgRes.text.isNotBlank()) {
-                                    for (ln in imgRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
-                                    oleMarks.add("IMG-ocr(${imgRes.imagesScanned}/${imgRes.imagesScanned + imgRes.ocrFailed})")
-                                    diagnostics.append("img_ocr=${imgRes.imagesScanned}+${imgRes.ocrFailed}; ")
+                            if (optMs > 0) {
+                                try {
+                                    val imgRes = DwgImageOcrExtractor.extract(context, imgPngs)
+                                    if (imgRes.text.isNotBlank()) {
+                                        for (ln in imgRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) allItems.add(t) }
+                                        oleMarks.add("IMG-ocr(${imgRes.imagesScanned}/${imgRes.imagesScanned + imgRes.ocrFailed})")
+                                        diagnostics.append("img_ocr=${imgRes.imagesScanned}+${imgRes.ocrFailed}; ")
+                                    }
+                                } catch (e: Throwable) {
+                                    diagnostics.append("img_ocr_ex=${e.javaClass.simpleName}:${e.message}; ")
                                 }
-                            } catch (e: Throwable) {
-                                diagnostics.append("img_ocr_ex=${e.javaClass.simpleName}:${e.message}; ")
+                                try {
+                                    imgPngs.forEach { java.io.File(it).delete() }
+                                } catch (_: Throwable) {}
+                                mark("imgOcr")
+                            } else {
+                                // v1.9.88: 预算不足跳过 IMAGE OCR，但 PNG 仍要清掉，避免残留给后续文件。
+                                diagnostics.append("img_ocr_skip(budget); ")
+                                try {
+                                    imgPngs.forEach { java.io.File(it).delete() }
+                                } catch (_: Throwable) {}
                             }
-                            try {
-                                imgPngs.forEach { java.io.File(it).delete() }
-                            } catch (_: Throwable) {}
-                            mark("imgOcr")
                         }
                         if (allItems.isNotEmpty()) {
                             // 合并后确有文字：仅当"文字全部来自 OLE/IMAGE、矢量 items 为空"时，
@@ -269,13 +386,28 @@ object DwgProcessor {
                             val mergedAll = allItems.joinToString("\n")
                             val cleanedText = PdfOcrEngine.stripNoiseFarEast(mergedAll)
                             val cleanedItems = cleanedText.lines().map { it.trim() }.filter { it.isNotEmpty() }
-                            val co = JSONObject(PythonEngine.countCadItems(context, cleanedItems))
-                            val cntErr = if (co.has("error") && !co.isNull("error")) co.optString("error") else null
-                            if (!cntErr.isNullOrBlank()) diagnostics.append("count_err=${cntErr.take(80)}; ")
-                            val pyWords = co.optInt("words", 0)
-                            val pyFe = co.optInt("fe", 0)
-                            val pyNc = co.optInt("nc", 0)
-                            val pyChars = co.optInt("chars", 0)
+                            // v1.9.88: Python 计数也受 pyBusy 门控——失控线程占着 GIL 时 countCadItems 会排队空等，
+                            // 直接退回 Kotlin countTextKotlin（v1.9.77 已有该兜底，口径一致），不阻塞不空等。
+                            var pyWords = 0
+                            var pyFe = 0
+                            var pyNc = 0
+                            var pyChars = 0
+                            var cntErr: String? = null
+                            if (!pyBusy()) {
+                                try {
+                                    val co = JSONObject(PythonEngine.countCadItems(context, cleanedItems))
+                                    cntErr = if (co.has("error") && !co.isNull("error")) co.optString("error") else null
+                                    if (!cntErr.isNullOrBlank()) diagnostics.append("count_err=${cntErr.take(80)}; ")
+                                    pyWords = co.optInt("words", 0)
+                                    pyFe = co.optInt("fe", 0)
+                                    pyNc = co.optInt("nc", 0)
+                                    pyChars = co.optInt("chars", 0)
+                                } catch (e: Throwable) {
+                                    diagnostics.append("count_ex=${e.javaClass.simpleName}:${e.message}; ")
+                                }
+                            } else {
+                                diagnostics.append("count_skip(pybusy); ")
+                            }
                             // v1.9.77 FIX：Python 主路径偶发计 0（Chaquopy 跨进程计数异常 / extract 返回空 items）
                             // 兜底——合并文本确有内容时，用 Kotlin countTextKotlin 重新计数（与 v1.9.69~1.9.75
                             // Kotlin 组码兜底口径一致，且此处计入 OLE/IMAGE 文本，更接近桌面真值），保证不回归为 0 字。
@@ -312,58 +444,108 @@ object DwgProcessor {
 
         Diag.d("DWG 主路径无有效文字 $dName: pyErr=${if (diagnostics.contains("py_err")) "Y" else "N"} pyEx=${if (diagnostics.contains("py_ex")) "Y" else "N"}，进入 Kotlin 兜底/失败分支")
         // v1.9.16 兜底：只要 DXF 文件存在且完整，无论 Python 主路径是否成功/返回空，
-        // 都用 Kotlin 简易组码抽取再试一次，避免 service/后台/Python 异常导致直接 0 字。
+        // 都用 Kotlin 抽取再试一次，避免 service/后台/Python 异常导致直接 0 字。
         if (File(pyDxfPath).exists() && isDxfComplete(pyDxfPath)) {
             try {
                 val fbLines = ArrayList<String>()
-                val fallbackText = extractDxfTextsSimple(pyDxfPath)
-                if (fallbackText.isNotBlank()) {
-                    for (ln in fallbackText.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) }
+                // v1.9.88: 兜底快渠道改为「流式块展开」extractTextsStreaming——按 INSERT 引用次数展开块 +
+                // ATTRIB 实例值 + 图层过滤 + 不去重，语义对齐桌面 _collect_dxf_texts（「禁 0 输出」核心：
+                // 预算不足/超时/转换失败时每个文件仍能拿到接近桌面的字数）。
+                // 旧 extractDxfTextsSimple 是扁平组码扫描：块定义只计一次 + 全局行级去重，
+                // 大文件低估 40~50%（如 31013: 1866 vs 桌面 3160），仅作二级回退。
+                val streamTexts = try {
+                    DwgDxfParser.extractTextsStreaming(pyDxfPath)
+                } catch (e: Throwable) {
+                    diagnostics.append("stream_ex=${e.javaClass.simpleName}; ")
+                    emptyList()
                 }
-                // v1.9.39: 兜底分支也合并 OLE（与主路径一致），不再依赖 Python 成功
-                try {
-                    val oleJson = PythonEngine.extractOleOffice(context, pyDxfPath)
-                    val oo = JSONObject(oleJson)
-                    val joined = oo.optString("joined", "")
-                    if (joined.isNotBlank()) {
-                        for (ln in joined.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) }
+                if (streamTexts.isNotEmpty()) {
+                    fbLines.addAll(streamTexts)
+                    diagnostics.append("stream_lines=${streamTexts.size}; ")
+                } else {
+                    val legacy = extractDxfTextsSimple(pyDxfPath)
+                    if (legacy.isNotBlank()) {
+                        for (ln in legacy.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) }
+                        diagnostics.append("legacy_lines=${fbLines.size}; ")
                     }
-                } catch (_: Throwable) {}
-                try {
-                    val oleRes = DwgOleExtractor.extractOleText(pyDxfPath, context = context)
-                    if (oleRes.text.isNotBlank()) { for (ln in oleRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) } }
-                } catch (_: Throwable) {}
-                try {
-                    val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath, context = context)
-                    if (oleRes2.text.isNotBlank()) { for (ln in oleRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) } }
-                } catch (_: Throwable) {}
-                // v1.9.86: 兜底分支只扫当前 DWG 的确定性 IMAGE 目录，杜绝把别的文件/上一轮残留 PNG 重复 OCR。
-                try {
-                    val imgOutDir2 = java.io.File("${context.cacheDir}/dwg_imgs/${file.nameWithoutExtension}")
-                    val pngs2 = if (imgOutDir2.exists()) {
-                        imgOutDir2.walkTopDown().filter { it.isFile && it.extension == "png" }.map { it.absolutePath }.toList()
-                    } else emptyList()
-                    if (pngs2.isNotEmpty()) {
-                        val imgRes2 = DwgImageOcrExtractor.extract(context, pngs2)
-                        if (imgRes2.text.isNotBlank()) {
-                            for (ln in imgRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) }
+                }
+                // v1.9.39: 兜底分支也合并 OLE office（与主路径一致），不再依赖 Python 成功
+                // v1.9.88: pyBusy 时跳过（排队空等），由下方 Kotlin 侧 OLE 通道尽力覆盖
+                if (!pyBusy()) {
+                    try {
+                        val oleJson = PythonEngine.extractOleOffice(context, pyDxfPath)
+                        val oo = JSONObject(oleJson)
+                        val joined = oo.optString("joined", "")
+                        if (joined.isNotBlank()) {
+                            for (ln in joined.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) }
                         }
-                    }
-                } catch (_: Throwable) {}
+                    } catch (_: Throwable) {}
+                } else {
+                    diagnostics.append("fb_ole_office_skip(pybusy); ")
+                }
+                // v1.9.88: 兜底分支的 OLE 位图 OCR / IMAGE OCR 同样受 optionalStageMs 预算门控。
+                // 预算不足时跳过，但矢量文字（streamTexts）已保证有数。
+                val optMs = optionalStageMs()
+                if (optMs > 0) {
+                    try {
+                        val oleRes = DwgOleExtractor.extractOleText(pyDxfPath, context = context)
+                        if (oleRes.text.isNotBlank()) { for (ln in oleRes.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) } }
+                    } catch (_: Throwable) {}
+                    try {
+                        val oleRes2 = DwgOleExtractor.extractOleTextFromDwg(file.absolutePath, context = context)
+                        if (oleRes2.text.isNotBlank()) { for (ln in oleRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) } }
+                    } catch (_: Throwable) {}
+                    // v1.9.86: 兜底分支只扫当前 DWG 的确定性 IMAGE 目录，杜绝把别的文件/上一轮残留 PNG 重复 OCR。
+                    try {
+                        val imgOutDir2 = java.io.File("${context.cacheDir}/dwg_imgs/${file.nameWithoutExtension}")
+                        val pngs2 = if (imgOutDir2.exists()) {
+                            imgOutDir2.walkTopDown().filter { it.isFile && it.extension == "png" }.map { it.absolutePath }.toList()
+                        } else emptyList()
+                        if (pngs2.isNotEmpty()) {
+                            val imgRes2 = DwgImageOcrExtractor.extract(context, pngs2)
+                            if (imgRes2.text.isNotBlank()) {
+                                for (ln in imgRes2.text.lines()) { val t = ln.trim(); if (t.isNotEmpty()) fbLines.add(t) }
+                            }
+                        }
+                    } catch (_: Throwable) {}
+                } else {
+                    diagnostics.append("fb_ocr_skip(b=${optMs / 1000}s); ")
+                }
                 if (fbLines.isNotEmpty()) {
                     val merged = fbLines.joinToString("\n")
                     val cleaned = PdfOcrEngine.stripNoiseFarEast(merged)
                     // v1.9.86: 兜底分支也用 Python countCadItems 计数，与主路径口径一致（避免 Kotlin countTextKotlin 分词差异）。
+                    // v1.9.88: pyBusy 时跳过 Python 计数（排队空等），退回 Kotlin 计数——禁 0 输出。
                     val cleanedItems = cleaned.lines().map { it.trim() }.filter { it.isNotEmpty() }
-                    val co = try { JSONObject(PythonEngine.countCadItems(context, cleanedItems)) } catch (_: Throwable) { JSONObject() }
-                    val cntErr = if (co.has("error") && !co.isNull("error")) co.optString("error") else null
-                    if (!cntErr.isNullOrBlank()) diagnostics.append("count_err=${cntErr.take(80)}; ")
-                    val fbWords = co.optInt("words", 0)
-                    val fbFe = co.optInt("fe", 0)
-                    val fbNc = co.optInt("nc", 0)
-                    val fbChars = co.optInt("chars", 0)
+                    var fbWords = 0
+                    var fbFe = 0
+                    var fbNc = 0
+                    var fbChars = 0
+                    var cntErr: String? = null
+                    if (!pyBusy()) {
+                        try {
+                            val co = JSONObject(PythonEngine.countCadItems(context, cleanedItems))
+                            cntErr = if (co.has("error") && !co.isNull("error")) co.optString("error") else null
+                            if (!cntErr.isNullOrBlank()) diagnostics.append("count_err=${cntErr.take(80)}; ")
+                            fbWords = co.optInt("words", 0)
+                            fbFe = co.optInt("fe", 0)
+                            fbNc = co.optInt("nc", 0)
+                            fbChars = co.optInt("chars", 0)
+                        } catch (_: Throwable) {}
+                    } else {
+                        diagnostics.append("fb_count_skip(pybusy); ")
+                    }
                     val (_, feBefore, _, charsBefore) = countTextKotlin(merged)
                     diagnostics.append("strip=${feBefore}->${fbFe}/${charsBefore};")
+                    // v1.9.88: 禁 0 输出——Python 计数不可用或返回 0 时，强制用 Kotlin 计数出数。
+                    if (fbWords <= 0) {
+                        val (kWords2, kFe2, kNc2, kChars2) = countTextKotlin(cleaned)
+                        if (fbWords <= 0) fbWords = kWords2
+                        if (fbFe <= 0) fbFe = kFe2
+                        if (fbNc <= 0) fbNc = kNc2
+                        if (fbChars <= 0) fbChars = kChars2
+                        diagnostics.append("count_fallback=kotlin; ")
+                    }
                     if (fbWords > 0) {
                         val fbReason = "Kotlin组码兜底" + (if (diagnostics.isNotEmpty()) "·" + diagnostics.toString().take(60) else "")
                         val fbDiag = "FB:${diagnostics}"

@@ -137,6 +137,10 @@ object ArchiveEngine {
             val fileEntries = allEntries.filter { !it.isDirectory }
             if (fileEntries.isNotEmpty()) onEntries?.invoke(fileEntries.map { it.name })
             val zipTotal = fileEntries.size
+            // v1.9.88: 压缩包内 DWG ≥2 时建立批量预算（40 分钟硬约束覆盖整批内层 DWG）
+            val zipDwgCount = fileEntries.count { it.name.substringAfterLast('.', "").equals("dwg", true) }
+            val batchActive = zipDwgCount >= 2
+            if (batchActive) DwgProcessor.beginBatch(zipDwgCount)
             for ((idx, entry) in fileEntries.withIndex()) {
                 if (gate?.invoke() == false) break
                 val zipDone = idx + 1
@@ -144,6 +148,8 @@ object ArchiveEngine {
                 val bytes = zis.getInputStream(entry)?.readBytes() ?: continue
                 val ir = processEntry(entry.name, bytes, cacheDir, context)
                 if (ir != null) { inner.add(ir); onInner?.invoke(ir) }
+                // v1.9.88: 每个内层 DWG 完成后配平批量预算计数
+                if (batchActive && entry.name.substringAfterLast('.', "").equals("dwg", true)) DwgProcessor.endFile()
                 // 嵌套 zip
                 if (entry.name.lowercase().endsWith(".zip")) {
                     val nestedTmp = writeTemp(bytes, entry.name, cacheDir)
@@ -179,6 +185,11 @@ object ArchiveEngine {
                 val rarNames = rarFiles.map { it.relativeTo(dest).path.replace('\\', '/') }
                 if (rarNames.isNotEmpty()) onEntries?.invoke(rarNames)
                 val rarTotal = rarFiles.size
+                // v1.9.88: 压缩包内 DWG ≥2 时建立批量预算（40 分钟硬约束覆盖整批内层 DWG）。
+                // 只对本包自己建立的计数做 endFile 配平，避免与外层嵌套包的计数串扰。
+                val rarDwgCount = rarFiles.count { it.extension.equals("dwg", true) }
+                val batchActive = rarDwgCount >= 2
+                if (batchActive) DwgProcessor.beginBatch(rarDwgCount)
                 for ((idx, f) in rarFiles.withIndex()) {
                     // v1.9.63: 内层文件边界检查暂停/停止闸门——暂停时阻塞到继续，停止时终止整包。
                     // 这样暂停期间已统计完成的内层文件已通过 onInner 落盘，主界面汇总不再为 0。
@@ -191,6 +202,8 @@ object ArchiveEngine {
                         val ir = processEntry(relName, f.readBytes(), cacheDir, context)
                         if (ir != null) { inner.add(ir); onInner?.invoke(ir) }
                     } catch (_: Throwable) {}
+                    // v1.9.88: 每个内层 DWG 完成后配平批量预算计数
+                    if (batchActive && f.extension.equals("dwg", true)) DwgProcessor.endFile()
                     onProgress?.invoke(idx + 1, rarTotal)
                 }
                 Diag.d( "RAR processed ${file.name}: innerFiles=${inner.size}")
@@ -216,7 +229,11 @@ object ArchiveEngine {
         if (isTar || file.extension.lowercase() == "tgz") {
             val names = collectTarNames(decompressed)
             if (names.isNotEmpty()) onEntries?.invoke(names)
-            processTar(decompressed, cacheDir, inner, context, gate, onInner)
+            // v1.9.88: 压缩包内 DWG ≥2 时建立批量预算（40 分钟硬约束覆盖整批内层 DWG）
+            val tDwgCount = names.count { it.substringAfterLast('.', "").equals("dwg", true) }
+            val batchActive = tDwgCount >= 2
+            if (batchActive) DwgProcessor.beginBatch(tDwgCount)
+            processTar(decompressed, cacheDir, inner, context, gate, onInner, batchActive)
         } else {
             val baseName = file.name.removeSuffix(".gz").removeSuffix(".GZ")
             onEntries?.invoke(listOf(baseName))
@@ -234,7 +251,11 @@ object ArchiveEngine {
         val inner = mutableListOf<InnerResult>()
         val names = collectTarNames(bytes)
         if (names.isNotEmpty()) onEntries?.invoke(names)
-        processTar(bytes, cacheDir, inner, context, gate, onInner)
+        // v1.9.88: 压缩包内 DWG ≥2 时建立批量预算（40 分钟硬约束覆盖整批内层 DWG）
+        val tDwgCount = names.count { it.substringAfterLast('.', "").equals("dwg", true) }
+        val batchActive = tDwgCount >= 2
+        if (batchActive) DwgProcessor.beginBatch(tDwgCount)
+        processTar(bytes, cacheDir, inner, context, gate, onInner, batchActive)
         return aggregate(inner)
     }
 
@@ -245,6 +266,10 @@ object ArchiveEngine {
         val inner = mutableListOf<InnerResult>()
         val names = collectSevenZipNames(file)
         if (names.isNotEmpty()) onEntries?.invoke(names)
+        // v1.9.88: 压缩包内 DWG ≥2 时建立批量预算（40 分钟硬约束覆盖整批内层 DWG）
+        val zDwgCount = names.count { it.substringAfterLast('.', "").equals("dwg", true) }
+        val batchActive = zDwgCount >= 2
+        if (batchActive) DwgProcessor.beginBatch(zDwgCount)
         SevenZFile(file).use { sevenz ->
             while (true) {
                 if (gate?.invoke() == false) break
@@ -254,6 +279,8 @@ object ArchiveEngine {
                     if (bytes.isNotEmpty()) {
                         val ir = processEntry(entry.name, bytes, cacheDir, context)
                         if (ir != null) { inner.add(ir); onInner?.invoke(ir) }
+                        // v1.9.88: 每个内层 DWG 完成后配平批量预算计数
+                        if (batchActive && entry.name.substringAfterLast('.', "").equals("dwg", true)) DwgProcessor.endFile()
                     }
                 }
             }
@@ -263,7 +290,8 @@ object ArchiveEngine {
 
     // ──────────────────── TAR 解析器（复用原有逻辑） ────────────────────
     private suspend fun processTar(bytes: ByteArray, cacheDir: File, inner: MutableList<InnerResult>, context: Context? = null,
-                                    gate: (() -> Boolean)? = null, onInner: ((InnerResult) -> Unit)? = null) {
+                                    gate: (() -> Boolean)? = null, onInner: ((InnerResult) -> Unit)? = null,
+                                    batchActive: Boolean = false) {
         var pos = 0
         var pendingLongName: String? = null
         while (pos + 512 <= bytes.size) {
@@ -287,6 +315,8 @@ object ArchiveEngine {
                     if (finalName.isNotBlank()) {
                         val ir = processEntry(finalName, data, cacheDir, context)
                         if (ir != null) { inner.add(ir); onInner?.invoke(ir) }
+                        // v1.9.88: 每个内层 DWG 完成后配平批量预算计数
+                        if (batchActive && finalName.substringAfterLast('.', "").equals("dwg", true)) DwgProcessor.endFile()
                     }
                 }
                 else -> { pendingLongName = null }

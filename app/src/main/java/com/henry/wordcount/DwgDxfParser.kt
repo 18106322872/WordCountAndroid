@@ -1359,4 +1359,325 @@ object DwgDxfParser {
         }
         return cells.size
     }
+
+    // ══════════════════════════════════════════════════════════════════════════════
+    // v1.9.88：流式「按 INSERT 引用次数展开」文字抽取
+    //          （端口桌面 _collect_dxf_texts，内存安全版）
+    // ══════════════════════════════════════════════════════════════════════════════
+    // 旧 analyze() 走 readBytes() + split("\n") 把整份 DXF 展开成 List<String>：
+    // 22MB DXF → 数百万个 String 对象、堆上数百 MB → 真机 OOM，故 v1.9.2 起被弃用，
+    // 降级为「扁平组码扫描」（DwgProcessor.extractDxfTextsSimple）。而扁平扫描有
+    // 致命口径缺陷：块定义在 BLOCKS 段只出现一次，不按 INSERT 引用次数展开，
+    // 且行级去重会把标题栏/图例这类合法重复文字吃掉 →
+    // 大图比桌面少算 40%~50%（v1.9.85 实测 FA-31013 兜底 1866 vs 桌面 3160）。
+    //
+    // 本实现单遍流式扫描，只保留文本类实体（几何实体读完即弃），
+    // 内存与「文字量」成正比而非「文件体积」，200MB+ DXF 也能安全解析。
+    //
+    // 口径严格对齐桌面 _collect_dxf_texts：
+    //   · 模型空间(ENTITIES 段) + 各 *Paper_SpaceN 布局块
+    //   · INSERT 递归展开块定义内文字（按引用次数重复计入）
+    //   · INSERT 自带的 ATTRIB 实例值（非 ATTDEF 模板）
+    //   · 剔除 关闭/冻结/非打印 图层、invisible 实体、隐藏 ATTRIB
+    //   · 跳过外部参照(XREF)块
+    //   · 不做全局去重
+    // ══════════════════════════════════════════════════════════════════════════════
+
+    /** 紧凑实体：只保留抽取文字所需字段（几何实体不入内存） */
+    private class SEnt(val type: String) {
+        var layer: String = ""
+        var visible: Boolean = true
+        var insertName: String = ""
+        var decoded: String = ""
+        val attribs = ArrayList<String>(2)
+        val sb = StringBuilder()
+    }
+
+    /** 流式扫描中保留的实体类型；其余（LINE/ARC/HATCH…几何实体）读完即弃 */
+    private val STREAM_KEEP_TYPES = setOf(
+        "TEXT", "MTEXT", "ATTDEF", "MULTILEADER", "INSERT", "OLE2FRAME", "DIMENSION"
+    )
+
+    /** 展开结果上限：极端「块炸弹」图纸防失控（正常图纸远达不到） */
+    private const val MAX_STREAM_OUT = 400_000
+
+    /**
+     * 把一组组码写入紧凑实体（只关心文字/图层/可见性/块名）。
+     *
+     * ⚠️ 必须按实体类型收窄组码，否则会把「样式名/提示串」当正文计入：
+     *   · 组码 3 只有 MTEXT 是正文续段；DIMENSION/TEXT/ATTDEF 的组码 3 是样式名或提示串
+     *   · 组码 302/304 只有 MULTILEADER 是文字
+     *   · OLE2FRAME 的组码 1 是二进制数据，不能当文字
+     */
+    private fun applyCode(e: SEnt, gc: String, value: String) {
+        when (gc) {
+            "8" -> e.layer = value.trim()
+            "2" -> { if (e.type == "INSERT") e.insertName = value.trim() }
+            "60" -> { if ((value.trim().toIntOrNull() ?: 0) and 0x01 != 0) e.visible = false }
+            "70" -> {
+                // ATTRIB 隐藏标志：组码 70 的 bit 0x01
+                if (e.type == "ATTRIB" && ((value.trim().toIntOrNull() ?: 0) and 0x01 != 0)) e.visible = false
+            }
+            "1" -> { if (e.type != "OLE2FRAME") e.sb.append(value) }
+            "3" -> { if (e.type == "MTEXT") e.sb.append(value) }
+            "302", "304" -> { if (e.type == "MULTILEADER") e.sb.append(value) }
+        }
+    }
+
+    /**
+     * 流式抽取 DXF 全部可见文字（按 INSERT 引用次数展开块）。
+     * 返回已 trim 的非空文字行列表；解析失败或空结果返回 emptyList()，调用方应回退旧兜底。
+     */
+    fun extractTextsStreaming(dxfPath: String): List<String> {
+        val f = File(dxfPath)
+        if (!f.exists() || f.length() <= 0L) return emptyList()
+
+        val blocks = LinkedHashMap<String, ArrayList<SEnt>>()
+        val ms = ArrayList<SEnt>()
+        val layerHidden = HashSet<String>()
+        val layerKnown = HashSet<String>()
+        val xrefBlocks = HashSet<String>()
+        var hasOle2 = false
+
+        // —— 扫描状态（先声明，供下方局部函数捕获）——
+        var section = ""
+        var sectionAwaiting = false
+        var tableAwaiting = false
+        var inLayerTable = false
+        var curLayerName: String? = null
+        var curLayerFlags = 0
+        var curLayerColor = 1
+        var curLayerPlot = 1
+        var blockName: String? = null
+        var blockList: ArrayList<SEnt>? = null
+        var blockAwaitingName = false
+        var blockFlags = 0
+        var blockXref = ""
+        var curEnt: SEnt? = null
+        var lastInsert: SEnt? = null
+        var attribOwner: SEnt? = null
+
+        fun decodeText(raw: String): String {
+            if (raw.isEmpty()) return ""
+            var allAscii = true
+            for (i in raw.indices) { if (raw[i].code > 0x7F) { allAscii = false; break } }
+            val s = if (allAscii) raw else {
+                val b = raw.toByteArray(Charsets.ISO_8859_1)
+                val u8 = try { String(b, Charsets.UTF_8) } catch (_: Throwable) { raw }
+                val gb = try { String(b, charset("GB18030")) } catch (_: Throwable) { raw }
+                if (cjkCountOf(gb) >= cjkCountOf(u8)) gb else u8
+            }
+            // 桌面口径：所有实体文字统一过 clean_mtext（去掉 \fSimSun|b0; 等排版指令）
+            return cleanMtext(decodeDxfEscapes(s)).trim()
+        }
+
+        fun flushLayer() {
+            val n = curLayerName
+            if (n != null && inLayerTable) {
+                layerKnown.add(n)
+                val on = curLayerColor >= 0                 // 桌面 ezdxf：色号(62)为负 = 图层关闭
+                val frozen = (curLayerFlags and 0x01) != 0
+                if (!on || frozen || curLayerPlot != 1) layerHidden.add(n)
+            }
+            curLayerName = null; curLayerFlags = 0; curLayerColor = 1; curLayerPlot = 1
+        }
+
+        fun finishBlock() {
+            val n = blockName
+            val l = blockList
+            if (n != null && l != null) {
+                blocks[n] = l
+                if ((blockFlags and 0x04) != 0 || blockXref.isNotEmpty()) xrefBlocks.add(n)
+            }
+            blockName = null; blockList = null; blockAwaitingName = false
+            blockFlags = 0; blockXref = ""
+        }
+
+        /** 结束当前实体：解码其文字；ATTRIB 归位到所属 INSERT */
+        fun finishEntity() {
+            val e = curEnt ?: return
+            val t = decodeText(e.sb.toString())
+            e.sb.setLength(0)
+            if (e.type == "ATTRIB") {
+                if (t.isNotEmpty() && e.visible) attribOwner?.attribs?.add(t)
+            } else {
+                e.decoded = t
+            }
+            curEnt = null
+        }
+
+        try {
+            java.io.BufferedReader(
+                java.io.InputStreamReader(java.io.FileInputStream(f), Charsets.ISO_8859_1), 1 shl 16
+            ).use { br ->
+                var code = br.readLine()
+                while (code != null) {
+                    val value = br.readLine() ?: break
+                    val gc = code.trim()
+
+                    if (gc == "0") {
+                        finishEntity()
+                        val vs = value.trim()
+                        when (vs) {
+                            "SECTION" -> {
+                                flushLayer(); finishBlock()
+                                section = ""; sectionAwaiting = true; lastInsert = null
+                            }
+                            "ENDSEC" -> {
+                                flushLayer(); finishBlock()
+                                section = ""; inLayerTable = false; tableAwaiting = false; lastInsert = null
+                            }
+                            "ENDTAB" -> { flushLayer(); inLayerTable = false; tableAwaiting = false }
+                            "ENDBLK" -> { finishBlock(); lastInsert = null }
+                            "SEQEND" -> { lastInsert = null }
+                            "TABLE" -> { flushLayer(); tableAwaiting = true; inLayerTable = false }
+                            "LAYER" -> { flushLayer() }
+                            "BLOCK" -> {
+                                finishBlock()
+                                blockAwaitingName = true
+                                blockList = ArrayList()
+                                blockFlags = 0; blockXref = ""
+                                lastInsert = null
+                            }
+                            "ATTRIB" -> {
+                                // ATTRIB 不进实体表，只挂到紧邻其前的 INSERT
+                                curEnt = SEnt("ATTRIB")
+                                attribOwner = lastInsert
+                            }
+                            "VERTEX" -> { /* POLYLINE 顶点，忽略但不打断 INSERT→ATTRIB 归属 */ }
+                            else -> {
+                                lastInsert = null
+                                if (vs in STREAM_KEEP_TYPES) {
+                                    val e = SEnt(vs)
+                                    val l = blockList
+                                    if (l != null) l.add(e) else if (section == "ENTITIES") ms.add(e)
+                                    curEnt = e
+                                    if (vs == "INSERT") lastInsert = e
+                                    if (vs == "OLE2FRAME") hasOle2 = true
+                                }
+                            }
+                        }
+                        code = br.readLine()
+                        continue
+                    }
+
+                    // SECTION 名紧跟在 0/SECTION 之后
+                    if (sectionAwaiting && gc == "2") {
+                        section = value.trim(); sectionAwaiting = false
+                        code = br.readLine()
+                        continue
+                    }
+
+                    val e = curEnt
+                    when (section) {
+                        "TABLES" -> {
+                            if (gc == "2") {
+                                if (tableAwaiting) {
+                                    inLayerTable = (value.trim() == "LAYER"); tableAwaiting = false
+                                } else if (inLayerTable && curLayerName == null) {
+                                    curLayerName = value.trim()
+                                }
+                            } else if (inLayerTable) {
+                                when (gc) {
+                                    "70" -> curLayerFlags = value.trim().toIntOrNull() ?: 0
+                                    "62" -> curLayerColor = value.trim().toIntOrNull() ?: 1
+                                    "290" -> curLayerPlot = value.trim().toIntOrNull() ?: 1
+                                }
+                            }
+                        }
+                        "BLOCKS" -> {
+                            if (gc == "2" && blockAwaitingName) {
+                                blockName = value.trim(); blockAwaitingName = false
+                            } else if (e == null) {
+                                // BLOCK 头字段（位于块内第一个实体之前）
+                                if (gc == "70") blockFlags = value.trim().toIntOrNull() ?: 0
+                                else if (gc == "1") blockXref = value.trim()
+                            } else {
+                                applyCode(e, gc, value)
+                            }
+                        }
+                        "ENTITIES" -> { if (e != null) applyCode(e, gc, value) }
+                    }
+                    code = br.readLine()
+                }
+                finishEntity()
+            }
+        } catch (_: Throwable) {
+            return emptyList()
+        }
+
+        // ── 展开阶段：模型空间 + 各 *Paper_SpaceN 布局，INSERT 按引用次数递归展开 ──
+        val out = ArrayList<String>(8192)
+        val cache = HashMap<String, ArrayList<String>>()
+
+        fun hiddenLayer(layer: String): Boolean {
+            if (layerKnown.isEmpty()) return false        // 没解析到图层表 → 不做任何图层过滤
+            if (layer.isEmpty()) return false
+            return layerHidden.contains(layer)
+        }
+
+        fun isXref(name: String): Boolean {
+            if (name.isEmpty()) return false
+            val bn = name.uppercase()
+            if (bn.contains("XREF")) return true
+            if (xrefBlocks.contains(name)) {
+                if (hasOle2 && (bn.contains("TITLE BLOCK") || bn.contains("TITLEBLOCK"))) return false
+                return true
+            }
+            return false
+        }
+
+        fun expandBlock(name: String, sink: ArrayList<String>, depth: Int) {
+            if (depth > 6) return
+            if (out.size >= MAX_STREAM_OUT) return
+            val cached = cache[name]
+            if (cached != null) { if (cached.isNotEmpty()) sink.addAll(cached); return }
+            val res = ArrayList<String>(8)
+            cache[name] = res                              // 先占位，防块循环引用死递归
+            val ents = blocks[name] ?: return
+            for (e in ents) {
+                if (out.size >= MAX_STREAM_OUT) return
+                if (!e.visible) continue
+                if (hiddenLayer(e.layer)) continue
+                if (e.type == "INSERT") {
+                    if (isXref(e.insertName)) continue
+                    expandBlock(e.insertName, res, depth + 1)
+                    for (a in e.attribs) if (a.isNotBlank()) res.add(a)
+                } else if (e.type != "OLE2FRAME") {
+                    if (e.decoded.isNotBlank()) res.add(e.decoded)
+                }
+            }
+            // ⚠️ 必须把本次展开结果并入调用方：res 同时作为缓存对象存在，
+            // 若不 addAll 到 sink，则「首次展开的块文字」只会进缓存、永远不进输出，
+            // 嵌套块（块里再套 INSERT）更会整层丢失。
+            if (res.isNotEmpty()) sink.addAll(res)
+        }
+
+        fun walk(ents: List<SEnt>) {
+            for (e in ents) {
+                if (out.size >= MAX_STREAM_OUT) return
+                if (!e.visible) continue
+                if (hiddenLayer(e.layer)) continue
+                if (e.type == "INSERT") {
+                    if (isXref(e.insertName)) continue
+                    expandBlock(e.insertName, out, 1)
+                    for (a in e.attribs) if (a.isNotBlank()) out.add(a)
+                } else if (e.type != "OLE2FRAME") {
+                    if (e.decoded.isNotBlank()) out.add(e.decoded)
+                }
+            }
+        }
+
+        walk(ms)
+        if (ms.isEmpty()) {
+            // 少数 DXF（部分 LibreDWG 产物）把模型空间也写成 *Model_Space 块
+            for ((name, ents) in blocks) {
+                if (name.equals("*Model_Space", ignoreCase = true)) walk(ents)
+            }
+        }
+        for ((name, ents) in blocks) {
+            if (PAPER_BLOCK_NAME.containsMatchIn(name)) walk(ents)
+        }
+        return out
+    }
 }
