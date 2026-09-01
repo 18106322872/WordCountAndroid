@@ -134,7 +134,31 @@ object DwgProcessor {
         // v1.9.62: 拆成「阶段A 转换」+「阶段B 解析/OCR」。单文件处理与旧行为完全一致，
         // 只是把两段解耦，供批量流水线（下一份图纸的转换与上一份图纸的 OCR 重叠）复用。
         val conv = convertPhase(context, file)
-        return analyzePhase(context, file, dName, conv.dxfPath, conv.diagnostics)
+        return try {
+            analyzePhase(context, file, dName, conv.dxfPath, conv.diagnostics)
+        } finally {
+            deleteIntermediateDxf(conv.dxfPath)
+        }
+    }
+
+    /**
+     * v1.9.95: 中间 DXF 转换产物用完即删。
+     *
+     * 转换产物落在 file.parent——压缩包内层文件的父目录就是 cacheDir 根目录，
+     * 单份可达 200MB 以上（29MB 的 DWG 转出 222MB DXF）。此前从不删除：
+     * 一天多次测同一个 RAR 会累积几十份 .dxf 堆在 cacheDir 根目录，
+     * 而清理功能只扫 arc_ / rar_ / wc_ 前缀，.dxf 永远匹配不到——
+     * 这正是「明明测了很多次，清理却提示没有可清理的临时文件」的根因。
+     */
+    fun deleteIntermediateDxf(dxfPath: String?) {
+        if (dxfPath.isNullOrBlank()) return
+        runCatching {
+            val f = java.io.File(dxfPath)
+            if (f.exists() && f.isFile) {
+                val mb = f.length() / 1024 / 1024
+                if (f.delete()) Diag.d("删除中间 DXF 产物 ${f.name} (${mb}MB)")
+            }
+        }
     }
 
     data class DwgConvertOutcome(val dxfPath: String?, val diagnostics: String)

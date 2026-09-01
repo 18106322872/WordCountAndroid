@@ -1,6 +1,7 @@
 package com.henry.wordcount
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
@@ -125,6 +126,31 @@ private fun bgWarn(): String {
 
 /** v1.9.60: 跟踪恢复轮询协程，便于长按暂停/停止时取消，避免旧轮询误杀新批次。 */
 private var recoverPollingJob: kotlinx.coroutines.Job? = null
+
+/**
+ * v1.9.95: 判断本批统计是否已收尾（wc_results.jsonl 末尾出现 batch_end 标记）。
+ * 用途：统计服务 stopSelf 后系统回收存在延迟，此时查询「服务是否运行」仍可能为真，
+ * 导致用户刚测完点清理就被拦下。批次实际上已结束即可安全清理。
+ * 只读末尾 8KB，避免整文件读入（结果文件可能很大）。
+ */
+private fun batchFinished(context: android.content.Context): Boolean {
+    return try {
+        val dir = context.cacheDir ?: return true
+        val f = java.io.File(dir, "wc_results.jsonl")
+        // 无结果文件 = 当前没有进行中的批次，允许清理
+        if (!f.exists()) return true
+        val size = f.length()
+        val from = if (size > 8192) size - 8192 else 0L
+        java.io.RandomAccessFile(f, "r").use { raf ->
+            raf.seek(from)
+            val buf = ByteArray((size - from).toInt())
+            raf.read(buf)
+            String(buf, Charsets.UTF_8).contains("batch_end")
+        }
+    } catch (_: Throwable) {
+        false
+    }
+}
 class MainActivity : ComponentActivity() {
     /** 外部可通过此引用向已有列表追加新文件（onNewIntent 时使用） */
     companion object {
@@ -135,6 +161,26 @@ class MainActivity : ComponentActivity() {
 
         /** v1.9.19: 是否已获电池优化豁免（false 时切后台极可能被国产 ROM 冻结）。 */
         @Volatile var batteryUnrestricted: Boolean = true
+
+        /**
+         * v1.9.95: 判断后台统计服务 :countservice 是否仍在运行。
+         * 用于「清理临时文件」入口的互斥守卫——统计期间 arc_ 内层临时文件与
+         * dwg_imgs 下的 OCR 图片都正在被读写，此时清理会让正在统计的文件读不到内容。
+         * 统计跑在独立进程，跨进程只能通过系统 ActivityManager 查询。
+         */
+        fun isCountingServiceRunning(ctx: Context): Boolean {
+            return try {
+                val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+                    ?: return false
+                @Suppress("DEPRECATION")
+                val running = am.runningServices(Int.MAX_VALUE) ?: return false
+                running.any { it.service.className == "com.henry.wordcount2.CountingService" }
+            } catch (e: Throwable) {
+                // 查询失败时保守判定为「正在统计」，宁可不清理也不误删正在用的临时文件
+                Log.w("WordCountMain", "isCountingServiceRunning 查询失败，保守判定为统计中: ${e.message}")
+                true
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -690,15 +736,28 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
                             onClick = {
                                 expanded = false
                                 scope.launch(Dispatchers.IO) {
-                                    // 手动清理对齐桌面版 v1.8.83：不限年龄，但保护最近 60 分钟有修改的目录
-                                    val (removed, freed) = app?.cleanupTempFiles(maxAgeHours = 0, protectRecentMinutes = 60) ?: (0 to 0L)
-                                    scope.launch(Dispatchers.Main) {
-                                        val msg = if (removed > 0) {
-                                            "已清理 $removed 个临时目录，释放 ${freed / 1024 / 1024}MB"
-                                        } else {
-                                            "没有可清理的临时文件（或目录正在使用）"
+                                    // v1.9.95: 统计进行中禁止清理——保护正在读写的 arc_ 内层临时文件与 dwg_imgs OCR 图片。
+                                    // 统计空闲时改为 protectRecentMinutes = 0（不再按 mtime 保护）：
+                                    // 旧逻辑保护最近 60 分钟有修改的项，而每天多次测同一 RAR 时
+                                    // cacheDir 下 dwg_imgs 等残留目录的 mtime 几乎都在 60 分钟内，
+                                    // 结果全部被跳过、removed 恒为 0，永远提示「没有可清理的临时文件」。
+                                    // 服务 stopSelf 后系统回收有延迟，批次已收尾即视为可清理
+                                    val busy = isCountingServiceRunning(ctx.applicationContext)
+                                            && !batchFinished(ctx.applicationContext)
+                                    if (busy) {
+                                        scope.launch(Dispatchers.Main) {
+                                            Toast.makeText(ctx, "统计进行中，请结束后再清理", Toast.LENGTH_LONG).show()
                                         }
-                                        Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
+                                    } else {
+                                        val (removed, freed) = app?.cleanupTempFiles(maxAgeHours = 0, protectRecentMinutes = 0) ?: (0 to 0L)
+                                        scope.launch(Dispatchers.Main) {
+                                            val msg = if (removed > 0) {
+                                                "已清理 $removed 个临时目录，释放 ${freed / 1024 / 1024}MB"
+                                            } else {
+                                                "没有可清理的临时文件"
+                                            }
+                                            Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
+                                        }
                                     }
                                 }
                             },
@@ -2759,6 +2818,9 @@ internal suspend fun processDwgPipelined(
                     } catch (e: Throwable) {
                         onError(idx, cf.file, cf.displayName, e.message)
                     } finally {
+                        // v1.9.95: 删除本文件转换出的中间 DXF（单份可达 200MB+，此前从不删除，
+                        // 一天多次测同一 RAR 会累积几十份堆在 cacheDir 根目录且清理功能匹配不到）
+                        DwgProcessor.deleteIntermediateDxf(conv?.dxfPath)
                         // v1.9.88: 无论成功/失败都配平预算计数，保证后续文件预算计算准确
                         DwgProcessor.endFile()
                     }

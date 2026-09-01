@@ -180,55 +180,73 @@ class WordCountApplication : Application() {
     }
 
     /**
-     * v1.9.93: 对齐桌面版 v1.8.83 最终清理逻辑：
-     *   - 启动时自动清理仍用 24h 年龄保护；
-     *   - 手动清理入口可指定 maxAgeHours=0，清理所有匹配的 WordCount 残留（不限年龄）；
-     *   - 增加 protectRecentMinutes 保护，跳过最近 N 分钟仍有修改的目录，避免误删正在统计的目录。
-     * v1.9.89: 对齐桌面版 wordcount.py 的 _cleanup_wordcount_tempdirs —— 清理
-     * cacheDir 下 WordCount 临时产物：
-     *   - 解包临时目录 arc_* / rar_*（ArchiveEngine 异常中断/崩溃后残留）
-     *   - DWG IMAGE OCR 输出目录 dwg_imgs 下各子目录（v1.9.86 确定性目录，整批结束后残留）
-     *   - 其他 wc_ 前缀临时目录
+     * v1.9.94→v1.9.95: 全面对齐桌面版 v1.8.83 最终清理逻辑：
+     *   - 扫描内部 cacheDir + 外部 externalCacheDir；
+     *   - 同时清理临时目录和临时文件（不限于目录）；
+     *   - 清理范围：arc_* / rar_* / wc_*（保留功能性文件/目录，见 reserved 列表）；
+     *   - dwg_imgs 下各子目录；
+     *   - 手动清理入口 maxAgeHours=0 表示不限年龄，protectRecentMinutes 保护最近仍在修改的项。
+     * v1.9.89: 对齐桌面版 wordcount.py 的 _cleanup_wordcount_tempdirs。
      * 返回 (removed, freedBytes)。
      */
     fun cleanupTempFiles(maxAgeHours: Int = 24, protectRecentMinutes: Int = 0): Pair<Int, Long> {
-        val cache = cacheDir ?: return 0 to 0L
+        val roots = listOfNotNull(cacheDir, externalCacheDir)
         val now = System.currentTimeMillis()
         val ageLimit = if (maxAgeHours <= 0) Long.MAX_VALUE else now - maxAgeHours * 60L * 60 * 1000
         val recentLimit = if (protectRecentMinutes <= 0) Long.MAX_VALUE else now - protectRecentMinutes * 60L * 1000
-        val prefixes = listOf("arc_", "rar_", "wc_")
-        val entries = try { cache.listFiles() } catch (_: Throwable) { null } ?: return 0 to 0L
+        val dirPrefixes = listOf("arc_", "rar_")
+        val filePrefixes = listOf("wc_")
+        // v1.9.95: 补充 DWG→DXF 中间产物。转换产物以 <图纸名>.dxf 落在 cacheDir 根目录
+        // （压缩包内层文件的父目录就是 cacheDir），单份可达 200MB 以上且此前从不删除，
+        // 是临时空间占用的大头。此前只按 arc_ / rar_ / wc_ 前缀匹配，.dxf 永远扫不到，
+        // 导致用户明明每天多次测试、清理却始终提示「没有可清理的临时文件」。
+        val fileSuffixes = listOf(".dxf")
+        val reservedFiles = setOf("wc_results.jsonl", "wc_results.jsonl.tmp", "wc_stats.log")
+        val reservedPrefixes = listOf("wc_diag_", "wc_export_")
         var removed = 0
         var freed = 0L
-        for (d in entries) {
-            if (!d.isDirectory) continue
-            val isCandidate = prefixes.any { d.name.startsWith(it) } ||
-                    (d.name == "dwg_imgs")
-            if (!isCandidate) continue
-            // dwg_imgs 是二级目录（dwg_imgs/<文件名>/），逐个子目录判定
-            val targets = if (d.name == "dwg_imgs") {
-                d.listFiles()?.toList() ?: emptyList()
-            } else {
-                listOf(d)
-            }
-            for (t in targets) {
-                try {
-                    val mtime = t.lastModified()
-                    // 太新：未达到 maxAgeHours 指定年龄
-                    if (mtime > ageLimit) continue
-                    // 最近仍有修改：按 protectRecentMinutes 保护，避免误删正在统计的目录
-                    if (mtime >= recentLimit) continue
-                    val size = tempDirSize(t)
-                    if (t.deleteRecursively()) {
-                        removed++
-                        freed += size
-                    }
-                } catch (_: Throwable) {}
+        var scanned = 0
+        for (root in roots) {
+            if (!root.exists()) continue
+            val entries = try { root.listFiles() } catch (_: Throwable) { null } ?: continue
+            for (item in entries) {
+                val name = item.name
+                val isCandidate = when {
+                    name in reservedFiles -> false
+                    reservedPrefixes.any { name.startsWith(it) } -> false
+                    name == "dwg_imgs" && item.isDirectory -> true
+                    item.isDirectory && dirPrefixes.any { name.startsWith(it) } -> true
+                    item.isFile && filePrefixes.any { name.startsWith(it) } -> true
+                    item.isDirectory && filePrefixes.any { name.startsWith(it) } -> true
+                    // v1.9.95: cacheDir 根目录下的 .dxf 一律是 DWG 转换中间产物，可安全清理
+                    item.isFile && fileSuffixes.any { name.endsWith(it, ignoreCase = true) } -> true
+                    else -> false
+                }
+                if (!isCandidate) continue
+                scanned++
+                // dwg_imgs 是二级目录（dwg_imgs/<文件名>/），逐个子目录判定
+                val targets = if (name == "dwg_imgs" && item.isDirectory) {
+                    item.listFiles()?.toList() ?: emptyList()
+                } else {
+                    listOf(item)
+                }
+                for (t in targets) {
+                    try {
+                        val mtime = t.lastModified()
+                        // 太新：未达到 maxAgeHours 指定年龄
+                        if (mtime > ageLimit) continue
+                        // 最近仍有修改：按 protectRecentMinutes 保护，避免误删正在统计的目录
+                        if (mtime >= recentLimit) continue
+                        val size = tempDirSize(t)
+                        if (t.deleteRecursively()) {
+                            removed++
+                            freed += size
+                        }
+                    } catch (_: Throwable) {}
+                }
             }
         }
-        if (removed > 0) {
-            Diag.d("临时文件清理: 删除 $removed 个临时目录, 释放 ${freed / 1024}KB")
-        }
+        Diag.d("临时文件清理: 扫描到 $scanned 个候选, 删除 $removed 个, 释放 ${freed / 1024}KB")
         return removed to freed
     }
 
