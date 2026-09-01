@@ -1754,12 +1754,91 @@ def _gbk_common_ratio(real, stats):
 
 
 
+def _scan_imagedef_blocks(dxf_path):
+    """v1.9.91: 流式扫描 DXF 文本，收集所有 IMAGEDEF 实体的 (filename, 310 十六进制数据)。
+
+    背景：ezdxf 1.4.4 读取 IMAGEDEF 时【会丢弃 310 组码】（内嵌光栅图片二进制数据，
+    ImageDef 的 DXF 属性模型没有 data 字段，未映射组码不保留），所以必须绕过 ezdxf
+    直接按 DXF 组码结构扫描原始文本。只在本函数内做，性能可控（逐行流式，
+    且仅在图纸确实含 IMAGE 实体时才被 _extract_dwg_images 调用）。
+
+    返回 {handle: (filename_or_None, hexstr_or_None)}。
+    块内 310 每行最多 254 个十六进制字符（127 字节），需按出现顺序拼接。
+    """
+    result = {}
+    current = None          # {"handle":..,"filename":..,"hex":[...]}
+    prev_zero = False       # 上一行是组码 0（下一行是实体类型名）
+    in_def = False
+    try:
+        with open(dxf_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                code = line.strip()   # DXF 组码右对齐 3 位（"  0"），必须 strip
+                if prev_zero:
+                    prev_zero = False
+                    if code == "IMAGEDEF":
+                        in_def = True
+                        current = {"handle": None, "filename": None, "hex": []}
+                    elif in_def:
+                        # 新实体开始：提交上一个 IMAGEDEF
+                        if current is not None and current.get("handle"):
+                            result[current["handle"]] = (
+                                current.get("filename"),
+                                "".join(current.get("hex") or []),
+                            )
+                        current = None
+                        in_def = False
+                    continue
+                if code == "0":
+                    prev_zero = True
+                    continue
+                if in_def and current is not None:
+                    value = next(f, "").rstrip("\r\n")
+                    if code == "5":
+                        current["handle"] = value
+                    elif code == "1":
+                        current["filename"] = value
+                    elif code == "310":
+                        current["hex"].append(value.strip())
+    except Exception:
+        return {}
+    if in_def and current is not None and current.get("handle"):
+        result[current["handle"]] = (
+            current.get("filename"),
+            "".join(current.get("hex") or []),
+        )
+    return result
+
+
+def _write_image_bytes(raw, ip):
+    """按魔数判断图片格式并落盘（统一带扩展名）；无法识别时返回 False。"""
+    try:
+        if raw[:8] == b"\x89PNG\r\n\x1a\n" or raw[:4] == b"\x89PNG":
+            open(ip + ".png", "wb").write(raw)
+            return True
+        if raw[:3] == b"\xff\xd8\xff":
+            open(ip + ".jpg", "wb").write(raw)
+            return True
+        if raw[:2] == b"BM":
+            open(ip + ".bmp", "wb").write(raw)
+            return True
+        if raw[:4] in (b"GIF8",):
+            open(ip + ".gif", "wb").write(raw)
+            return True
+        if raw[:4] in (b"II*\x00", b"MM\x00*"):
+            open(ip + ".tif", "wb").write(raw)
+            return True
+    except Exception:
+        return False
+    return False
+
+
 def _extract_dwg_images(dxf_path, out_dir, max_images=20):
     """v1.9.39: 从 DWG 转出的 DXF 中提取内嵌 IMAGE 实体为 PNG 文件，供手机端 ML Kit OCR 识别。
 
-    对齐桌面 wordcount.py 的 _extract_cad_rendered_via_ocr 中的 IMAGE 导出：
-    ezdxf 遍历 modelspace() 的 IMAGE 实体，提取 image_def.embedded_image 字节，
-    落盘为 <out_dir>/embimg_<idx>.png。失败/无嵌入图返回空列表。
+    对齐桌面 wordcount.py 的 _extract_cad_rendered_via_ocr 中的 IMAGE 导出。
+    v1.9.91 修复：ezdxf 1.4.4 的 ImageDef 没有 embedded_image 属性（旧代码恒空），
+    改为自行扫描 DXF 文本中 IMAGEDEF 的 310 组码还原内嵌图片；无内嵌数据时回退
+    到按 IMAGEDEF 文件名（组码 1）相对 DXF 目录找外链图。失败/无图返回空列表。
     """
     if not out_dir:
         return []
@@ -1774,63 +1853,100 @@ def _extract_dwg_images(dxf_path, out_dir, max_images=20):
     except Exception:
         return pngs
     doc = None
+    used_path = None
     for try_path in [dxf_path]:
         try:
             doc = ezdxf.readfile(try_path)
+            used_path = try_path
             break
         except DXFError:
             san = sanitize_dxf(try_path)
             try:
                 doc = ezdxf.readfile(san)
+                used_path = san
                 break
             except DXFError:
                 san2 = sanitize_dxf_deep(try_path)
                 try:
                     doc = ezdxf.readfile(san2)
+                    used_path = san2
                     break
                 except Exception:
                     try:
                         from ezdxf.recover import readfile as rread
                         doc, _ = rread(san2)
+                        used_path = san2
                         break
                     except Exception:
                         doc = None
     if doc is None:
         return pngs
+    # 第一遍：收集 IMAGE 实体的 IMAGEDEF 句柄（有图才值得扫描大文件文本）
+    imgs = []
     try:
         for ent in doc.modelspace():
-            if len(pngs) >= max_images:
-                break
             if ent.dxftype() != "IMAGE":
                 continue
             try:
                 idef = ent.image_def
+                h = idef.dxf.handle
+                fn = idef.dxf.filename
             except Exception:
-                idef = None
-            if idef is None:
                 continue
-            try:
-                blob = idef.embedded_image
-            except Exception:
-                blob = None
-            if blob is None:
+            imgs.append((h, fn))
+            if len(imgs) >= max_images:
+                break
+    except Exception:
+        pass
+    if not imgs:
+        return pngs
+    # 第二遍：流式扫描 IMAGEDEF 310 数据
+    defs = _scan_imagedef_blocks(used_path) if used_path else {}
+    base_dir = os.path.dirname(dxf_path)
+    seen = set()
+    try:
+        for h, fn in imgs:
+            if len(pngs) >= max_images:
+                break
+            if h in seen:
                 continue
-            idx = len(pngs)
-            ip = os.path.join(out_dir, "embimg_%d.png" % idx)
-            try:
-                if isinstance(blob, (bytes, bytearray)):
-                    with open(ip, "wb") as _f:
-                        _f.write(blob)
-                else:
-                    # PIL Image
+            seen.add(h)
+            info = defs.get(h) or (None, None)
+            _, hexstr = info
+            if hexstr:
+                try:
+                    raw = bytes.fromhex(hexstr)
+                except Exception:
+                    raw = b""
+                if raw:
+                    idx = len(pngs)
+                    base = os.path.join(out_dir, "embimg_%d" % idx)
+                    if _write_image_bytes(raw, base):
+                        for ext in (".png", ".jpg", ".bmp", ".gif", ".tif"):
+                            p = base + ext
+                            if os.path.exists(p):
+                                pngs.append(p)
+                                break
+                    continue
+            # 外链图回退：组码 1 文件名相对 DXF 目录
+            cands = []
+            if fn:
+                fn2 = fn.replace("\\", "/")
+                cands.append(fn2)
+                cands.append(os.path.join(base_dir, os.path.basename(fn2)))
+                cands.append(os.path.join(base_dir, fn2))
+            for c in cands:
+                if c and os.path.exists(c) and os.path.getsize(c) > 0:
+                    idx = len(pngs)
+                    ip = os.path.join(out_dir, "embimg_%d.png" % idx)
                     try:
-                        blob.save(ip)
+                        with open(c, "rb") as _sf, open(ip, "wb") as _df:
+                            _df.write(_sf.read())
+                        if os.path.exists(ip) and os.path.getsize(ip) > 0:
+                            pngs.append(ip)
                     except Exception:
-                        continue
-                if os.path.exists(ip) and os.path.getsize(ip) > 0:
-                    pngs.append(ip)
-            except Exception:
-                continue
+                        pass
+                    break
     except Exception:
         pass
     return pngs
