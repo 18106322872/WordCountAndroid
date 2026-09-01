@@ -180,17 +180,18 @@ class WordCountApplication : Application() {
     }
 
     /**
+     * v1.9.92: 由 private 改为 public，支持手动清理入口（右上角选项菜单）。
      * v1.9.89: 对齐桌面版 wordcount.py 的 _cleanup_wordcount_tempdirs —— 启动时清理
-     * cacheDir 下超过 24 小时未使用的 WordCount 临时产物：
+     * cacheDir 下超过 maxAgeHours 小时未使用的 WordCount 临时产物：
      *   - 解包临时目录 arc_* / rar_*（ArchiveEngine 异常中断/崩溃后残留）
      *   - DWG IMAGE OCR 输出目录 dwg_imgs 下各子目录（v1.9.86 确定性目录，整批结束后残留）
      *   - 其他 wc_ 前缀临时目录
-     * 只删「最后修改时间 > 24h」的目录，绝不误删当前会话正在使用的目录
+     * 默认仍只删「最后修改时间 > 24h」的目录，绝不误删当前会话正在使用的目录
      * （桌面同款 max_age_hours=24 保护）。返回 (removed, freedBytes)。
      */
-    private fun cleanupTempFiles(): Pair<Int, Long> {
+    fun cleanupTempFiles(maxAgeHours: Int = 24): Pair<Int, Long> {
         val cache = cacheDir ?: return 0 to 0L
-        val ageLimit = System.currentTimeMillis() - 24L * 60 * 60 * 1000
+        val ageLimit = System.currentTimeMillis() - maxAgeHours * 60L * 60 * 1000
         val prefixes = listOf("arc_", "rar_", "wc_")
         val entries = try { cache.listFiles() } catch (_: Throwable) { null } ?: return 0 to 0L
         var removed = 0

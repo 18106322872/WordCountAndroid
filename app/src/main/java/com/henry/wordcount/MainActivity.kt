@@ -34,11 +34,14 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.material3.HorizontalDivider
@@ -662,12 +665,45 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
                     }
                 }
             }, actions = {
-                val diagCtx = LocalContext.current
-                val diagScope = rememberCoroutineScope()
-                IconButton(onClick = {
-                    diagScope.launch(Dispatchers.IO) { Diag.exportAndShare(diagCtx) }
-                }) {
-                    Icon(Icons.Filled.BugReport, contentDescription = "导出诊断日志", tint = Color.Gray)
+                val ctx = LocalContext.current
+                val scope = rememberCoroutineScope()
+                val app = ctx.applicationContext as? WordCountApplication
+                var expanded by remember { mutableStateOf(false) }
+                Box {
+                    IconButton(onClick = { expanded = true }) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "选项", tint = Color.Gray)
+                    }
+                    DropdownMenu(
+                        expanded = expanded,
+                        onDismissRequest = { expanded = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("导出诊断日志") },
+                            onClick = {
+                                expanded = false
+                                scope.launch(Dispatchers.IO) { Diag.exportAndShare(ctx) }
+                            },
+                            leadingIcon = { Icon(Icons.Filled.BugReport, contentDescription = null) }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("清理临时文件") },
+                            onClick = {
+                                expanded = false
+                                scope.launch(Dispatchers.IO) {
+                                    val (removed, freed) = app?.cleanupTempFiles() ?: (0 to 0L)
+                                    scope.launch(Dispatchers.Main) {
+                                        val msg = if (removed > 0) {
+                                            "已清理 $removed 个过期临时目录，释放 ${freed / 1024 / 1024}MB"
+                                        } else {
+                                            "没有超过 24 小时的临时文件"
+                                        }
+                                        Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            },
+                            leadingIcon = { Icon(Icons.Filled.Description, contentDescription = null) }
+                        )
+                    }
                 }
             })
         },
