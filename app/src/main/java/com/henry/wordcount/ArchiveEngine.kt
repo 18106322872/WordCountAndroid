@@ -20,6 +20,9 @@ import java.nio.charset.StandardCharsets
  */
 object ArchiveEngine {
 
+    /** v1.9.90: 嵌套压缩包递归展开的最大层数（对齐桌面 _list_archive_entries 的 depth<5）。 */
+    private const val MAX_ARCHIVE_DEPTH = 5
+
     data class ArchiveResult(
         val inner: List<InnerResult>,
         val words: Int, val fe: Int, val nc: Int, val chars: Int
@@ -59,20 +62,20 @@ object ArchiveEngine {
      */
     suspend fun extract(file: File, cacheDir: File, context: Context? = null, onProgress: ((Int, Int) -> Unit)? = null,
                         gate: (() -> Boolean)? = null, onEntries: ((List<String>) -> Unit)? = null,
-                        onInner: ((InnerResult) -> Unit)? = null): ArchiveResult? {
+                        onInner: ((InnerResult) -> Unit)? = null, depth: Int = 0): ArchiveResult? {
         return try {
             val ext = file.extension.lowercase()
             when {
-                ext == "zip" || (ext.isBlank() && isZipMagic(file)) -> fromZipCommonsCompress(file, cacheDir, context, onProgress, gate, onEntries, onInner)
-                ext == "rar" || (ext.isBlank() && isRarMagic(file)) -> fromRar(file, cacheDir, context, onProgress, gate, onEntries, onInner)
-                ext in setOf("gz", "tgz") -> fromGzip(file, cacheDir, context, gate, onEntries, onInner)
-                ext == "tar" || (ext.isBlank() && isTarMagic(file)) -> fromTarDirect(file, cacheDir, context, gate, onEntries, onInner)
-                ext == "7z" -> fromSevenZip(file, cacheDir, context, gate, onEntries, onInner)
+                ext == "zip" || (ext.isBlank() && isZipMagic(file)) -> fromZipCommonsCompress(file, cacheDir, context, onProgress, gate, onEntries, onInner, depth)
+                ext == "rar" || (ext.isBlank() && isRarMagic(file)) -> fromRar(file, cacheDir, context, onProgress, gate, onEntries, onInner, depth)
+                ext in setOf("gz", "tgz") -> fromGzip(file, cacheDir, context, gate, onEntries, onInner, depth)
+                ext == "tar" || (ext.isBlank() && isTarMagic(file)) -> fromTarDirect(file, cacheDir, context, gate, onEntries, onInner, depth)
+                ext == "7z" -> fromSevenZip(file, cacheDir, context, gate, onEntries, onInner, depth)
                 else -> {
                     // 兜底：按 magic bytes 再试一次
-                    if (isZipMagic(file)) fromZipCommonsCompress(file, cacheDir, context, onProgress, gate, onEntries, onInner)
-                    else if (isRarMagic(file)) fromRar(file, cacheDir, context, onProgress, gate, onEntries, onInner)
-                    else if (isGzipMagic(file)) fromGzip(file, cacheDir, context, gate, onEntries, onInner)
+                    if (isZipMagic(file)) fromZipCommonsCompress(file, cacheDir, context, onProgress, gate, onEntries, onInner, depth)
+                    else if (isRarMagic(file)) fromRar(file, cacheDir, context, onProgress, gate, onEntries, onInner, depth)
+                    else if (isGzipMagic(file)) fromGzip(file, cacheDir, context, gate, onEntries, onInner, depth)
                     else null
                 }
             }
@@ -130,7 +133,7 @@ object ArchiveEngine {
     // ──────────────────── ZIP (commons-compress) ────────────────────
     private suspend fun fromZipCommonsCompress(file: File, cacheDir: File, context: Context?, onProgress: ((Int, Int) -> Unit)? = null,
                                                 gate: (() -> Boolean)? = null, onEntries: ((List<String>) -> Unit)? = null,
-                                                onInner: ((InnerResult) -> Unit)? = null): ArchiveResult {
+                                                onInner: ((InnerResult) -> Unit)? = null, depth: Int = 0): ArchiveResult {
         val inner = mutableListOf<InnerResult>()
         org.apache.commons.compress.archivers.zip.ZipFile(file).use { zis ->
             val allEntries = zis.entries.toList()
@@ -146,19 +149,11 @@ object ArchiveEngine {
                 val zipDone = idx + 1
                 onProgress?.invoke(zipDone, zipTotal)
                 val bytes = zis.getInputStream(entry)?.readBytes() ?: continue
-                val ir = processEntry(entry.name, bytes, cacheDir, context)
-                if (ir != null) { inner.add(ir); onInner?.invoke(ir) }
+                // v1.9.90: 统一由 processEntryNested 处理——嵌套压缩包（任意格式）递归展开，
+                // 对齐桌面 _list_archive_entries（depth<5、任意层级混合格式嵌套均展开）
+                inner.addAll(processEntryNested(entry.name, bytes, cacheDir, context, gate, onInner, depth))
                 // v1.9.88: 每个内层 DWG 完成后配平批量预算计数
                 if (batchActive && entry.name.substringAfterLast('.', "").equals("dwg", true)) DwgProcessor.endFile()
-                // 嵌套 zip
-                if (entry.name.lowercase().endsWith(".zip")) {
-                    val nestedTmp = writeTemp(bytes, entry.name, cacheDir)
-                    if (nestedTmp != null) {
-                        val nestedRes = extract(nestedTmp, cacheDir, context, gate = gate, onInner = onInner)
-                        if (nestedRes != null) inner.addAll(nestedRes.inner)
-                        nestedTmp.delete()
-                    }
-                }
             }
         }
         return aggregate(inner)
@@ -167,7 +162,7 @@ object ArchiveEngine {
     // ──────────────────── RAR (unrar5j，支持 RAR4/RAR5) ────────────────────
     private suspend fun fromRar(file: File, cacheDir: File, context: Context?, onProgress: ((Int, Int) -> Unit)? = null,
                                 gate: (() -> Boolean)? = null, onEntries: ((List<String>) -> Unit)? = null,
-                                onInner: ((InnerResult) -> Unit)? = null): ArchiveResult? {
+                                onInner: ((InnerResult) -> Unit)? = null, depth: Int = 0): ArchiveResult? {
         val inner = mutableListOf<InnerResult>()
         val dest = File(cacheDir, "rar_${System.currentTimeMillis()}")
         dest.mkdirs()
@@ -199,8 +194,8 @@ object ArchiveEngine {
                     // v1.5.88: 保留 RAR 内相对路径，避免同名文件被覆盖/统计显示不全
                     val relName = f.relativeTo(dest).path.replace('\\', '/')
                     try {
-                        val ir = processEntry(relName, f.readBytes(), cacheDir, context)
-                        if (ir != null) { inner.add(ir); onInner?.invoke(ir) }
+                        // v1.9.90: processEntryNested 统一处理嵌套压缩包递归展开（对齐桌面）
+                        inner.addAll(processEntryNested(relName, f.readBytes(), cacheDir, context, gate, onInner, depth))
                     } catch (_: Throwable) {}
                     // v1.9.88: 每个内层 DWG 完成后配平批量预算计数
                     if (batchActive && f.extension.equals("dwg", true)) DwgProcessor.endFile()
@@ -220,7 +215,7 @@ object ArchiveEngine {
     // ──────────────────── GZ / TGZ ────────────────────
     private suspend fun fromGzip(file: File, cacheDir: File, context: Context?,
                                  gate: (() -> Boolean)? = null, onEntries: ((List<String>) -> Unit)? = null,
-                                 onInner: ((InnerResult) -> Unit)? = null): ArchiveResult {
+                                 onInner: ((InnerResult) -> Unit)? = null, depth: Int = 0): ArchiveResult {
         val bytes = file.readBytes()
         val decompressed = gunzipCompat(bytes)
         val inner = mutableListOf<InnerResult>()
@@ -233,12 +228,12 @@ object ArchiveEngine {
             val tDwgCount = names.count { it.substringAfterLast('.', "").equals("dwg", true) }
             val batchActive = tDwgCount >= 2
             if (batchActive) DwgProcessor.beginBatch(tDwgCount)
-            processTar(decompressed, cacheDir, inner, context, gate, onInner, batchActive)
+            processTar(decompressed, cacheDir, inner, context, gate, onInner, batchActive, depth)
         } else {
             val baseName = file.name.removeSuffix(".gz").removeSuffix(".GZ")
             onEntries?.invoke(listOf(baseName))
-            val ir = processEntry(baseName, decompressed, cacheDir, context)
-            if (ir != null) { inner.add(ir); onInner?.invoke(ir) }
+            // v1.9.90: processEntryNested 统一处理（单文件 .gz 内也可能是嵌套压缩包字节流）
+            inner.addAll(processEntryNested(baseName, decompressed, cacheDir, context, gate, onInner, depth))
         }
         return aggregate(inner)
     }
@@ -246,7 +241,7 @@ object ArchiveEngine {
     // ──────────────────── TAR ────────────────────
     private suspend fun fromTarDirect(file: File, cacheDir: File, context: Context?,
                                       gate: (() -> Boolean)? = null, onEntries: ((List<String>) -> Unit)? = null,
-                                      onInner: ((InnerResult) -> Unit)? = null): ArchiveResult {
+                                      onInner: ((InnerResult) -> Unit)? = null, depth: Int = 0): ArchiveResult {
         val bytes = file.readBytes()
         val inner = mutableListOf<InnerResult>()
         val names = collectTarNames(bytes)
@@ -255,14 +250,14 @@ object ArchiveEngine {
         val tDwgCount = names.count { it.substringAfterLast('.', "").equals("dwg", true) }
         val batchActive = tDwgCount >= 2
         if (batchActive) DwgProcessor.beginBatch(tDwgCount)
-        processTar(bytes, cacheDir, inner, context, gate, onInner, batchActive)
+        processTar(bytes, cacheDir, inner, context, gate, onInner, batchActive, depth)
         return aggregate(inner)
     }
 
     /** 7Z（commons-compress SevenZFile） */
     private suspend fun fromSevenZip(file: File, cacheDir: File, context: Context?,
                                      gate: (() -> Boolean)? = null, onEntries: ((List<String>) -> Unit)? = null,
-                                     onInner: ((InnerResult) -> Unit)? = null): ArchiveResult {
+                                     onInner: ((InnerResult) -> Unit)? = null, depth: Int = 0): ArchiveResult {
         val inner = mutableListOf<InnerResult>()
         val names = collectSevenZipNames(file)
         if (names.isNotEmpty()) onEntries?.invoke(names)
@@ -277,8 +272,8 @@ object ArchiveEngine {
                 if (!entry.isDirectory) {
                     val bytes = sevenz.getInputStream(entry).readBytes()
                     if (bytes.isNotEmpty()) {
-                        val ir = processEntry(entry.name, bytes, cacheDir, context)
-                        if (ir != null) { inner.add(ir); onInner?.invoke(ir) }
+                        // v1.9.90: processEntryNested 统一处理嵌套压缩包递归展开（对齐桌面）
+                        inner.addAll(processEntryNested(entry.name, bytes, cacheDir, context, gate, onInner, depth))
                         // v1.9.88: 每个内层 DWG 完成后配平批量预算计数
                         if (batchActive && entry.name.substringAfterLast('.', "").equals("dwg", true)) DwgProcessor.endFile()
                     }
@@ -291,7 +286,7 @@ object ArchiveEngine {
     // ──────────────────── TAR 解析器（复用原有逻辑） ────────────────────
     private suspend fun processTar(bytes: ByteArray, cacheDir: File, inner: MutableList<InnerResult>, context: Context? = null,
                                     gate: (() -> Boolean)? = null, onInner: ((InnerResult) -> Unit)? = null,
-                                    batchActive: Boolean = false) {
+                                    batchActive: Boolean = false, depth: Int = 0) {
         var pos = 0
         var pendingLongName: String? = null
         while (pos + 512 <= bytes.size) {
@@ -313,8 +308,8 @@ object ArchiveEngine {
                     val finalName = pendingLongName?.let { if (name.isNotEmpty()) "$it/$name" else it } ?: name
                     pendingLongName = null
                     if (finalName.isNotBlank()) {
-                        val ir = processEntry(finalName, data, cacheDir, context)
-                        if (ir != null) { inner.add(ir); onInner?.invoke(ir) }
+                        // v1.9.90: processEntryNested 统一处理嵌套压缩包递归展开（对齐桌面）
+                        inner.addAll(processEntryNested(finalName, data, cacheDir, context, gate, onInner, depth))
                         // v1.9.88: 每个内层 DWG 完成后配平批量预算计数
                         if (batchActive && finalName.substringAfterLast('.', "").equals("dwg", true)) DwgProcessor.endFile()
                     }
@@ -379,14 +374,48 @@ object ArchiveEngine {
     }
 
     // ──────────────────── 内层文件路由 ────────────────────
-    /** 嵌套压缩包不在此递归展开（外层循环已对 .zip 递归；其余类型与单独打开压缩包一致地跳过）。 */
+    /** 嵌套压缩包后缀集合。v1.9.90 起不再跳过，而是由 processEntryNested 递归展开（对齐桌面）。 */
     private val NESTED_ARCHIVE_SKIP = setOf("zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz")
+
+    /**
+     * v1.9.90: 内层文件统一入口（对齐桌面 _list_archive_entries 的嵌套展开语义）。
+     *  - 普通受支持文件：走 processEntry 统计，返回单个 InnerResult（onInner 在此触发，保持流式语义）；
+     *  - 嵌套压缩包（任意格式 zip/rar/7z/tar/gz/tgz/bz2/xz）：写临时文件后递归 extract() 展开，
+     *    返回嵌套包内所有叶子 InnerResult（内层 onInner 已由递归 extract 触发，此处不重复触发）；
+     *  - 递归层数上限 MAX_ARCHIVE_DEPTH=5（对齐桌面 depth<5），防无限嵌套；
+     *  - 桌面行为：压缩包内部是"普通目录"时递归展开不生成目录节点、是压缩包时作为节点继续展开，
+     *    展开目录（桌面 _wc_extracted）跳过——Android 端内层文件以相对路径 name 表达层级，
+     *    递归 extract 天然覆盖"任意层级、任意格式混合嵌套"。
+     */
+    private suspend fun processEntryNested(name: String, bytes: ByteArray, cacheDir: File, context: Context? = null,
+                                            gate: (() -> Boolean)? = null, onInner: ((InnerResult) -> Unit)? = null,
+                                            depth: Int = 0): List<InnerResult> {
+        val ext = name.substringAfterLast('.', "").lowercase()
+        if (ext in NESTED_ARCHIVE_SKIP) {
+            if (depth >= MAX_ARCHIVE_DEPTH) {
+                Diag.d( "嵌套压缩包超过最大层数 $MAX_ARCHIVE_DEPTH，跳过 '$name'（对齐桌面 depth<5）")
+                return emptyList()
+            }
+            val tmp = writeTemp(bytes, name, cacheDir) ?: return emptyList()
+            try {
+                val nestedRes = extract(tmp, cacheDir, context, gate = gate, onInner = onInner, depth = depth + 1)
+                return nestedRes?.inner ?: emptyList()
+            } finally {
+                runCatching { tmp.delete() }
+            }
+        }
+        val ir = processEntry(name, bytes, cacheDir, context)
+        if (ir != null) onInner?.invoke(ir)
+        return if (ir != null) listOf(ir) else emptyList()
+    }
 
     /**
      * 内层文件统一走与「单独打开该文件」完全相同的 FileProcessor。
      * 这样压缩包内任意格式（PDF/OOXML/老Office/图片/DWG/文本/未知）的统计路径与结果，
      * 都与单独打开该文件一丝不差（v1.5.82 彻底统一，取代此前重写一遍的独立逻辑）。
      * v1.9.63: 返回 InnerResult?（统计成功时非 null），供调用方即时 emit 进度条目。
+     * v1.9.90: 嵌套压缩包已由 processEntryNested 前置拦截递归展开，此处仅处理普通受支持文件；
+     *          保留 NESTED_ARCHIVE_SKIP 判断作防御（正常流程不可达）。
      */
     private suspend fun processEntry(name: String, bytes: ByteArray, cacheDir: File, context: Context? = null): InnerResult? {
         val ext = name.substringAfterLast('.', "").lowercase()
