@@ -744,7 +744,9 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
                                     // cacheDir 下 dwg_imgs 等残留目录的 mtime 几乎都在 60 分钟内，
                                     // 结果全部被跳过、removed 恒为 0，永远提示「没有可清理的临时文件」。
                                     // 服务 stopSelf 后系统回收有延迟，批次已收尾即视为可清理
-                                    val busy = isCountingServiceRunning(ctx.applicationContext)
+                                    // 调用处位于文件级 Composable（不在 MainActivity 类作用域内），
+                                    // companion object 成员必须带类名限定，否则 Unresolved reference。
+                                    val busy = MainActivity.isCountingServiceRunning(ctx.applicationContext)
                                             && !batchFinished(ctx.applicationContext)
                                     if (busy) {
                                         scope.launch(Dispatchers.Main) {
