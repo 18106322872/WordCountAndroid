@@ -16,7 +16,7 @@ import java.io.File
  *            含 lowDensity 强制全页 OCR、CID 乱码/失败中文 PDF 的 PRINT/OCR 模式选择、
  *            可信文本层 normKey 软去重合并（v1.5.71）。
  *   - OOXML : OoXmlEngine.extract + metaWords 安全网（无 VML 用 metaWords；VML 且现算>1.5x 回退）。
- *   - 老格式: OldOfficeEngine.extractDocFull / extractXlsDetailed / extractPptFull + 元数据权威字数。
+ *   - 老格式: OldOfficeEngine.extractDocFull / extractXlsDetailed / extractPptFull——字数用本程序 countTextKotlin 口径（与桌面 Word COM ComputeStatistics 对齐）。
  *   - 图片  : OcrEngine.recognize（与单独打开图片完全一致，无额外配额）。
  *   - DWG   : DwgProcessor.process（dwg→dxf + 编码恢复 + 原始字节兜底 + 文字/编号拆分）。
  *   - 文本  : f.readText(UTF_8)（与单独打开 .txt/未知扩展名一致；不再额外做 GBK 回退，
@@ -291,8 +291,6 @@ object FileProcessor {
         val extLower = f.extension.lowercase()
         val text: String
         var docPages = 0
-        var docWords = 0
-        var docChars = 0
         var hiddenText: List<Pair<String, String>> = emptyList()
         var xlsVisible: List<String> = emptyList()
         var pptNotes: List<SheetStat> = emptyList()
@@ -302,8 +300,6 @@ object FileProcessor {
             val docRes = OldOfficeEngine.extractDocFull(f)
             text = docRes.text
             docPages = docRes.pages
-            docWords = docRes.words
-            docChars = docRes.chars
         } else if (extLower == "xls") {
             val xlsRes = OldOfficeEngine.extractXlsDetailed(f)
             text = xlsRes.text
@@ -318,24 +314,20 @@ object FileProcessor {
             pptImages = pptRes.imageCount
         }
         if (text.isBlank()) return ProcessOutput(null, "此老格式文件内容为空或无法读取")
+        // v1.9.105: .doc 统一用本程序「Word 口径」统计抽取文本（与 docx/txt/pdf/xls/ppt 一致），
+        // 不再用 SummaryInformation.wordCount 覆盖 words、再用本程序 nc 算残差 fe —— 那种混算会让 fe
+        // 变成「Word 保存字数 − 本程序非中文词数」的残差，与桌面（Word COM ComputeStatistics：
+        // words=Stat0/fe=Stat6/nc=words−fe/chars=Stat3，四数同源）口径不一致。桌面 .doc 走 Word COM
+        // ComputeStatistics，约等于对「含脚注/尾注/文本框的完整文本」用本程序口径统计；HWPF
+        // WordExtractor.text() 默认已含脚注/尾注/文本框，故直接 countTextKotlin(text) 即可对齐。
+        // pages 仍取自 SummaryInformation.pageCount（与桌面 ComputeStatistics 页数一致）。
         val stats = countTextKotlin(text)
         val extDot = ".$extLower"
         val pagesValue = if (docPages > 0) docPages else null
-        val outWords: Int
-        val outFe: Int
-        val outNc: Int
-        val outChars: Int
-        if (docWords > 0) {
-            outNc = stats.third
-            outFe = if (docWords - outNc > 0) docWords - outNc else 0
-            outWords = docWords
-            outChars = if (docChars > 0) docChars else stats.fourth
-        } else {
-            outWords = stats.first
-            outFe = stats.second
-            outNc = stats.third
-            outChars = stats.fourth
-        }
+        val outWords = stats.first
+        val outFe = stats.second
+        val outNc = stats.third
+        val outChars = stats.fourth
         val hiddenStats = hiddenText.map { (n, t) ->
             val s = countTextKotlin(t)
             SheetStat(n, s.first, s.second, s.third, s.fourth)

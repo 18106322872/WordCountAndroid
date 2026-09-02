@@ -3393,12 +3393,10 @@ internal suspend fun processBatchToEntries(
                     if (!control.gateBlocking()) return@forEachIndexed
                                         try {
                         val extLower = f.extension.lowercase()
-                        // v1.1.10: DOC 用 extractDocFull 获取完整文本+页数元数据
-                        // v1.2.3: extractDocFull 额外返回 SummaryInformation 的 words/chars 权威统计
+                        // v1.9.105: DOC 用 extractDocFull 取完整文本(HWPF 默认含脚注/尾注/文本框)+页数元数据；
+                        // 字数改用本程序 countTextKotlin 口径（与桌面 Word COM ComputeStatistics 对齐），不再用 SummaryInformation。
                         val text: String
                         var docPages: Int = 0  // 0 = 未知
-                        var docWords: Int = 0  // 0 = 无元数据
-                        var docChars: Int = 0  // 0 = 无元数据
                         var hiddenText: List<Pair<String, String>> = emptyList() // v1.3.3: .xls 隐藏表
                         var xlsVisible: List<String> = emptyList() // v1.3.4: .xls 可见表名（明细展示用）
                         var pptNotes: List<SheetStat> = emptyList()  // v1.3.34: .ppt 备注列表
@@ -3408,8 +3406,6 @@ internal suspend fun processBatchToEntries(
                             val docRes = OldOfficeEngine.extractDocFull(f)
                             text = docRes.text
                             docPages = docRes.pages
-                            docWords = docRes.words
-                            docChars = docRes.chars
                         } else if (extLower == "xls") {
                             // v1.3.3: .xls 逐表抽取，隐藏表单独返回
                             val xlsRes = OldOfficeEngine.extractXlsDetailed(f)
@@ -3434,23 +3430,15 @@ internal suspend fun processBatchToEntries(
                             val extDot = ".$extLower"
                             // 构造 pages：DOC 有元数据页数就用，否则留 null 让 toFileResult 走 estimatePages 兜底
                             val pagesValue = if (docPages > 0) docPages else null
-                            // v1.2.3: 优先用 SummaryInformation 的权威统计（与 Word 完全一致）
-                            val outWords: Int
-                            val outFe: Int
-                            val outNc: Int
-                            val outChars: Int
-                            if (docWords > 0) {
-                                outNc = stats.third
-                                outFe = maxOf(0, docWords - outNc)
-                                outWords = docWords
-                                outChars = if (docChars > 0) docChars else stats.fourth
-                                Diag.d( "doc 用元数据: words=$docWords chars=$docChars pages=$docPages")
-                            } else {
-                                outWords = stats.first
-                                outFe = stats.second
-                                outNc = stats.third
-                                outChars = stats.fourth
-                            }
+                            // v1.9.105: .doc 统一用本程序「Word 口径」统计抽取文本（与 docx/txt/pdf/xls/ppt 一致），
+                            // 不再用 SummaryInformation.wordCount 覆盖 words、再用本程序 nc 算残差 fe —— 那样会让 fe
+                            // 变成「Word 保存字数 − 本程序非中文词数」的残差，与桌面（Word COM ComputeStatistics：
+                            // words=Stat0/fe=Stat6/nc=words−fe/chars=Stat3，四数同源）口径不一致。
+                            // HWPF WordExtractor.text() 默认已含脚注/尾注/文本框，故直接 countTextKotlin(text)。
+                            val outWords = stats.first
+                            val outFe = stats.second
+                            val outNc = stats.third
+                            val outChars = stats.fourth
                             // v1.3.3: 隐藏工作表单独统计（默认不计入合计，UI 勾选后才并入）
                             val hiddenStats = hiddenText.map { (n, t) ->
                                 val s = countTextKotlin(t)
