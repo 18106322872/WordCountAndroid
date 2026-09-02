@@ -187,18 +187,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // v1.9.107: 按 versionName 失效 wc_results.jsonl 缓存 + 杀本进程（带走 :countservice）。
-        // 完整根因（v1.9.106 修了一半）：
-        //   ① APK 升级后 cacheDir/wc_results.jsonl 旧值仍被 onStart→recoverResults 按 id 去重恢复
-        //      ——v1.9.106 已修：按 versionName 比对 SharedPreferences，删 jsonl + 重置读取偏移
-        //   ② Android service 在 :countservice 子进程跑，APK 升级后该子进程**不重载字节码**——
-        //      v1.9.99 的 app.xml 钳制删除修复其实在 APK 里了，但 service 进程仍跑 v1.9.98 时代的
-        //      字节码（已被 fork 出），所以用户测 HQ6 仍看到钳制值 3385。
-        //   ③ 普通 app 没权限 KILL_BACKGROUND_PROCESSES（system-only），杀不掉子进程——
-        //      唯一可行的工程做法是杀掉本主进程（service 子进程 fork 自本进程，一起被带走）。
-        //      下次启动 MainActivity+service 都会加载新 APK 字节码，v1.9.99+ 修复真正生效。
-        // 体感：app 首次启动 v1.9.107 会闪退一次（杀进程是异步的，先 setContent 再 OS 回收），
-        //       用户从 launcher 重开即正常。同版本内 resume 不触发此路径。
+        // v1.9.109: 按 versionName 失效 wc_results.jsonl 缓存（不再杀进程）。
+        // v1.9.108 杀进程方案是错的，用户实测「每次打开都闪退」：
+        //   ① sp.apply() 是异步写盘，紧跟 killProcess() 时进程死前版本号未必落盘
+        //      → 下次启动 prev 仍 != cur → 又杀进程 → 无限闪退循环；
+        //   ② 杀主进程也不会级联杀 :countservice 子进程（Android 子进程由 zygote
+        //      fork，非主进程 fork），所谓「带走 service」是错误假设。
+        // 正确认知：Android 覆盖安装（PackageInstaller）本身会 force-stop 应用
+        // 全部进程（含 :countservice），升级后 service 本来就是新 APK 字节码；
+        // v1.9.106 实测仍 3385 的更可能解释是当时用户机器上 service 进程跨安装
+        // 存活。故本版本：保留版本号比对 + 清缓存 + 重置 RecoverState（防御缓存层），
+        // 改为 sp.commit() 同步写盘防竞争；不杀进程，保证 app 正常打开。
+        // 若用户重测 HQ6 仍 3385，下一步再排查 service 进程是否真的存活于旧字节码。
         try {
             @Suppress("DEPRECATION")
             val cur = packageManager.getPackageInfo(packageName, 0).versionName ?: ""
@@ -213,11 +213,9 @@ class MainActivity : ComponentActivity() {
                 RecoverState.lastOffset = 0L
                 RecoverState.lastProgressKey = ""
                 RecoverState.lastProgressDone = -1
-                sp.edit().putString("wc_cache_version", cur).apply()
-                // v1.9.107 杀本主进程（service fork 自本进程，一起被带走）。
-                // 用户从 launcher 重开即可加载新 APK 字节码，service 也用新代码。
-                Log.i("WordCountMain", "v1.9.107: 版本 $prev -> $cur, 杀本进程以让 service 重载新字节码")
-                android.os.Process.killProcess(android.os.Process.myPid())
+                // v1.9.109: commit() 同步写盘——确保下次启动 prev == cur 不再重复触发清理
+                sp.edit().putString("wc_cache_version", cur).commit()
+                Log.i("WordCountMain", "v1.9.109: 版本 $prev -> $cur，已清 wc_results.jsonl 缓存")
             }
         } catch (_: Throwable) { }
         ensureBackgroundCapability()
