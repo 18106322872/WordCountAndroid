@@ -334,6 +334,14 @@ object OoXmlEngine {
                     // 与桌面版 wordcount.py 的 ord(c) >= 32 判定对齐
                     if (clean.isNotBlank() && clean.any { it.code >= 32 || it == '\t' || it == '\n' || it == '\r' }) {
                         sb.append(clean)
+                    } else if (clean.isNotEmpty()) {
+                        // v1.9.98: 纯空白 <w:t>（如 <w:t xml:space="preserve"> </w:t>）原被 isNotBlank 丢弃，
+                        // 导致相邻 run 的单词被粘连（"to the"→"tothe" 计 1 词），非中文词系统性少算。
+                        // 桌面版保留该空格、逐词计数与 Word 一致；此处仅在两词间确实缺分隔符时补一个空格。
+                        val last = sb.lastOrNull()
+                        if (last != null && last != ' ' && last != '\n' && last != '\t' && last != '\r') {
+                            sb.append(' ')
+                        }
                     }
                 }
             }
