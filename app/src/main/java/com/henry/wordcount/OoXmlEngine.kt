@@ -65,9 +65,11 @@ object OoXmlEngine {
     /**
      * 提取 docx 文本。
      *
-     * 仅提取 word/document.xml（正文+文本框），不提取 header/footer。
+     * 提取 word/document.xml（正文+文本框+表格）与 word/footnotes.xml、
+     * word/endnotes.xml（脚注/尾注，v1.9.100 恢复读取），不提取 header/footer。
      * Word「字数统计」对话框的"包括文本框、脚注和尾注"选项**不包括**页眉页脚，
      * 因此页眉页脚不计入统计口径。（v1.0.26 修复：旧版错误地计入了页眉页脚）
+     * 与桌面版 wordcount.py v1.8.63+ 口径对齐：脚注尾注计入、页眉页脚不计。
      *
      * v1.0.27 页数统计改进：
      *   Word 保存时会写入 w:lastRenderedPageBreak（上次渲染时的分页位置），这是最可靠
@@ -124,11 +126,23 @@ object OoXmlEngine {
             Log.d("WordCount", "docx fallback 精确去重后补充了 $addedCount 条新文本")
         }
 
-        // v1.9.88: 移除 v1.3.95 的 appendDocxExtraXml（页眉/页脚/脚注/尾注/图表/SmartArt 补充）。
-        // 对齐桌面版 wordcount.py「无 Word COM」口径：extract_docx 只统计 word/document.xml
-        // （正文+文本框+表格），Word「字数统计」对话框的「包括文本框、脚注和尾注」**不包括**
-        // 页眉页脚，且桌面版现算路径从不读 footnotes.xml/endnotes.xml/charts/diagrams——
-        // 补充这些文件导致 Android 字数高于电脑版与 Word 真值，属历史偏差，现予移除。
+        // v1.9.100: 补读脚注/尾注（word/footnotes.xml、word/endnotes.xml）。
+        // v1.9.88 曾移除脚注读取以"对齐桌面版"，但当时对齐的是 desktop_reference 里的
+        // 旧副本（v1.8.63 之前）。真实桌面版 wordcount.py 自 v1.8.63 起补读脚注/尾注
+        // （对齐 Word「字数统计」对话框默认勾选的"包括文本框、脚注和尾注(E)"，
+        // 且 _word_com_count 的 IncludeFootnotesAndEndnotes=True 也是这一口径）。
+        // 实测 Silence of Perception 英文稿：脚注 841 词，桌面 v1.8.98=4293（剥VML后 4286）
+        // vs Android 3444，少 842 词。桌面版对 footnotes/endnotes 直接逐 <w:p> 提取、
+        // 不剥 VML、同样跳过 vanish/hidden run，此处保持同一口径。
+        // 页眉页脚仍不读——Word 对话框的该选项不包括页眉页脚，两端一致。
+        for (fn in arrayOf("word/footnotes.xml", "word/endnotes.xml")) {
+            val fnXml = readEntry(zip, fn)
+            if (fnXml != null && fnXml.isNotBlank()) {
+                // 与正文之间空一行，作为独立文本块（对齐桌面版逐段落独立计词的边界）
+                sb.append('\n')
+                appendDocxXmlText(fnXml, sb)
+            }
+        }
 
         val text = sb.toString()
         // ── 页数统计（v1.1.14 重写：智能排版感知）──
