@@ -187,11 +187,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // v1.9.106: 按 versionName 失效 wc_results.jsonl 缓存。APK 升级时 cacheDir
-        // 里的历史结果会保留，导致 v1.9.99 之前的 app.xml 钳制等历史错误值一直显示
-        // （用户看到的「修复没生效」就是这个根因——v1.9.99+ 的代码已在 APK 里，只是
-        // 没机会重跑）。每次 versionName 变化即清空缓存 + 重置读取偏移，强制下批
-        // 用最新代码重跑；同版本内 resume 不受影响。
+        // v1.9.107: 按 versionName 失效 wc_results.jsonl 缓存 + 杀本进程（带走 :countservice）。
+        // 完整根因（v1.9.106 修了一半）：
+        //   ① APK 升级后 cacheDir/wc_results.jsonl 旧值仍被 onStart→recoverResults 按 id 去重恢复
+        //      ——v1.9.106 已修：按 versionName 比对 SharedPreferences，删 jsonl + 重置读取偏移
+        //   ② Android service 在 :countservice 子进程跑，APK 升级后该子进程**不重载字节码**——
+        //      v1.9.99 的 app.xml 钳制删除修复其实在 APK 里了，但 service 进程仍跑 v1.9.98 时代的
+        //      字节码（已被 fork 出），所以用户测 HQ6 仍看到钳制值 3385。
+        //   ③ 普通 app 没权限 KILL_BACKGROUND_PROCESSES（system-only），杀不掉子进程——
+        //      唯一可行的工程做法是杀掉本主进程（service 子进程 fork 自本进程，一起被带走）。
+        //      下次启动 MainActivity+service 都会加载新 APK 字节码，v1.9.99+ 修复真正生效。
+        // 体感：app 首次启动 v1.9.107 会闪退一次（杀进程是异步的，先 setContent 再 OS 回收），
+        //       用户从 launcher 重开即正常。同版本内 resume 不触发此路径。
         try {
             @Suppress("DEPRECATION")
             val cur = packageManager.getPackageInfo(packageName, 0).versionName ?: ""
@@ -207,6 +214,10 @@ class MainActivity : ComponentActivity() {
                 RecoverState.lastProgressKey = ""
                 RecoverState.lastProgressDone = -1
                 sp.edit().putString("wc_cache_version", cur).apply()
+                // v1.9.107 杀本主进程（service fork 自本进程，一起被带走）。
+                // 用户从 launcher 重开即可加载新 APK 字节码，service 也用新代码。
+                Log.i("WordCountMain", "v1.9.107: 版本 $prev -> $cur, 杀本进程以让 service 重载新字节码")
+                android.os.Process.killProcess(android.os.Process.myPid())
             }
         } catch (_: Throwable) { }
         ensureBackgroundCapability()
