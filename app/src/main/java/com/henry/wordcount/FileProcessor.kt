@@ -58,7 +58,10 @@ object FileProcessor {
     private suspend fun processPdf(context: Context, f: File, dName: String): ProcessOutput {
         // ── Level 1: Kotlin PdfExtractor（快速预筛）──
         val ktRes = PdfExtractor.extract(f)
-        val ktStats = countTextKotlin(ktRes.text)
+        // v1.9.103：L1 文字层同样去噪（与桌面 extract_pdf / L2 pdfminer 口径一致），
+        // 避免全角标点 / (cid: 占位符被 FAR_EAST 误计为「中文」/非中文词虚增。
+        val ktCleanText = sanitizePdfTextLayer(ktRes.text)
+        val ktStats = countTextKotlin(ktCleanText)
         // v1.5.66: 用系统 PdfRenderer 取可靠页数
         val realPages = reliablePdfPageCount(f)
 

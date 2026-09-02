@@ -1367,6 +1367,67 @@ fun countTextKotlin(text: String): Quadruple<Int, Int, Int, Int> {
 }
 
 /**
+ * v1.9.103（同步桌面 wordcount.py v1.8.61）：PDF 文字层去噪，供 L1 Kotlin 快速路径使用。
+ * 英文/混排 PDF 被排版软件塞入全角标点（全角括号/句号/分号/半角片假名中点），或 CAD 转 PDF
+ * 字体未嵌入时吐出 (cid:NNNN) 占位符，会被 FAR_EAST 误计为「中文」/非中文词虚增。
+ * 与桌面 extract_pdf 逐段清洗口径一致：英文为主段落（CJK 占比<15%）删 CJK 内容/标点/全角标点，
+ * 删连续装饰中点；整段 (cid: 乱码丢弃；中文主导段原样保留。仅作用于 PDF 文字层，不作用于 OCR 结果。
+ */
+private val PDF_CJK_CONTENT_RE = Regex("[\\u3040-\\u309F\\u30A0-\\u30FF\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uF900-\\uFAFF\\uAC00-\\uD7A3]")
+private val PDF_CJK_PUNCT_RE = Regex("[\\u3000-\\u303F]")
+private val PDF_FW_PUNCT_RE = Regex("[\\uFF00-\\uFF0F\\uFF1A-\\uFF20\\uFF3B-\\uFF40\\uFF5B-\\uFF9F\\uFFE0-\\uFFEF]")
+private val PDF_LEADER_DOT_RE = Regex("[・･]{2,}")
+private val PDF_CID_RE = Regex("\\(cid:|\\(CID:", RegexOption.IGNORE_CASE)
+
+private fun pdfTextIsPoisoned(para: String): Boolean {
+    if (para.isEmpty()) return true
+    val s = para.trim()
+    if (s.length < 10) return false
+    val n = s.length
+    val cid = PDF_CID_RE.findAll(s).count()
+    if (cid >= 3) return true
+    var bad = 0
+    var exotic = 0
+    s.codePoints().toArray().forEach { cp ->
+        if (cp == 0x00 || cp == 0x08 || cp == 0x0B || cp == 0x0C || cp == 0x0E || cp == 0x0F ||
+            (0xE000 <= cp && cp <= 0xF8FF) ||
+            (0xF0000 <= cp && cp <= 0xFFFFD) ||
+            (0x100000 <= cp && cp <= 0x10FFFD)) {
+            bad++
+        }
+        if ((0x0080 <= cp && cp <= 0x024F) ||
+            (0x02B0 <= cp && cp <= 0x036F) ||
+            (0x2150 <= cp && cp <= 0x22FF) ||
+            (0x2300 <= cp && cp <= 0x23FF)) {
+            exotic++
+        }
+    }
+    return bad >= maxOf(8, (n * 0.05).toInt()) || exotic >= maxOf(20, (n * 0.30).toInt())
+}
+
+fun sanitizePdfTextLayer(text: String): String {
+    val paragraphs = text.split(Regex("\\n\\s*\\n"))
+    val out = mutableListOf<String>()
+    for (para in paragraphs) {
+        val trimmed = para.trim()
+        if (trimmed.isEmpty()) continue
+        if (pdfTextIsPoisoned(trimmed)) continue
+        var p = PDF_LEADER_DOT_RE.replace(trimmed, "")
+        val nonSpace = p.replace(Regex("\\s"), "")
+        if (nonSpace.isEmpty()) continue
+        val cjkContent = PDF_CJK_CONTENT_RE.findAll(p).count()
+        if (cjkContent.toDouble() / nonSpace.length < 0.15) {
+            p = PDF_CJK_CONTENT_RE.replace(p, "")
+            p = PDF_CJK_PUNCT_RE.replace(p, "")
+            p = PDF_FW_PUNCT_RE.replace(p, "")
+        }
+        val cleaned = p.trim()
+        if (cleaned.isNotEmpty()) out.add(cleaned)
+    }
+    return out.joinToString("\n\n")
+}
+
+/**
  * v1.5.61: 判断一条 CAD 文字条目是否属于『纯编号』（不需要翻译）。
  * 端口桌面版 wordcount.py is_cad_code_item，保守判定：
  *   - 含任何 CJK/假名/韩文          → 文字部分
@@ -1675,7 +1736,9 @@ private suspend fun recomputeFromPdf(context: android.content.Context, pdfFile: 
         try {
             // ── Level 1: Kotlin PdfExtractor（快速预筛）──
             val ktRes = PdfExtractor.extract(pdfFile)
-            val ktStats = countTextKotlin(ktRes.text)
+            // v1.9.103：L1 文字层同样去噪（与桌面 extract_pdf / L2 pdfminer 口径一致）。
+            val ktCleanText = sanitizePdfTextLayer(ktRes.text)
+            val ktStats = countTextKotlin(ktCleanText)
             var bestWords = ktStats.first; var bestFe = ktStats.second; var bestNc = ktStats.third; var bestChars = ktStats.fourth
             var bestPages: Int? = ktRes.pages
             var bestDiag = "Kotlin提取(${bestChars}字)"
