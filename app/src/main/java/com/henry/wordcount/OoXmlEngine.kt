@@ -106,12 +106,15 @@ object OoXmlEngine {
         // 同时覆盖「正文子串 / 页眉页脚复用 / 图表与正文重复」三类重复。
         val normAcc = StringBuilder(sb.toString().replace(Regex("\\s+"), ""))
 
-        val fallbackTRe = """<w:t[^>]*>(.*?)</w:t>""".toRegex(RegexOption.DOT_MATCHES_ALL)
+        // v1.9.101: 限定真 <w:t>（<w:t> 或 <w:t 属性），排除 <w:tbl>/<w:tab/>/<w:txbxContent>
+        // 等 w:t 前缀标签的伪匹配——伪匹配会把绘图 XML（如 <wp:posOffset>）剥出垃圾数字词
+        val fallbackTRe = """<w:t(?:\s[^>]*)?>(.*?)</w:t>""".toRegex(RegexOption.DOT_MATCHES_ALL)
         var addedCount = 0
         fallbackTRe.findAll(bodyXml).forEach { tMatch ->
-            val raw = decodeXml(tMatch.groupValues[1])
-            // v1.9.96: 修复 Kotlin 字面替换 bug——必须 .toRegex() 才能真正清除 <w:t> 内嵌标签
-            val clean = raw.replace("""<[^>]+>""".toRegex(), "")
+            // v1.9.101: 先剥残余标签再解码实体——字面 &lt;...&gt; 文本（如 "&lt;MeasuredValue&gt;"）
+            // 若先解码会含 '<' 被误当标签剥掉（单层别墅 -2 根因）；先剥同时保留 v1.9.96 对
+            // 畸形文件内嵌标签的防御。v1.9.96: 必须 .toRegex()，Kotlin String.replace 是字面替换
+            val clean = decodeXml(tMatch.groupValues[1].replace("""<[^>]+>""".toRegex(), ""))
                 .replace("""&[a-z]+;""".toRegex(), "")
                 .trim()
             val norm = clean.replace(Regex("\\s+"), "")
@@ -336,12 +339,13 @@ object OoXmlEngine {
                 if (HIDDEN_RE.containsMatchIn(runXml)) return@forEach
 
                 // Step 3: 在 run 内提取 <w:t> 文本，然后清洗嵌套标签
-                val tRe = """(?s)<w:t[^>]*>(.*?)</w:t>""".toRegex()
+                // v1.9.101: 限定真 <w:t>，排除 <w:tbl>/<w:tab/> 等伪匹配
+                val tRe = """(?s)<w:t(?:\s[^>]*)?>(.*?)</w:t>""".toRegex()
                 tRe.findAll(runXml).forEach { tMatch ->
-                    val raw = decodeXml(tMatch.groupValues[1])
                     // 清洗可能嵌套在 <w:t> 内的 XML 标签和孤立实体引用
                     // v1.9.96: 必须用正则，Kotlin String.replace(String,String) 是字面替换
-                    val clean = raw.replace("""<[^>]+>""".toRegex(), "")
+                    // v1.9.101: 先剥标签再解码实体，字面 &lt;...&gt; 不再被误剥（对齐桌面 1.8.100）
+                    val clean = decodeXml(tMatch.groupValues[1].replace("""<[^>]+>""".toRegex(), ""))
                         .replace("""&[a-z]+;""".toRegex(), "")
 
                     // v1.0.26：只要求非空白且含可打印字符（不再强制要求字母/汉字）
@@ -575,7 +579,7 @@ object OoXmlEngine {
             try {
                 val vxml = readEntry(zip, vmlPath) ?: return sb.toString()
                 """<w:txbxContent[^>]*>(.*?)</w:txbxContent>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(vxml).forEach { block ->
-                    """<w:t[^>]*>(.*?)</w:t>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(block.groupValues[1]).forEach {
+                    """<w:t(?:\s[^>]*)?>(.*?)</w:t>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(block.groupValues[1]).forEach {
                         sb.append(decodeXml(it.groupValues[1])).append('\n')
                     }
                 }
@@ -690,7 +694,7 @@ object OoXmlEngine {
                 if (e.name.matches("""xl/drawings/vmlDrawing\d+\.vml""".toRegex())) {
                     val xml = readEntry(zip, e.name) ?: continue
                     """<w:txbxContent[^>]*>(.*?)</w:txbxContent>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(xml).forEach { block ->
-                        """<w:t[^>]*>(.*?)</w:t>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(block.groupValues[1]).forEach {
+                        """<w:t(?:\s[^>]*)?>(.*?)</w:t>""".toRegex(RegexOption.DOT_MATCHES_ALL).findAll(block.groupValues[1]).forEach {
                             sb.append(decodeXml(it.groupValues[1])).append('\n')
                         }
                     }
