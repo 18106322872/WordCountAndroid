@@ -108,7 +108,8 @@ object OoXmlEngine {
         var addedCount = 0
         fallbackTRe.findAll(bodyXml).forEach { tMatch ->
             val raw = decodeXml(tMatch.groupValues[1])
-            val clean = raw.replace("""<[^>]+>""", "")
+            // v1.9.96: 修复 Kotlin 字面替换 bug——必须 .toRegex() 才能真正清除 <w:t> 内嵌标签
+            val clean = raw.replace("""<[^>]+>""".toRegex(), "")
                 .replace("""&[a-z]+;""".toRegex(), "")
                 .trim()
             val norm = clean.replace(Regex("\\s+"), "")
@@ -325,7 +326,8 @@ object OoXmlEngine {
                 tRe.findAll(runXml).forEach { tMatch ->
                     val raw = decodeXml(tMatch.groupValues[1])
                     // 清洗可能嵌套在 <w:t> 内的 XML 标签和孤立实体引用
-                    val clean = raw.replace("""<[^>]+>""", "")
+                    // v1.9.96: 必须用正则，Kotlin String.replace(String,String) 是字面替换
+                    val clean = raw.replace("""<[^>]+>""".toRegex(), "")
                         .replace("""&[a-z]+;""".toRegex(), "")
 
                     // v1.0.26：只要求非空白且含可打印字符（不再强制要求字母/汉字）
