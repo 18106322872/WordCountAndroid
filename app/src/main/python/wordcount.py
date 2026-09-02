@@ -1914,6 +1914,79 @@ def _pdf_image_ocr(path):
 
 
 
+# v1.8.61（同步桌面 wordcount.py）：PDF 文字层去噪 + (cid: 占位垃圾过滤。
+# 英文/混排 PDF 常被排版软件塞入全角标点（全角括号、全角连字符、半角片假名
+# 中点）作为目录引导符 / 项目符号，被 FAR_EAST 当成「中文」虚增字数；CAD 转
+# PDF 字体未嵌入时 pdfminer 吐出 (cid:NNNN) 占位符，看似字符实非真内容。
+# 仅对 PDF 文字层段落做段落级清洗（与桌面 extract_pdf 口径一致）：
+#   * 段落内含 >=3 处 (cid:/CID: 占位 -> 整段视为乱码丢弃；
+#   * 非 ASCII / Private Use Area / 拉丁扩展滥用比例过高 -> 丢弃；
+#   * 段落内真正 CJK 表意/假名/谚文比例 < 15% -> 视为英文段落，删除其中的
+#     CJK 内容字符、CJK 标点、全角标点/符号；同时删除连续 2 个及以上的
+#     装饰中点（・ / ･）引导符；
+#   * 真正以中文/日文/韩文为主的段落（比例高）原样保留。
+_CJK_CONTENT_CHARS_RE = re.compile(
+    r"[\u3040-\u309F\u30A0-\u30FF"
+    r"\u3400-\u4DBF\u4E00-\u9FFF"
+    r"\uF900-\uFAFF"
+    r"\uAC00-\uD7A3]"
+)
+_CJK_PUNCT_RE = re.compile(r"[\u3000-\u303F]")
+_CJK_FW_PUNCT_RE = re.compile(
+    r"[\uFF00-\uFF0F\uFF1A-\uFF20"
+    r"\uFF3B-\uFF40\uFF5B-\uFF9F"
+    r"\uFFE0-\uFFEF]"
+)
+_CJK_LEADER_DOT_RE = re.compile(r"[・･]{2,}")
+
+
+def _pdf_text_is_poisoned(text):
+    """检测 PDF 文字层是否被『乱码』污染（CAD 导出 PDF 字体未嵌入时常见）。
+
+    判据与桌面 wordcount.py._pdf_text_is_poisoned 完全一致。
+    返回 True 表示此段文字层不可信，应丢弃（不计入统计）。
+    """
+    if not text:
+        return True
+    s = text.strip()
+    if len(s) < 10:
+        return False
+    n = len(s)
+    cid = s.count("(cid:") + s.count("(CID:")
+    if cid >= 3:
+        return True
+    bad = sum(1 for c in s if (
+        ord(c) in (0x00, 0x08, 0x0B, 0x0C, 0x0E, 0x0F)
+        or 0xE000 <= ord(c) <= 0xF8FF
+        or 0xF0000 <= ord(c) <= 0xFFFFD
+        or 0x100000 <= ord(c) <= 0x10FFFD
+    ))
+    exotic = sum(1 for c in s if (
+        0x0080 <= ord(c) <= 0x024F
+        or 0x02B0 <= ord(c) <= 0x036F
+        or 0x2150 <= ord(c) <= 0x22FF
+        or 0x2300 <= ord(c) <= 0x23FF
+    ))
+    return bad >= max(8, n * 0.05) or exotic >= max(20, n * 0.30)
+
+
+def _sanitize_pdf_text_para(para, cjk_ratio_threshold=0.15):
+    """对 PDF 文字层段落去噪，返回清洗后的段落（可能为空）。
+
+    与桌面 wordcount.py._sanitize_pdf_text_para 完全一致。
+    """
+    para = _CJK_LEADER_DOT_RE.sub("", para)
+    non_space = re.sub(r"\s", "", para)
+    if not non_space:
+        return ""
+    cjk_content = _CJK_CONTENT_CHARS_RE.findall(para)
+    if len(cjk_content) / len(non_space) < cjk_ratio_threshold:
+        para = _CJK_CONTENT_CHARS_RE.sub("", para)
+        para = _CJK_PUNCT_RE.sub("", para)
+        para = _CJK_FW_PUNCT_RE.sub("", para)
+    return para.strip()
+
+
 def extract_pdf(path):
 
 
@@ -2012,12 +2085,16 @@ def extract_pdf(path):
 
         c = para.strip()
 
-
+        if not c:
+            continue
+        # v1.8.61（同步桌面）：丢弃 (cid: 占位乱码段落，避免污染非中文词统计
+        if _pdf_text_is_poisoned(c):
+            continue
+        # v1.8.61（同步桌面）：去除英文 PDF 中全角标点 / 装饰性中点 / stray CJK
+        # 噪声，避免被 FAR_EAST 误计为「中文」导致字数虚增。
+        c = _sanitize_pdf_text_para(c)
 
         if c:
-
-
-
             text_items.append(c)
 
 
