@@ -187,6 +187,28 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // v1.9.106: 按 versionName 失效 wc_results.jsonl 缓存。APK 升级时 cacheDir
+        // 里的历史结果会保留，导致 v1.9.99 之前的 app.xml 钳制等历史错误值一直显示
+        // （用户看到的「修复没生效」就是这个根因——v1.9.99+ 的代码已在 APK 里，只是
+        // 没机会重跑）。每次 versionName 变化即清空缓存 + 重置读取偏移，强制下批
+        // 用最新代码重跑；同版本内 resume 不受影响。
+        try {
+            @Suppress("DEPRECATION")
+            val cur = packageManager.getPackageInfo(packageName, 0).versionName ?: ""
+            val sp = getSharedPreferences("wordcount_prefs", Context.MODE_PRIVATE)
+            val prev = sp.getString("wc_cache_version", null)
+            if (prev != cur && cur.isNotEmpty()) {
+                val dir = cacheDir
+                if (dir != null) {
+                    java.io.File(dir, "wc_results.jsonl").delete()
+                    java.io.File(dir, "wc_results.jsonl.tmp").delete()
+                }
+                RecoverState.lastOffset = 0L
+                RecoverState.lastProgressKey = ""
+                RecoverState.lastProgressDone = -1
+                sp.edit().putString("wc_cache_version", cur).apply()
+            }
+        } catch (_: Throwable) { }
         ensureBackgroundCapability()
         lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStart(owner: LifecycleOwner) {
