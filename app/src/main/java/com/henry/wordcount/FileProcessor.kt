@@ -239,28 +239,26 @@ object FileProcessor {
         val rawFe = stats.second
         val rawNc = stats.third
         val rawChars = stats.fourth
-        val outWords: Int
-        val outFe: Int
-        val outNc: Int
-        val outChars: Int
-        if (res.metaWords > 0 && !res.hasVml) {
-            outWords = res.metaWords
-            val ratio = if (rawWords > 0) rawWords.toDouble() / res.metaWords else 1.0
-            outFe = (rawFe / ratio).toInt().coerceAtLeast(0)
-            outNc = (rawNc / ratio).toInt().coerceAtLeast(0)
-            outChars = (rawChars / ratio).toInt().coerceAtLeast(0)
-        } else if (res.metaWords > 0 && rawWords > (res.metaWords * 1.5).toInt()) {
-            outWords = res.metaWords
-            val ratio = rawWords.toDouble() / res.metaWords
-            outFe = (rawFe / ratio).toInt().coerceAtLeast(0)
-            outNc = (rawNc / ratio).toInt().coerceAtLeast(0)
-            outChars = (rawChars / ratio).toInt().coerceAtLeast(0)
-        } else {
-            outWords = rawWords
-            outFe = rawFe
-            outNc = rawNc
-            outChars = rawChars
-        }
+        // v1.9.99：一律采用原始抽取结果，不再用 docProps/app.xml 的 Words 覆盖。
+        // 原逻辑有两个覆盖分支，都会按 ratio 等比缩放 fe/nc/chars：
+        //   ① metaWords > 0 && !hasVml                     -> outWords = metaWords
+        //   ② metaWords > 0 && rawWords > metaWords * 1.5  -> outWords = metaWords
+        // 这两个分支在中文文档上会严重偏低。实测 HQ6中文说明书.docx：
+        //   桌面版 wordcount.py（不依赖 Word）  5624 词 / 中文 4964 / 非中文 660
+        //   本引擎原始抽取                      5390 词 / 中文 4774 / 非中文 616
+        //   app.xml metaWords                   3385  <- 比前两者低 2000+ 词
+        // 因 5390 > 3385 * 1.5 = 5077，分支②被触发，把正确的 5390 钳成 3385，
+        // 手机端因此比桌面版少约 40%（截图 3385 / 中文 2998 / 非中文 386 与
+        // ratio=5390/3385=1.5923 的等比缩放结果完全吻合）。
+        // Word 写入 app.xml 的 Words 口径含页眉页脚脚注尾注、且其 CJK 计数与
+        // 桌面版 FarEast 正则并不一致，数值可能远高于也可能远低于正文实际字数，
+        // 不能当作正确值或上界使用。桌面版 wordcount.py 从不读取该元数据修正计数，
+        // 为与其逐字对齐，此处直接用原始抽取结果；若将来发现真的多算，应当修
+        // 解析器本身，而不是靠元数据钳制掩盖。
+        val outWords = rawWords
+        val outFe = rawFe
+        val outNc = rawNc
+        val outChars = rawChars
         val outPages = if (res.metaPages > 0) res.metaPages else res.pages
         val outReason = if (res.pagesReason.isNotBlank()) res.pagesReason else null
         val hiddenStats = res.hiddenSheets.map { (n, t) ->
