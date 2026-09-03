@@ -406,8 +406,8 @@ data class FileResult(
     //   docImageCount —— 阶段二提取到的内嵌图片张数（此阶段只提取不 OCR，避免拖慢字数显示）
     //   docImgDir     —— 图片落盘的临时目录（cacheDir/wc_docimg_*），供 OCR 与清理使用
     //   docImgWords/Fe/Nc/Chars —— 勾选后并行 OCR 出的字数，OCR 完成前恒为 0
-    //   docImgDone    —— 已 OCR 完成。桌面自 v1.8.98 起「统计即合计」：一经统计即计入底部
-    //                    合计，不受勾选状态影响（勾选框只控制『选择汇总』）
+    //   docImgDone    —— 已 OCR 完成。v1.9.116 起是否并入底部合计由「图」勾选框控制：
+    //                    勾选(=true)才并入，取消勾选同步扣减（选择框项统一「勾选才计入合计」）
     val docImageCount: Int = 0,
     val docImgDir: String? = null,
     val docImgWords: Int = 0,
@@ -737,10 +737,10 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
                     w += ns.words; fe += ns.fe; nc += ns.nc; ch += ns.chars
                 }
             }
-            // v1.9.111: 文档内嵌图片 OCR 出的字数计入合计。
-            // 与桌面 v1.8.98 起「统计即合计」同口径：一经 OCR 统计出来即计入底部合计，
-            // 不受勾选状态影响（勾选框只控制『选择汇总』），避免用户取消勾选后总数反而变小。
-            if (r.result!!.docImgDone) {
+            // v1.9.116: 文档内嵌图片 OCR 字数并入合计受「图」勾选框（${r.id}::docimg）控制：
+            // 勾选(=true)才并入，取消勾选同步扣减——与隐藏工作表/备注/CAD 拆分同一
+            // 「选择合计」语义（用户实测 v1.9.111-115 取消勾选合计不减少，判为错误交互而修复）。
+            if (r.result!!.docImgDone && hiddenSelected["${r.id}::docimg"] == true) {
                 w += r.result!!.docImgWords
                 fe += r.result!!.docImgFe
                 nc += r.result!!.docImgNc
@@ -1342,8 +1342,8 @@ fun FileCard(
             }
             // v1.9.111: 文档中图片字数（对齐桌面 v1.8.102 的 DOCIMG 行）。
             //   未 OCR：显示「共 N 张图片，勾选后识别」+ 选择框；
-            //   已 OCR：显示 OCR 出的字数（桌面 v1.8.98「统计即合计」，字数已并入底部合计，
-            //           取消勾选只影响『选择汇总』，不撤销已统计的字数）。
+            //   已 OCR：显示 OCR 出的字数；勾选状态同步控制底部合计（v1.9.116：
+            //           取消勾选后合计同步扣减——带选择框的统计项一律勾选才并入合计）。
             // docImageCount 是 v1.9.111 提取阶段得到的真实张数；老路径（无提取）退回 imageCount。
             val docImgN = entry.result?.docImageCount ?: 0
             val imgFallbackN = entry.result?.imageCount ?: 0
@@ -1450,7 +1450,7 @@ fun countTextKotlin(text: String): Quadruple<Int, Int, Int, Int> {
 // v1.9.111: 文档内嵌图片提取 + 并行 OCR
 // 对齐桌面 v1.8.102/1.8.103 的「文档中图片字数」可选统计：
 //   阶段二（统计收尾后）只提取落盘并计数，不 OCR，避免拖慢字数显示；
-//   用户在明细里勾选该行才并行 OCR，OCR 完成后字数并入合计（「统计即合计」）。
+//   用户在明细里勾选该行才并行 OCR，OCR 完成后字数并入合计；取消勾选则同步扣减（v1.9.116）。
 // ---------------------------------------------------------------------------
 
 private val DOC_IMG_EXTS = setOf(".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp")
@@ -1893,7 +1893,7 @@ fun ocrDocImagesParallel(
 /**
  * v1.9.111: 对某文件已提取（或现场提取）的内嵌图片并行 OCR，结果写回 result。
  * 写回必须在主线程（SnapshotStateList 只有主线程写入才触发 Compose 重组）。
- * 字数并入底部合计由 totals 里的 docImgDone 分支负责，与桌面「统计即合计」一致。
+ * 字数并入底部合计由 totals 的 docimg 勾选分支负责：勾选=并入、取消=扣减（v1.9.116）。
  */
 fun runDocImgOcr(
     context: android.content.Context,
