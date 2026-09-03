@@ -1533,6 +1533,9 @@ fun extractDocImages(context: android.content.Context, srcPath: String, ext: Str
             }
             try { wb.close() } catch (_: Throwable) {}
             try { fis.close() } catch (_: Throwable) {}
+        } else if (ex == ".doc") {
+            // v1.9.113: .doc 走 OLE 流魔数扫描（移植桌面 _extract_ole_images），口径以桌面为准
+            out.addAll(extractOleImages(context, srcPath))
         }
     } catch (e: Throwable) {
         Diag.w( "v1.9.111 提取内嵌图片失败 ${java.io.File(srcPath).name}: ${e.javaClass.simpleName}")
@@ -1634,6 +1637,220 @@ fun extractPdfImages(context: android.content.Context, srcPath: String): List<ja
     return out
 }
 
+/**
+ * v1.9.113: 旧版 OLE 容器（.doc）内嵌图片提取——移植桌面 _extract_ole_images。
+ * POIFSFileSystem 递归枚举全部流（等价 olefile.listdir），逐流跑 scanImageSignatures
+ * 魔数扫描（PNG/JPEG/GIF/BMP/TIFF/WebP，与桌面 _SIGS/_find_next_sig/_png_length/
+ * _scan_image_signatures 逐条一致），BitmapFactory bounds 校验 ≥48×48（等价 PIL
+ * 尺寸过滤；解不出尺寸的保留，等价桌面 PIL 打开失败 except: pass 保留）。
+ * EMF/WMF 矢量图元文件无签名，天然跳过（与桌面一致）。
+ * 不用 POI HWPF getAllPictures()：其按 Word Data 流结构解析，覆盖面窄于
+ * 桌面的全流魔数扫描，口径以桌面为准。
+ */
+fun extractOleImages(context: android.content.Context, srcPath: String): List<java.io.File> {
+    val out = mutableListOf<java.io.File>()
+    val outDir = java.io.File(context.cacheDir, "wc_oleimg_" + System.currentTimeMillis())
+    try { outDir.mkdirs() } catch (_: Throwable) { return emptyList() }
+    val fs: org.apache.poi.poifs.filesystem.POIFSFileSystem
+    try {
+        fs = org.apache.poi.poifs.filesystem.POIFSFileSystem(java.io.File(srcPath))
+    } catch (e: Throwable) {
+        Diag.w("v1.9.113 非 OLE 容器 " + java.io.File(srcPath).name + ": " + e.javaClass.simpleName)
+        try { outDir.deleteRecursively() } catch (_: Throwable) {}
+        return emptyList()
+    }
+    try {
+        val streamData = mutableListOf<ByteArray>()
+        collectOleStreams(fs.root, streamData)
+        var n = 0
+        for (data in streamData) {
+            if (data.size < 200) continue
+            for ((blob, hint) in scanImageSignatures(data)) {
+                // 尺寸过滤 ≥48×48（等价桌面 PIL）；解不出尺寸的保留（等价桌面 except: pass）
+                try {
+                    val opts = BitmapFactory.Options()
+                    opts.inJustDecodeBounds = true
+                    BitmapFactory.decodeByteArray(blob, 0, blob.size, opts)
+                    if (opts.outWidth > 0 && opts.outHeight > 0 &&
+                        (opts.outWidth < 48 || opts.outHeight < 48)) continue
+                } catch (_: Throwable) {}
+                n++
+                val f = java.io.File(outDir, "ole_" + n + "." + hint)
+                try {
+                    FileOutputStream(f).use { fo -> fo.write(blob) }
+                    if (f.length() > 0) out.add(f) else f.delete()
+                } catch (_: Throwable) {
+                    try { f.delete() } catch (_: Throwable) {}
+                }
+            }
+        }
+    } catch (e: Throwable) {
+        Diag.w("v1.9.113 提取 OLE 内嵌图片失败 " + java.io.File(srcPath).name + ": " + e.javaClass.simpleName)
+    } finally {
+        try { fs.close() } catch (_: Throwable) {}
+    }
+    if (out.isEmpty()) { try { outDir.deleteRecursively() } catch (_: Throwable) {} }
+    return out
+}
+
+/** v1.9.113: 递归收集 OLE 全部数据流（等价 olefile.listdir 的全量流枚举）。 */
+private fun collectOleStreams(
+    dir: org.apache.poi.poifs.filesystem.DirectoryEntry,
+    out: MutableList<ByteArray>
+) {
+    val it2 = dir.entries
+    while (it2.hasNext()) {
+        val en = it2.next()
+        if (en is org.apache.poi.poifs.filesystem.DirectoryEntry) {
+            collectOleStreams(en, out)
+        } else if (en is org.apache.poi.poifs.filesystem.DocumentEntry) {
+            try {
+                val inp = org.apache.poi.poifs.filesystem.DocumentInputStream(en)
+                val bytes = ByteArray(en.size.toInt().coerceAtLeast(0))
+                var off = 0
+                while (off < bytes.size) {
+                    val r = inp.read(bytes, off, bytes.size - off)
+                    if (r < 0) break
+                    off += r
+                }
+                inp.close()
+                if (off > 0) out.add(if (off == bytes.size) bytes else bytes.copyOf(off))
+            } catch (_: Throwable) {}
+        }
+    }
+}
+
+// ── v1.9.113: OLE 流内嵌图片魔数扫描（逐条移植桌面 _SIGS/_find_next_sig/_png_length/_scan_image_signatures）──
+
+private val OLE_SIG_PNG = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
+private val OLE_SIG_JPG = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte())
+private val OLE_SIG_GIF87A = byteArrayOf(0x47, 0x49, 0x46, 0x38, 0x37, 0x61)
+private val OLE_SIG_GIF89A = byteArrayOf(0x47, 0x49, 0x46, 0x38, 0x39, 0x61)
+private val OLE_SIG_BM = byteArrayOf(0x42, 0x4D)
+private val OLE_SIG_TIFF_II = byteArrayOf(0x49, 0x49, 0x2A, 0x00)
+private val OLE_SIG_TIFF_MM = byteArrayOf(0x4D, 0x4D, 0x00, 0x2A)
+private val OLE_SIG_RIFF = byteArrayOf(0x52, 0x49, 0x46, 0x46)
+
+private val OLE_SIGS = listOf(
+    OLE_SIG_PNG, OLE_SIG_JPG, OLE_SIG_GIF87A, OLE_SIG_GIF89A,
+    OLE_SIG_BM, OLE_SIG_TIFF_II, OLE_SIG_TIFF_MM, OLE_SIG_RIFF)
+
+private fun oleStartsWith(data: ByteArray, off: Int, sig: ByteArray): Boolean {
+    if (off + sig.size > data.size) return false
+    for (k in sig.indices) if (data[off + k] != sig[k]) return false
+    return true
+}
+
+private fun oleIndexOfByte(data: ByteArray, b: Byte, from: Int): Int {
+    var j = from
+    while (j < data.size) { if (data[j] == b) return j; j++ }
+    return -1
+}
+
+private fun oleIndexOf2(data: ByteArray, b0: Byte, b1: Byte, from: Int): Int {
+    var j = from
+    while (j + 1 < data.size) { if (data[j] == b0 && data[j + 1] == b1) return j; j++ }
+    return -1
+}
+
+private fun oleFindNextSig(data: ByteArray, start: Int): Int {
+    val n = data.size
+    var j = start
+    while (j < n - 4) {
+        for (s in OLE_SIGS) if (oleStartsWith(data, j, s)) return j
+        j++
+    }
+    return -1
+}
+
+/** 从 PNG 签名位置 i 解析整张 PNG 字节长度（遍历 chunk 到 IEND）。溢出安全版。 */
+private fun olePngLength(data: ByteArray, i: Int): Int? {
+    val n = data.size
+    var pos = i + 8
+    var total = 8
+    while (pos + 8 <= n) {
+        val clen = ((data[pos].toInt() and 0xFF).toLong() shl 24) or
+            ((data[pos + 1].toInt() and 0xFF).toLong() shl 16) or
+            ((data[pos + 2].toInt() and 0xFF).toLong() shl 8) or
+            (data[pos + 3].toInt() and 0xFF).toLong()
+        val isIEND = data[pos + 4] == 0x49.toByte() && data[pos + 5] == 0x45.toByte() &&
+            data[pos + 6] == 0x4E.toByte() && data[pos + 7] == 0x44.toByte()
+        if (clen + 12 > n) return null
+        total += (12 + clen).toInt()
+        pos += (12 + clen).toInt()
+        if (isIEND) break
+        if (pos > n) return null
+    }
+    return if (i + total <= n) total else null
+}
+
+/** 在字节流里扫描并抽取内嵌图片（PNG/JPEG/GIF/BMP/TIFF/WebP），与桌面逐条一致。 */
+private fun scanImageSignatures(data: ByteArray): List<Pair<ByteArray, String>> {
+    val out = mutableListOf<Pair<ByteArray, String>>()
+    val n = data.size
+    var i = 0
+    while (i < n) {
+        if (oleStartsWith(data, i, OLE_SIG_PNG)) {
+            val l = olePngLength(data, i)
+            if (l != null && i + l <= n) {
+                out.add(Pair(data.copyOfRange(i, i + l), "png"))
+                i += l
+                continue
+            }
+        }
+        if (oleStartsWith(data, i, OLE_SIG_JPG)) {
+            val e = oleIndexOf2(data, 0xFF.toByte(), 0xD9.toByte(), i + 3)
+            if (e != -1) {
+                out.add(Pair(data.copyOfRange(i, e + 2), "jpg"))
+                i = e + 2
+                continue
+            }
+        }
+        if (oleStartsWith(data, i, OLE_SIG_GIF87A) || oleStartsWith(data, i, OLE_SIG_GIF89A)) {
+            val e = oleIndexOfByte(data, 0x3B, i + 6)
+            if (e != -1) {
+                out.add(Pair(data.copyOfRange(i, e + 1), "gif"))
+                i = e + 1
+                continue
+            }
+        }
+        if (oleStartsWith(data, i, OLE_SIG_BM) && i + 6 <= n) {
+            val sz = ((data[i + 2].toInt() and 0xFF).toLong()) or
+                ((data[i + 3].toInt() and 0xFF).toLong() shl 8) or
+                ((data[i + 4].toInt() and 0xFF).toLong() shl 16) or
+                ((data[i + 5].toInt() and 0xFF).toLong() shl 24)
+            if (sz >= 54 && i.toLong() + sz <= n) {
+                out.add(Pair(data.copyOfRange(i, i + sz.toInt()), "bmp"))
+                i += sz.toInt()
+                continue
+            }
+        }
+        if (oleStartsWith(data, i, OLE_SIG_TIFF_II) || oleStartsWith(data, i, OLE_SIG_TIFF_MM)) {
+            // TIFF 无结束标记：切到下一个图片签名或流末尾
+            var ns = oleFindNextSig(data, i + 4)
+            if (ns == -1) ns = n
+            out.add(Pair(data.copyOfRange(i, ns), "tif"))
+            i = ns
+            continue
+        }
+        if (oleStartsWith(data, i, OLE_SIG_RIFF) && i + 12 <= n &&
+            data[i + 8] == 0x57.toByte() && data[i + 9] == 0x45.toByte() &&
+            data[i + 10] == 0x42.toByte() && data[i + 11] == 0x50.toByte()) {
+            val sz = ((data[i + 4].toInt() and 0xFF).toLong()) or
+                ((data[i + 5].toInt() and 0xFF).toLong() shl 8) or
+                ((data[i + 6].toInt() and 0xFF).toLong() shl 16) or
+                ((data[i + 7].toInt() and 0xFF).toLong() shl 24)
+            if (i + 8L + sz <= n) {
+                out.add(Pair(data.copyOfRange(i, i + 8 + sz.toInt()), "webp"))
+                i += 8 + sz.toInt()
+                continue
+            }
+        }
+        i++
+    }
+    return out
+}
+
 /** v1.9.111: 文档内嵌图片并行 OCR 线程池（对齐桌面 _DaemonThreadPoolExecutor(4, "docimgocr")）。 */
 private val docImgPool: java.util.concurrent.ExecutorService by lazy {
     java.util.concurrent.Executors.newFixedThreadPool(4) { r ->
@@ -1732,7 +1949,8 @@ private suspend fun prepareDocImages(
 ) {
     // v1.9.112: .pdf 不进自动提取集合（pdfminer 全 layout 解析慢会拖长统计收尾），
     // PDF 的图片行由 runDocImgOcr 在用户勾选时按需提取（extractPdfImages）。
-    val supported = setOf(".docx", ".xlsx", ".pptx", ".ppt", ".xls")
+    // v1.9.113: .doc 走 OLE 流枚举 + 魔数扫描（快），纳入自动提取集合。
+    val supported = setOf(".docx", ".xlsx", ".pptx", ".ppt", ".xls", ".doc")
     for (i in entries.indices) {
         val e = entries[i]
         val r = e.result
