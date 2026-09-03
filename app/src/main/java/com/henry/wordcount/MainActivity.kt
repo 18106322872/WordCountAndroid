@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -642,8 +643,9 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
     //   wordcount_prefs.complete_ringtone（空=系统默认），统计完成时 CountingService 读取并播放。
     val ringtonePicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
         if (res.resultCode == android.app.Activity.RESULT_OK) {
-            val uri = res.data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKER_URI, android.net.Uri::class.java)
-            val sp = getSharedPreferences("wordcount_prefs", Context.MODE_PRIVATE)
+            val uri = res.data?.getParcelableExtra<android.net.Uri>("android.intent.extra.ringtone.PICKER_URI")
+                ?: res.data?.getParcelableExtra<android.net.Uri>("android.intent.extra.ringtone.PICKED_URI")
+            val sp = context.getSharedPreferences("wordcount_prefs", Context.MODE_PRIVATE)
             val label = if (uri != null) {
                 sp.edit().putString("complete_ringtone", uri.toString()).apply()
                 try { RingtoneManager.getRingtone(context, uri)?.getTitle(context) ?: uri.toString() } catch (_: Throwable) { uri.toString() }
@@ -844,7 +846,7 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
                             text = { Text("统计完成铃声") },
                             onClick = {
                                 expanded = false
-                                val sp = getSharedPreferences("wordcount_prefs", Context.MODE_PRIVATE)
+                                val sp = context.getSharedPreferences("wordcount_prefs", Context.MODE_PRIVATE)
                                 val cur = sp.getString("complete_ringtone", "")?.let { if (it.isEmpty()) null else android.net.Uri.parse(it) }
                                 val intent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
                                     putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_NOTIFICATION)
@@ -852,7 +854,7 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
                                     putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, true)
                                     putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
                                     putExtra(RingtoneManager.EXTRA_RINGTONE_DEFAULT_URI, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION))
-                                    putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, cur)
+                                    putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, cur as android.os.Parcelable?)
                                 }
                                 ringtonePicker.launch(intent)
                             },
