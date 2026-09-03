@@ -129,7 +129,8 @@ object OldOfficeEngine {
 
     /**
      * v1.3.3: .xls 逐工作表抽取（含隐藏表）。
-     * 可见表文本计入文件默认字数；隐藏表（isSheetHidden）单独返回，默认不计入合计，
+     * v1.9.115: 隐藏表判断补 veryHidden——hiddenFlag = isSheetHidden || isSheetVeryHidden，
+     * 与桌面 xlrd visibility==0 判可见口径对齐（state=1/2 均归隐藏表明细，默认不计入合计）。
      * 由 UI 以「红隐 + 勾选框」呈现，用户勾选后才并入合计。
      * 文本框 + 自选图形文字（HSSFSimpleShape）按 sheet 的 drawingPatriarch 归属，避免隐藏表文字污染默认合计。
      */
@@ -149,7 +150,7 @@ object OldOfficeEngine {
             for (i in 0 until wb.numberOfSheets) {
                 val sheet = wb.getSheetAt(i) ?: continue
                 val name = wb.getSheetName(i)
-                val hiddenFlag = wb.isSheetHidden(i)
+                val hiddenFlag = wb.isSheetHidden(i) || wb.isSheetVeryHidden(i)
                 val sb = StringBuilder()
                 // 单元格文本（不再插入 [工作表:名] 标签）
                 for (row in sheet) {
