@@ -402,6 +402,19 @@ data class FileResult(
     val needsPdf: Boolean = false,
     // v1.5.61: CAD 文字/纯编号拆分（仅 DWG 文件可能非空）
     val cadParts: CadPartStats? = null,
+    // v1.9.111: 文档内嵌图片可选统计（对齐桌面 v1.8.102/1.8.103「文档中图片字数」行）
+    //   docImageCount —— 阶段二提取到的内嵌图片张数（此阶段只提取不 OCR，避免拖慢字数显示）
+    //   docImgDir     —— 图片落盘的临时目录（cacheDir/wc_docimg_*），供 OCR 与清理使用
+    //   docImgWords/Fe/Nc/Chars —— 勾选后并行 OCR 出的字数，OCR 完成前恒为 0
+    //   docImgDone    —— 已 OCR 完成。桌面自 v1.8.98 起「统计即合计」：一经统计即计入底部
+    //                    合计，不受勾选状态影响（勾选框只控制『选择汇总』）
+    val docImageCount: Int = 0,
+    val docImgDir: String? = null,
+    val docImgWords: Int = 0,
+    val docImgFe: Int = 0,
+    val docImgNc: Int = 0,
+    val docImgChars: Int = 0,
+    val docImgDone: Boolean = false,
 )
 
 data class FileEntry(
@@ -724,6 +737,15 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
                     w += ns.words; fe += ns.fe; nc += ns.nc; ch += ns.chars
                 }
             }
+            // v1.9.111: 文档内嵌图片 OCR 出的字数计入合计。
+            // 与桌面 v1.8.98 起「统计即合计」同口径：一经 OCR 统计出来即计入底部合计，
+            // 不受勾选状态影响（勾选框只控制『选择汇总』），避免用户取消勾选后总数反而变小。
+            if (r.result!!.docImgDone) {
+                w += r.result!!.docImgWords
+                fe += r.result!!.docImgFe
+                nc += r.result!!.docImgNc
+                ch += r.result!!.docImgChars
+            }
         }
         mapOf("words" to w, "fe" to fe, "nc" to nc, "chars" to ch, "pages" to pg, "pendingPdf" to pendingPdf)
     }
@@ -935,6 +957,10 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
                             onToggleInner = { id, index ->
                                 val k = "$id::inner::$index"
                                 hiddenSelected[k] = !(hiddenSelected[k] ?: true)
+                            },
+                            // v1.9.111: 勾选「文档中图片字数」→ IO 线程并行 OCR 内嵌图片
+                            onOcrDocImages = { e ->
+                                scope.launch(Dispatchers.IO) { runDocImgOcr(context, entries, e.id) }
                             }
                         )
                     }
@@ -1080,7 +1106,9 @@ fun FileCard(
     hiddenSelected: MutableMap<String, Boolean>,
     onToggleHidden: (String, String) -> Unit,
     // v1.5.81: 压缩包内层文件勾选
-    onToggleInner: (String, Int) -> Unit
+    onToggleInner: (String, Int) -> Unit,
+    // v1.9.111: 勾选「文档中图片字数」时触发内嵌图片并行 OCR
+    onOcrDocImages: (FileEntry) -> Unit = { }
 ) {
     val expanded = remember { mutableStateOf(false) }
 
@@ -1167,7 +1195,8 @@ fun FileCard(
                             (r.hiddenSheets?.size ?: 0) +
                             (if (r.notesSlides?.isNotEmpty() == true) 1 else 0) +
                             (if (r.cadParts != null) 2 else 0) +
-                            if (r.imageCount > 0) 1 else 0
+                            // v1.9.111: 内嵌图片行（docImageCount 为提取阶段真实张数，老路径退回 imageCount）
+                            if (r.docImageCount > 0 || r.imageCount > 0) 1 else 0
                         if (detailCount > 0) {
                             Text(
                                 if (expanded.value) "▲ 收起明细" else "▶ 展开${detailCount}项明细",
@@ -1311,14 +1340,31 @@ fun FileCard(
                     Text("字 ${cadParts.codeWords} 中 ${cadParts.codeFe} 非 ${cadParts.codeNc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
             }
-            // v1.3.32/v1.3.34: PPT 嵌入图片（红"图" + 张数），页数列显示张数，字数列显示"—"
-            if ((entry.result?.imageCount ?: 0) > 0) {
+            // v1.9.111: 文档中图片字数（对齐桌面 v1.8.102 的 DOCIMG 行）。
+            //   未 OCR：显示「共 N 张图片，勾选后识别」+ 选择框；
+            //   已 OCR：显示 OCR 出的字数（桌面 v1.8.98「统计即合计」，字数已并入底部合计，
+            //           取消勾选只影响『选择汇总』，不撤销已统计的字数）。
+            // docImageCount 是 v1.9.111 提取阶段得到的真实张数；老路径（无提取）退回 imageCount。
+            val docImgN = entry.result?.docImageCount ?: 0
+            val imgFallbackN = entry.result?.imageCount ?: 0
+            if (docImgN > 0 || imgFallbackN > 0) {
+                val r2 = entry.result
+                val shown = if (docImgN > 0) docImgN else imgFallbackN
+                val imgKey = "${entry.id}::docimg"
+                val imgChecked = hiddenSelected[imgKey] ?: false
                 Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("图", style = MaterialTheme.typography.labelSmall, color = Color(0xFFB00020))
-                    Text("嵌入图片", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                    Text("—", style = MaterialTheme.typography.bodySmall, color = Color.Gray,
-                        modifier = Modifier.padding(end = 8.dp))
-                    Text("${entry.result!!.imageCount} 张", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    Checkbox(checked = imgChecked, onCheckedChange = {
+                        hiddenSelected[imgKey] = !(hiddenSelected[imgKey] ?: false)
+                        if (r2 != null && !r2.docImgDone) onOcrDocImages(entry)
+                    }, modifier = Modifier.size(24.dp))
+                    if (r2 != null && r2.docImgDone) {
+                        Text("文档中图片字数（$shown 张）", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                        Text("字 ${r2.docImgWords} 中 ${r2.docImgFe} 非 ${r2.docImgNc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    } else {
+                        Text("文档中图片字数（$shown 张，勾选后识别）", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                        Text("—", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    }
                 }
             }
             // v1.9.58: PDF/DWG 完整诊断（含决策路径）放到展开明细末尾，便于复制发开发者定位。
@@ -1395,6 +1441,217 @@ fun countTextKotlin(text: String): Quadruple<Int, Int, Int, Int> {
 
     val words = totalFe + totalNc
     return Quadruple(words, totalFe, totalNc, totalChars)
+}
+
+// ---------------------------------------------------------------------------
+// v1.9.111: 文档内嵌图片提取 + 并行 OCR
+// 对齐桌面 v1.8.102/1.8.103 的「文档中图片字数」可选统计：
+//   阶段二（统计收尾后）只提取落盘并计数，不 OCR，避免拖慢字数显示；
+//   用户在明细里勾选该行才并行 OCR，OCR 完成后字数并入合计（「统计即合计」）。
+// ---------------------------------------------------------------------------
+
+private val DOC_IMG_EXTS = setOf(".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp")
+
+/** 按图片数据魔数判断真实格式（v1.3.38：不依赖 POI 枚举命名；EMF/WMF 矢量无法 OCR 故跳过）。 */
+private fun docImgExtOf(data: ByteArray): String? {
+    if (data.size >= 3 && data[0] == 0xFF.toByte() && data[1] == 0xD8.toByte() && data[2] == 0xFF.toByte()) return "jpg"
+    if (data.size >= 4 && data[0] == 0x89.toByte() && data[1] == 0x50.toByte() && data[2] == 0x4E.toByte() && data[3] == 0x47.toByte()) return "png"
+    if (data.size >= 6 && (data[0] == 0x47.toByte() && data[1] == 0x49.toByte() && data[2] == 0x46.toByte())) return "gif"
+    if (data.size >= 2 && data[0] == 0x42.toByte() && data[1] == 0x4D.toByte()) return "bmp"
+    if (data.size >= 12 && data[0] == 0x52.toByte() && data[1] == 0x49.toByte() && data[2] == 0x46.toByte() && data[3] == 0x46.toByte()) return "webp"
+    return null
+}
+
+/**
+ * 提取 Office 文档内嵌图片，落盘到 cacheDir 下的 wc_docimg_ 临时目录。
+ * 三条路径与「导出未统计图片」完全同源（v1.3.38 OOXML ZIP / v1.3.40 .ppt HSLF /
+ * v1.3.44 .xls HSSF），保证「能导出的图」与「能 OCR 的图」是同一批。
+ */
+fun extractDocImages(context: android.content.Context, srcPath: String, ext: String): List<java.io.File> {
+    val ex = ext.lowercase()
+    val out = mutableListOf<java.io.File>()
+    val outDir = java.io.File(context.cacheDir, "wc_docimg_${System.currentTimeMillis()}_${ex.trimStart('.').ifEmpty { "bin" }}")
+    try { outDir.mkdirs() } catch (_: Throwable) { return emptyList() }
+    try {
+        if (ex == ".docx" || ex == ".xlsx" || ex == ".pptx") {
+            val zip = java.util.zip.ZipFile(srcPath)
+            val zes = java.util.Collections.list(zip.entries())
+                .filter { ze ->
+                    val nm = ze.name.lowercase()
+                    !nm.endsWith("/") &&
+                        (nm.startsWith("word/media/") || nm.startsWith("xl/media/") ||
+                            nm.startsWith("ppt/media/") || "/media/" in nm) &&
+                        DOC_IMG_EXTS.any { nm.endsWith(it) }
+                }
+                .sortedBy { it.name }
+            var n = 0
+            for (ze in zes) {
+                n++
+                val f = java.io.File(outDir, "img_$n.${ze.name.substringAfterLast('.').lowercase()}")
+                try {
+                    zip.getInputStream(ze).use { inp -> f.outputStream().use { o -> inp.copyTo(o) } }
+                    if (f.length() > 0) out.add(f) else f.delete()
+                } catch (_: Throwable) { try { f.delete() } catch (_: Throwable) {} }
+            }
+            try { zip.close() } catch (_: Throwable) {}
+        } else if (ex == ".ppt") {
+            val fis = java.io.FileInputStream(srcPath)
+            val ppt = org.apache.poi.hslf.usermodel.HSLFSlideShow(fis)
+            var n = 0
+            for (pd in ppt.pictureData) {
+                val data = pd.data
+                if (data == null) continue
+                val e2 = docImgExtOf(data)
+                if (e2 == null) continue
+                n++
+                val f = java.io.File(outDir, "img_$n.$e2")
+                try {
+                    f.outputStream().use { it.write(data) }
+                    if (f.length() > 0) out.add(f) else f.delete()
+                } catch (_: Throwable) { try { f.delete() } catch (_: Throwable) {} }
+            }
+            try { ppt.close() } catch (_: Throwable) {}
+            try { fis.close() } catch (_: Throwable) {}
+        } else if (ex == ".xls") {
+            val fis = java.io.FileInputStream(srcPath)
+            val wb = org.apache.poi.hssf.usermodel.HSSFWorkbook(fis)
+            var n = 0
+            for (pic in wb.allPictures) {
+                val data = pic.data
+                if (data == null) continue
+                val e2 = docImgExtOf(data)
+                if (e2 == null) continue
+                n++
+                val f = java.io.File(outDir, "img_$n.$e2")
+                try {
+                    f.outputStream().use { it.write(data) }
+                    if (f.length() > 0) out.add(f) else f.delete()
+                } catch (_: Throwable) { try { f.delete() } catch (_: Throwable) {} }
+            }
+            try { wb.close() } catch (_: Throwable) {}
+            try { fis.close() } catch (_: Throwable) {}
+        }
+    } catch (e: Throwable) {
+        Diag.w( "v1.9.111 提取内嵌图片失败 ${java.io.File(srcPath).name}: ${e.javaClass.simpleName}")
+    }
+    if (out.isEmpty()) { try { outDir.deleteRecursively() } catch (_: Throwable) {} }
+    return out
+}
+
+/** v1.9.111: 文档内嵌图片并行 OCR 线程池（对齐桌面 _DaemonThreadPoolExecutor(4, "docimgocr")）。 */
+private val docImgPool: java.util.concurrent.ExecutorService by lazy {
+    java.util.concurrent.Executors.newFixedThreadPool(4) { r ->
+        Thread(r, "docimgocr").apply { isDaemon = true }
+    }
+}
+
+/**
+ * 并行 OCR 一批图片，返回合并文本。
+ * 各图之间用空行分隔——与桌面逐图独立提交 count_items 的口径一致（图片之间不粘连成词）。
+ * 桌面 v1.8.102 的关键优化：OCR 直接在池 worker 线程内执行（不每张另建临时线程），
+ * 引擎随 worker 常驻复用；ML Kit 本身线程安全，这里等价获得同款复用收益。
+ */
+fun ocrDocImagesParallel(
+    context: android.content.Context,
+    images: List<java.io.File>,
+    onProgress: ((done: Int, total: Int) -> Unit)? = null
+): String {
+    if (images.isEmpty()) return ""
+    val total = images.size
+    val slots = arrayOfNulls<String>(total)
+    val done = java.util.concurrent.atomic.AtomicInteger(0)
+    val lock = Any()
+    val futures = images.mapIndexed { idx, f ->
+        // 显式 Runnable：ExecutorService.submit 有 Callable/Runnable 两个重载，
+        // 裸 lambda 会触发 Kotlin 重载歧义（Overload resolution ambiguity）编译错误。
+        docImgPool.submit(java.lang.Runnable {
+            val t = try { OcrEngine.recognize(context, f) } catch (_: Throwable) { "" }
+            synchronized(lock) { slots[idx] = t }
+            val d = done.incrementAndGet()
+            try { onProgress?.invoke(d, total) } catch (_: Throwable) {}
+        })
+    }
+    for (fu in futures) {
+        try { fu.get(90, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Throwable) { }
+    }
+    return slots.filter { !it.isNullOrBlank() }.joinToString("\n\n")
+}
+
+/**
+ * v1.9.111: 对某文件已提取（或现场提取）的内嵌图片并行 OCR，结果写回 result。
+ * 写回必须在主线程（SnapshotStateList 只有主线程写入才触发 Compose 重组）。
+ * 字数并入底部合计由 totals 里的 docImgDone 分支负责，与桌面「统计即合计」一致。
+ */
+fun runDocImgOcr(
+    context: android.content.Context,
+    entries: androidx.compose.runtime.snapshots.SnapshotStateList<FileEntry>,
+    id: String
+) {
+    val idx = entries.indexOfFirst { it.id == id }
+    if (idx < 0) return
+    val e0 = entries[idx]
+    val r0 = e0.result
+    if (r0 == null || r0.docImgDone) return
+    val dir = r0.docImgDir
+    var imgs: List<java.io.File> = emptyList()
+    if (dir != null) {
+        imgs = (java.io.File(dir).listFiles()?.toList() ?: emptyList())
+            .filter { f -> f.isFile && f.length() > 0 && DOC_IMG_EXTS.any { f.name.lowercase().endsWith(it) } }
+            .sortedBy { it.name }
+    }
+    if (imgs.isEmpty()) imgs = extractDocImages(context, e0.cachePath, r0.ext)
+    if (imgs.isEmpty()) return
+    val text = ocrDocImagesParallel(context, imgs)
+    val st = countTextKotlin(text)
+    android.os.Handler(android.os.Looper.getMainLooper()).post {
+        val i2 = entries.indexOfFirst { x -> x.id == id }
+        if (i2 < 0) return@post
+        val e2 = entries[i2]
+        val r2 = e2.result
+        if (r2 == null) return@post
+        entries[i2] = e2.copy(result = r2.copy(
+            docImageCount = imgs.size,
+            docImgDir = imgs.firstOrNull()?.parent,
+            docImgWords = st.first,
+            docImgFe = st.second,
+            docImgNc = st.third,
+            docImgChars = st.fourth,
+            docImgDone = true
+        ))
+    }
+}
+
+/**
+ * v1.9.111（对齐桌面 _docimg_count_worker）：批量统计收尾后，后台逐个提取 Office 内嵌图片，
+ * **只提取计数、不 OCR**——OCR 由用户在明细里勾选后触发。放在文字统计之后执行，
+ * 避免拖慢字数显示。提取失败的条目静默跳过（不影响已有字数）。
+ */
+private suspend fun prepareDocImages(
+    context: android.content.Context,
+    entries: androidx.compose.runtime.snapshots.SnapshotStateList<FileEntry>
+) {
+    val supported = setOf(".docx", ".xlsx", ".pptx", ".ppt", ".xls")
+    for (i in entries.indices) {
+        val e = entries[i]
+        val r = e.result
+        if (r == null || r.isArchive) continue
+        if (r.ext.lowercase() !in supported) continue
+        val imgs = try {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                extractDocImages(context, e.cachePath, r.ext)
+            }
+        } catch (_: Throwable) { emptyList() }
+        if (imgs.isEmpty()) continue
+        val dir = imgs.firstOrNull()?.parent
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+            if (i < entries.size && entries[i].id == e.id) {
+                val cur = entries[i].result
+                if (cur != null) {
+                    entries[i] = e.copy(result = cur.copy(docImageCount = imgs.size, docImgDir = dir))
+                }
+            }
+        }
+    }
 }
 
 /**
@@ -2697,13 +2954,17 @@ private fun finalizeBatch(
     context: android.content.Context,
     heartbeatJob: kotlinx.coroutines.Job,
     busySet: (Boolean) -> Unit,
-    onProgress: ((String, Int, Int) -> Unit)?
+    onProgress: ((String, Int, Int) -> Unit)?,
+    // v1.9.111: 文字统计收尾后的「内嵌图片提取」阶段（只提取计数、不 OCR）。
+    // 与桌面 _docimg_count_worker 同策略：放在文字统计之后，不拖慢字数显示。
+    onDone: (() -> Unit)? = null
 ) {
     try { heartbeatJob.cancel() } catch (_: Throwable) {}
     busySet(false)
     onProgress?.invoke("", 0, 0)
     WordCountForegroundService.stop(context)
     DwgIsolatedRunner.stopIsolated(context)
+    try { onDone?.invoke() } catch (_: Throwable) {}
 }
 
 private fun addFiles(
@@ -2749,6 +3010,12 @@ private fun addFiles(
         }
         logStatsLine(context, "BATCH_START files=${uris.size}", 0, 0)
 
+        // v1.9.111: 文字统计收尾后启动「内嵌图片提取」阶段（只提取落盘 + 计数，不 OCR）。
+        // 用 IO 线程跑，条目写回再切回主线程（SnapshotStateList 主线程写才触发重组）。
+        val docImgPhase: () -> Unit = {
+            scope.launch(Dispatchers.IO) { prepareDocImages(context, entries) }
+        }
+
         val runInline: suspend () -> Unit = {
             try { PythonEngine.start(context) } catch (_: Throwable) {}
             val cf = uris.map { copyUriToCache(context, it) }
@@ -2761,7 +3028,7 @@ private fun addFiles(
                     if (idx >= 0) entries[idx] = e else entries.add(e)
                 } },
                 onError = { msg -> scope.launch { snackbar.showSnackbar(msg) } })
-            finalizeBatch(context, heartbeatJob, busySet, mainProgress)
+            finalizeBatch(context, heartbeatJob, busySet, mainProgress, onDone = docImgPhase)
         }
 
         try {
@@ -2787,11 +3054,11 @@ private fun addFiles(
                         if (recoverResults(context, sink, mainProgress)) done = true
                     }
                     if (done) {
-                        finalizeBatch(context, heartbeatJob, busySet, mainProgress)
+                        finalizeBatch(context, heartbeatJob, busySet, mainProgress, onDone = docImgPhase)
                     } else {
                         Diag.w( "统计看门狗超时，强制收尾并恢复已产出结果")
                         recoverResults(context, sink, mainProgress)
-                        finalizeBatch(context, heartbeatJob, busySet, mainProgress)
+                        finalizeBatch(context, heartbeatJob, busySet, mainProgress, onDone = docImgPhase)
                     }
                 }
             }
