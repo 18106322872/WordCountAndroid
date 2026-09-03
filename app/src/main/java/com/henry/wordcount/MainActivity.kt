@@ -1347,9 +1347,12 @@ fun FileCard(
             // docImageCount 是 v1.9.111 提取阶段得到的真实张数；老路径（无提取）退回 imageCount。
             val docImgN = entry.result?.docImageCount ?: 0
             val imgFallbackN = entry.result?.imageCount ?: 0
-            if (docImgN > 0 || imgFallbackN > 0) {
+            // v1.9.112: .pdf 也显示该行（勾选时才按需提取计数，未提取时张数未知则不显示 N）
+            val isPdfDocImg = entry.result?.ext?.lowercase() == ".pdf"
+            if (docImgN > 0 || imgFallbackN > 0 || isPdfDocImg) {
                 val r2 = entry.result
                 val shown = if (docImgN > 0) docImgN else imgFallbackN
+                val cntPart = if (shown > 0) "（$shown 张" else "（"
                 val imgKey = "${entry.id}::docimg"
                 val imgChecked = hiddenSelected[imgKey] ?: false
                 Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1359,10 +1362,10 @@ fun FileCard(
                         if (r2 != null && !r2.docImgDone) onOcrDocImages(entry)
                     }, modifier = Modifier.size(24.dp))
                     if (r2 != null && r2.docImgDone) {
-                        Text("文档中图片字数（$shown 张）", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                        Text("文档中图片字数$cntPart）", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                         Text("字 ${r2.docImgWords} 中 ${r2.docImgFe} 非 ${r2.docImgNc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                     } else {
-                        Text("文档中图片字数（$shown 张，勾选后识别）", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                        Text("文档中图片字数$cntPart，勾选后识别）", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                         Text("—", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                     }
                 }
@@ -1538,6 +1541,99 @@ fun extractDocImages(context: android.content.Context, srcPath: String, ext: Str
     return out
 }
 
+/**
+ * v1.9.112: 提取 PDF 内嵌图片（对齐桌面 _extract_pdf_images）。
+ * bbox 由捆绑 wordcount.py 的 _pdf_image_boxes_json 提供（pdfminer LTImage +
+ * eps=5 聚类 + 桌面同款四重过滤，坐标已翻转为顶左原点）；渲染交给系统 PdfRenderer：
+ * 每页 2x Bitmap（对齐桌面 Matrix(2,2)），按 bbox + 3pt margin 裁剪存 PNG。
+ * pdfminer 报告页尺寸与 renderer 不一致（旋转页等边界情况）的页整页跳过，
+ * 避免裁出垃圾图。pdfminer 全 layout 解析较慢，故只在用户勾选「文档中图片字数」
+ * 时按需执行，不进自动提取阶段（prepareDocImages 不含 .pdf）。
+ */
+fun extractPdfImages(context: android.content.Context, srcPath: String): List<java.io.File> {
+    val out = mutableListOf<java.io.File>()
+    val outDir = java.io.File(context.cacheDir, "wc_pdfimg_" + System.currentTimeMillis())
+    try { outDir.mkdirs() } catch (_: Throwable) { return emptyList() }
+    var fd: ParcelFileDescriptor? = null
+    var renderer: PdfRenderer? = null
+    try {
+        val py = com.chaquo.python.Python.getInstance()
+        val js = py.getModule("wordcount").callAttr("_pdf_image_boxes_json", srcPath).toString()
+        val root = org.json.JSONObject(js)
+        val pagesObj = root.optJSONObject("pages")
+        val arr = root.optJSONArray("boxes")
+        if (arr == null || arr.length() == 0) throw IllegalStateException("no boxes")
+        val byPage = java.util.TreeMap<Int, MutableList<Int>>()
+        val coords = mutableListOf<DoubleArray>()
+        var boxIdx = 0
+        for (i in 0 until arr.length()) {
+            val b = arr.optJSONArray(i) ?: continue
+            if (b.length() < 5) continue
+            val p = b.optInt(0, 0)
+            if (p < 1) continue
+            byPage.getOrPut(p) { mutableListOf() }.add(boxIdx)
+            coords.add(doubleArrayOf(b.optDouble(1), b.optDouble(2), b.optDouble(3), b.optDouble(4)))
+            boxIdx++
+        }
+        fd = ParcelFileDescriptor.open(java.io.File(srcPath), ParcelFileDescriptor.MODE_READ_ONLY)
+        renderer = PdfRenderer(fd)
+        for ((pno, keys) in byPage) {
+            if (pno > renderer.pageCount) continue
+            val page = try { renderer.openPage(pno - 1) } catch (_: Throwable) { continue }
+            try {
+                val pw = page.width.toFloat()
+                val ph = page.height.toFloat()
+                if (pw <= 0f || ph <= 0f) continue
+                // 页尺寸校验：pdfminer 与 renderer 不一致（±2pt）的页跳过（旋转 PDF 等边界情况）
+                if (pagesObj != null) {
+                    val pj = pagesObj.optJSONArray(pno.toString())
+                    if (pj != null && pj.length() >= 2) {
+                        val pw2 = pj.optDouble(0).toFloat()
+                        val ph2 = pj.optDouble(1).toFloat()
+                        if (kotlin.math.abs(pw2 - pw) > 2f || kotlin.math.abs(ph2 - ph) > 2f) continue
+                    }
+                }
+                val bmp = Bitmap.createBitmap(
+                    (pw * 2f).toInt().coerceAtLeast(1),
+                    (ph * 2f).toInt().coerceAtLeast(1),
+                    Bitmap.Config.ARGB_8888)
+                try {
+                    page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    val sx = bmp.width.toFloat() / pw
+                    val sy = bmp.height.toFloat() / ph
+                    for ((k, bi2) in keys.withIndex()) {
+                        val c = coords[bi2]
+                        val l = ((c[0] - 3.0) * sx).toInt().coerceIn(0, bmp.width - 1)
+                        val t = ((c[1] - 3.0) * sy).toInt().coerceIn(0, bmp.height - 1)
+                        val r = ((c[2] + 3.0) * sx).toInt().coerceIn(l + 1, bmp.width)
+                        val bt = ((c[3] + 3.0) * sy).toInt().coerceIn(t + 1, bmp.height)
+                        val crop = Bitmap.createBitmap(bmp, l, t, r - l, bt - t)
+                        val dst = java.io.File(outDir, "p" + pno + "_c" + (k + 1) + ".png")
+                        try {
+                            FileOutputStream(dst).use { fo ->
+                                crop.compress(Bitmap.CompressFormat.PNG, 100, fo)
+                            }
+                            if (dst.length() > 0) out.add(dst) else dst.delete()
+                        } catch (_: Throwable) {
+                            try { dst.delete() } catch (_: Throwable) {}
+                        }
+                    }
+                } finally {
+                    try { bmp.recycle() } catch (_: Throwable) {}
+                }
+            } finally {
+                try { page.close() } catch (_: Throwable) {}
+            }
+        }
+    } catch (e: Throwable) {
+        Diag.w("v1.9.112 提取 PDF 内嵌图片失败 " + java.io.File(srcPath).name + ": " + e.javaClass.simpleName)
+    }
+    try { renderer?.close() } catch (_: Throwable) {}
+    try { fd?.close() } catch (_: Throwable) {}
+    if (out.isEmpty()) { try { outDir.deleteRecursively() } catch (_: Throwable) {} }
+    return out
+}
+
 /** v1.9.111: 文档内嵌图片并行 OCR 线程池（对齐桌面 _DaemonThreadPoolExecutor(4, "docimgocr")）。 */
 private val docImgPool: java.util.concurrent.ExecutorService by lazy {
     java.util.concurrent.Executors.newFixedThreadPool(4) { r ->
@@ -1600,6 +1696,10 @@ fun runDocImgOcr(
             .sortedBy { it.name }
     }
     if (imgs.isEmpty()) imgs = extractDocImages(context, e0.cachePath, r0.ext)
+    // v1.9.112: PDF 不走自动提取阶段（pdfminer 全 layout 解析慢），勾选时按需提取
+    if (imgs.isEmpty() && r0.ext.lowercase() == ".pdf") {
+        imgs = extractPdfImages(context, e0.cachePath)
+    }
     if (imgs.isEmpty()) return
     val text = ocrDocImagesParallel(context, imgs)
     val st = countTextKotlin(text)
@@ -1630,6 +1730,8 @@ private suspend fun prepareDocImages(
     context: android.content.Context,
     entries: androidx.compose.runtime.snapshots.SnapshotStateList<FileEntry>
 ) {
+    // v1.9.112: .pdf 不进自动提取集合（pdfminer 全 layout 解析慢会拖长统计收尾），
+    // PDF 的图片行由 runDocImgOcr 在用户勾选时按需提取（extractPdfImages）。
     val supported = setOf(".docx", ".xlsx", ".pptx", ".ppt", ".xls")
     for (i in entries.indices) {
         val e = entries[i]

@@ -11163,6 +11163,133 @@ def compare_docx(orig_path, rev_path, out_path, opts_json):
         raise  # 非 lxml 错误，重新抛出
 
 
+# ---------------------------------------------------------------------------
+# v1.9.112: PDF 内嵌图片 bbox 提取（供 Kotlin 用系统 PdfRenderer 渲染裁剪）。
+# 口径与桌面 wordcount.py _extract_pdf_images 完全一致：
+#   预滤 w/h<8pt 装饰点/1px 分隔线 -> eps=5 union-find 聚类（还原被切成水平
+#   条带的大图）-> 四重后滤（area>0.88 整页底图 / aspect>5 或 <0.2 页眉页脚
+#   条带 / area<0.015 小图标 / h<30）。Android 无 PyMuPDF，bbox 来源改用
+#   pdfminer LTImage（递归进 LTFigure 收集）；坐标系底左原点，输出前翻转为
+#   顶左原点（PdfRenderer 渲染坐标系）。全 layout 解析较慢，只做「勾选后
+#   识别」按需路径，不进自动提取阶段（prepareDocImages 不含 .pdf）。
+# ---------------------------------------------------------------------------
+
+def _pdfimg_cluster(boxes, eps=5):
+    """把一组 bbox (x0,y0,x1,y1) 按相邻/重叠关系聚类，返回合并后的 bbox 列表。"""
+    n = len(boxes)
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    for i in range(n):
+        x0, y0, x1, y1 = boxes[i]
+        for j in range(i + 1, n):
+            a0, b0, a1, b1 = boxes[j]
+            # 扩展 eps 后判断相交（与桌面 _cluster_boxes 逐字一致）
+            if not (x1 + eps < a0 or a1 + eps < x0 or y1 + eps < b0 or b1 + eps < y0):
+                union(i, j)
+
+    groups = {}
+    for i, (x0, y0, x1, y1) in enumerate(boxes):
+        r = find(i)
+        g = groups.setdefault(r, [float('inf'), float('inf'), float('-inf'), float('-inf')])
+        if x0 < g[0]: g[0] = x0
+        if y0 < g[1]: g[1] = y0
+        if x1 > g[2]: g[2] = x1
+        if y1 > g[3]: g[3] = y1
+    return [tuple(g) for g in groups.values()]
+
+def _pdfimg_walk(obj, out):
+    """递归收集 LTImage 的 bbox（图片可能嵌在多层 LTFigure 内）。"""
+    try:
+        from pdfminer.layout import LTImage, LTFigure
+    except Exception:
+        return
+    try:
+        children = list(obj)
+    except Exception:
+        return
+    for ch in children:
+        if isinstance(ch, LTImage):
+            try:
+                b = ch.bbox
+                if b and len(b) == 4:
+                    out.append((float(b[0]), float(b[1]), float(b[2]), float(b[3])))
+            except Exception:
+                pass
+        elif isinstance(ch, LTFigure):
+            _pdfimg_walk(ch, out)
+
+def _pdf_image_boxes_json(path):
+    """提取 PDF 内嵌图片的聚类 bbox，返回 JSON 供 Kotlin 渲染裁剪。
+
+    返回 {"pages": {str(p): [w,h]}, "boxes": [[p,x0,y0,x1,y1],...]}，
+    boxes 坐标为顶左原点（已从 pdfminer 底左原点翻转），p 为 1 起页号。
+    Kotlin 侧会把 pdfminer 页尺寸与 PdfRenderer 页尺寸比对，不一致（旋转页等）
+    的整页跳过。
+    """
+    try:
+        from pdfminer.high_level import extract_pages
+        from pdfminer.layout import LTImage, LTFigure
+    except Exception:
+        return json.dumps({"pages": {}, "boxes": []})
+    pages = {}
+    boxes = []
+    try:
+        for pno, page in enumerate(extract_pages(path), start=1):
+            pw = float(page.width)
+            ph = float(page.height)
+            pages[str(pno)] = [pw, ph]
+            raw = []
+            try:
+                for ch in page:
+                    if isinstance(ch, LTImage):
+                        b = ch.bbox
+                        if b and len(b) == 4:
+                            raw.append((float(b[0]), float(b[1]), float(b[2]), float(b[3])))
+                    elif isinstance(ch, LTFigure):
+                        _pdfimg_walk(ch, raw)
+            except Exception:
+                pass
+            # 预滤：只丢真正的装饰点/1px 分隔线；水平条带大图靠聚类合并还原
+            pre = []
+            for (x0, y0, x1, y1) in raw:
+                if x1 <= x0 or y1 <= y0:
+                    continue
+                if (x1 - x0) < 8 or (y1 - y0) < 8:
+                    continue
+                pre.append((x0, y0, x1, y1))
+            if not pre:
+                continue
+            page_area = max(pw * ph, 1)
+            for (x0, y0, x1, y1) in _pdfimg_cluster(pre, eps=5):
+                w = x1 - x0
+                h = y1 - y0
+                area_ratio = (w * h) / page_area
+                if area_ratio > 0.88:            # 整页背景图
+                    continue
+                aspect = w / h if h > 0 else 9999
+                if aspect > 5 or aspect < 0.2:   # 页眉页脚/装饰条带
+                    continue
+                if area_ratio < 0.015:           # 角标/小图标
+                    continue
+                if h < 30:
+                    continue
+                # 翻转为顶左原点（PdfRenderer 渲染坐标系）
+                boxes.append([pno, round(x0, 2), round(ph - y1, 2), round(x1, 2), round(ph - y0, 2)])
+    except Exception:
+        pass
+    return json.dumps({"pages": pages, "boxes": boxes}, ensure_ascii=False)
+
 if __name__ == "__main__":
 
 
