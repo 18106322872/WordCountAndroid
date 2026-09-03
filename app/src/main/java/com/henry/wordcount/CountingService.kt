@@ -7,7 +7,6 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.media.RingtoneManager
-import android.net.Uri
 import android.os.*
 import android.os.PowerManager
 import android.util.Log
@@ -101,9 +100,9 @@ class CountingService : Service() {
                 ch.setShowBadge(false)
                 ch.description = "让统计在后台也能持续进行"
                 nm.createNotificationChannel(ch)
-                // 完成通知：重要性 + 用户专用铃声（未设置则用系统默认通知音）
-                val soundUri = completionSoundUri()
-                val chComplete = NotificationChannel(CHANNEL_ID_COMPLETE, "统计完成", NotificationManager.IMPORTANCE_DEFAULT)
+                // 完成通知：默认重要性 + 系统默认铃声，可在系统设置里改铃声
+                val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                val chComplete = NotificationChannel(CHANNEL_ID_COMPLETE, "其他", NotificationManager.IMPORTANCE_DEFAULT)
                 chComplete.setShowBadge(false)
                 chComplete.description = "文件统计完成时提醒"
                 chComplete.setSound(soundUri, null)
@@ -298,15 +297,6 @@ class CountingService : Service() {
         }
     }
 
-    /** v1.9.118: 完成通知铃声——读取用户设置的专用铃声（wordcount_prefs.complete_ringtone）。
-     *  空串=系统默认通知音；非空=用户在「选项→统计完成铃声」里挑选的铃声 Uri。 */
-    private fun completionSoundUri(): Uri {
-        val sp = getSharedPreferences("wordcount_prefs", Context.MODE_PRIVATE)
-        val t = sp.getString("complete_ringtone", "") ?: ""
-        if (t.isEmpty()) return RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-        return try { Uri.parse(t) } catch (_: Throwable) { RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION) }
-    }
-
     /** v1.9.75: 完成通知走独立 CHANNEL_ID_COMPLETE（IMPORTANCE_DEFAULT + 系统默认铃声），
      *  修复 Android O+ 上因进度通道为 LOW 导致完成通知无声的问题。 */
     private fun showCompletionNotification() {
@@ -318,19 +308,7 @@ class CountingService : Service() {
         try {
             val nm = getSystemService(NotificationManager::class.java) ?: return
             nm.cancel(NOTI_ID)
-            // v1.9.118: 用户在「选项 → 统计完成铃声」设的专用铃声，每次完成重建完成通道以应用
-            // 最新铃声（Android O+ 通道铃声仅创建/重建时生效，改 setSound 无效）。
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                try {
-                    nm.deleteNotificationChannel(CHANNEL_ID_COMPLETE)
-                    val ch = NotificationChannel(CHANNEL_ID_COMPLETE, "统计完成", NotificationManager.IMPORTANCE_DEFAULT)
-                    ch.setShowBadge(false)
-                    ch.description = "文件统计完成时提醒"
-                    ch.setSound(completionSoundUri(), null)
-                    nm.createNotificationChannel(ch)
-                } catch (_: Throwable) { }
-            }
-            val soundUri = completionSoundUri()
+            val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
             val noti = NotificationCompat.Builder(this, CHANNEL_ID_COMPLETE)
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setContentTitle("WordCount 统计完成")

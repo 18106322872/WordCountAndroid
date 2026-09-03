@@ -2,12 +2,13 @@ package com.henry.wordcount
 
 import android.app.Activity
 import android.app.ActivityManager
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
-import android.media.RingtoneManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -37,7 +38,6 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -221,6 +221,22 @@ class MainActivity : ComponentActivity() {
             }
         } catch (_: Throwable) { }
         ensureBackgroundCapability()
+        // v1.9.118: 应用一启动就创建通知通道，让用户不用先跑统计就能在系统设置里看到「其他」并设铃声
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                val nm = getSystemService(NotificationManager::class.java)
+                val ch = NotificationChannel(CountingService.CHANNEL_ID, "字数统计中", NotificationManager.IMPORTANCE_LOW).apply {
+                    setShowBadge(false)
+                    description = "让统计在后台也能持续进行"
+                }
+                nm.createNotificationChannel(ch)
+                val chComplete = NotificationChannel(CountingService.CHANNEL_ID_COMPLETE, "其他", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                    setShowBadge(false)
+                    description = "统计完成时提醒"
+                }
+                nm.createNotificationChannel(chComplete)
+            } catch (_: Throwable) { }
+        }
         lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStart(owner: LifecycleOwner) {
                 logStatsLine(this@MainActivity, "ON_START", 0, 0)
@@ -639,26 +655,6 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
         pdfPickEntryId = null
     }
 
-    // v1.9.118: 统计完成铃声选择器——「选项 → 统计完成铃声」启动，挑选的铃声 Uri 存入
-    //   wordcount_prefs.complete_ringtone（空=系统默认），统计完成时 CountingService 读取并播放。
-    val ringtonePicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
-        if (res.resultCode == android.app.Activity.RESULT_OK) {
-            val uri = res.data?.getParcelableExtra<android.net.Uri>("android.intent.extra.ringtone.PICKER_URI")
-                ?: res.data?.getParcelableExtra<android.net.Uri>("android.intent.extra.ringtone.PICKED_URI")
-            val sp = context.getSharedPreferences("wordcount_prefs", Context.MODE_PRIVATE)
-            val label = if (uri != null) {
-                sp.edit().putString("complete_ringtone", uri.toString()).apply()
-                try { RingtoneManager.getRingtone(context, uri)?.getTitle(context) ?: uri.toString() } catch (_: Throwable) { uri.toString() }
-            } else {
-                sp.edit().putString("complete_ringtone", "").apply()
-                "系统默认"
-            }
-            scope.launch(Dispatchers.Main) {
-                Toast.makeText(context, "统计完成铃声：$label", Toast.LENGTH_LONG).show()
-            }
-        }
-    }
-
     /** 选文件入口：直接启动 SAF 选择器（无需任何运行时权限申请） */
     fun pickWithPermission() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -841,24 +837,6 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
                                 }
                             },
                             leadingIcon = { Icon(Icons.Filled.Description, contentDescription = null) }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("统计完成铃声") },
-                            onClick = {
-                                expanded = false
-                                val sp = context.getSharedPreferences("wordcount_prefs", Context.MODE_PRIVATE)
-                                val cur = sp.getString("complete_ringtone", "")?.let { if (it.isEmpty()) null else android.net.Uri.parse(it) }
-                                val intent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
-                                    putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_NOTIFICATION)
-                                    putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, "统计完成铃声")
-                                    putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, true)
-                                    putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
-                                    putExtra(RingtoneManager.EXTRA_RINGTONE_DEFAULT_URI, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION))
-                                    putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, cur as android.os.Parcelable?)
-                                }
-                                ringtonePicker.launch(intent)
-                            },
-                            leadingIcon = { Icon(Icons.Filled.Notifications, contentDescription = null) }
                         )
                     }
                 }
