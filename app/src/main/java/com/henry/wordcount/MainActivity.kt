@@ -3077,56 +3077,34 @@ internal suspend fun processBatchToEntries(
                             emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_oo", displayName = dName, cachePath = f.absolutePath, error = "无法解析此 OOXML 文件（可能损坏或非标准格式）"))
                         } else {
                             val stats = countTextKotlin(res.text)
-                            // v1.3.89 metaWords 安全网（修复 VML 文本框双写导致翻倍的反案例）：
-                            //   v1.3.4 因调查问卷元数据(Words=1089)过期决定一律现算、不用 metaWords。
-                            //   但营业执照类 WPS 文件每个文本框同时存 DrawingML + VML 两份，
-                            //   现算把 v:textbox 内嵌的 p/r/t 也提取了 → 690 词 vs Word 真值 175。
-                            //   策略：metaWords > 0 且 现算 > 1.5×metaWords 时，判定为重复/膨胀，
-                            //         优先用 metaWords（Word/WPS 自带统计最权威），fe/nc 按比例分配。
-                            //   否则保持现算（覆盖 v1.3.4 的元数据过期场景）。
+                            // v1.9.110: 一律采用原始抽取结果，不再用 docProps/app.xml 的 metaWords 覆盖。
+                            // 完整根因（v1.9.99 修了一半）：
+                            //   v1.3.89/v1.3.98 的 metaWords 安全网在 MainActivity L3070+ 这段
+                            //   ooxmlFiles.forEachIndexed 主入口里——这是真正在跑的 docx 处理路径
+                            //   （FileProcessor.processOoXml 是未挂入的死代码）。
+                            //   三个分支（无VML→metaWords / 有VML膨胀→metaWords / 否则现算）都会
+                            //   把正确的现算值钳成 metaWords（3385 等等），fe/nc/chars 按 ratio 等比
+                            //   缩放。Word/WPS 写入 app.xml 的 Words 口径含页眉页脚脚注尾注，且 CJK
+                            //   计数与桌面 FarEast 正则不一致——既非正确值也非上界。
+                            //   实测 HQ6中文说明书.docx：
+                            //     桌面 v1.8.103 真值         5389 / 中文 4774 / 非中文 615 / chars 6528
+                            //     本引擎原始抽取             5390 / 中文 4774 / 非中文 616 / chars ≈6528
+                            //     app.xml metaWords           3385  <- 比前两者低 2000+ 词
+                            //   HQ6 无 VML → 命中分支① → outWords = 3385 → ratio=1.5923 等比缩放
+                            //   → 最终 3385/2998/386（与用户截图完全吻合），少算 ~40%。
+                            // 修复：删除三分支钳制，统一 outWords = rawWords（与 v1.9.99 的 FileProcessor
+                            // 保持一致；与桌面 wordcount.py 从不读取该元数据修正计数的语义对齐）。
                             val rawWords = stats.first
                             val rawFe = stats.second
                             val rawNc = stats.third
                             val rawChars = stats.fourth
-                            // v1.3.98: 恢复 metaWords 安全网（智能模式）。
-                            // 背景：v1.3.93 因"含 VML 文本框的中文营业执照 metaWords 偏低"而一刀切废弃。
-                            // 但对无 VML 的普通 docx（如纯英文翻译件），metaWords 与 Word 对话框完全一致，
-                            // 弃用后现算值因 fallback 补充扫描/子串去重不完美导致偏多（175→439）。
-                            // 策略：
-                            //   ① 无 VML 且 metaWords > 0 → 直接用 metaWords（= Word 真值）
-                            //   ② 有 VML 但现算值 > 1.5×metaWords → 用 metaWords（判定为膨胀）
-                            //   ③ 其他情况 → 保持现算（覆盖元数据过期/文本框额外内容场景）
-                            val outWords: Int
-                            val outFe: Int
-                            val outNc: Int
-                            val outChars: Int
-                            if (res.metaWords > 0 && !res.hasVml) {
-                                // 无 VML 文本框：metaWords = Word 对话框字数，最权威
-                                outWords = res.metaWords
-                                val ratio = if (rawWords > 0) rawWords.toDouble() / res.metaWords else 1.0
-                                outFe = (rawFe / ratio).toInt().coerceAtLeast(0)
-                                outNc = (rawNc / ratio).toInt().coerceAtLeast(0)
-                                outChars = (rawChars / ratio).toInt().coerceAtLeast(0)
-                                Diag.d( "docx: 使用 metaWords=${res.metaWords}(无VML权威值) 现算=$rawWords")
-                            } else if (res.metaWords > 0 && rawWords > (res.metaWords * 1.5).toInt()) {
-                                // 有 VML 但现算明显膨胀：回退到 metaWords
-                                outWords = res.metaWords
-                                val ratio = rawWords.toDouble() / res.metaWords
-                                outFe = (rawFe / ratio).toInt().coerceAtLeast(0)
-                                outNc = (rawNc / ratio).toInt().coerceAtLeast(0)
-                                outChars = (rawChars / ratio).toInt().coerceAtLeast(0)
-                                Diag.d( "docx: 回退 metaWords=${res.metaWords}(现算${rawWords}膨胀>1.5x)")
-                            } else {
-                                // 默认：用现算值
-                                outWords = rawWords
-                                outFe = rawFe
-                                outNc = rawNc
-                                outChars = rawChars
-                                Diag.d( "docx: 现算=($rawWords,$rawFe,$rawNc,$rawChars) metaWords=${res.metaWords}")
-                            }
+                            val outWords = rawWords
+                            val outFe = rawFe
+                            val outNc = rawNc
+                            val outChars = rawChars
+                            Diag.d( "docx(v1.9.110 无钳制): 现算=($rawWords,$rawFe,$rawNc,$rawChars) metaWords=${res.metaWords}(已弃用) 输出=($outWords,$outFe,$outNc,$outChars)")
                             val outPages = if (res.metaPages > 0) res.metaPages else res.pages
                             val outReason = if (res.pagesReason.isNotBlank()) res.pagesReason else null
-                            Diag.d( "docx: 现算=($rawWords,$rawFe,$rawNc,$rawChars) metaWords=${res.metaWords}(不使用) 输出=($outWords,$outFe,$outNc,$outChars) pages=$outPages")
                             // v1.3.3: 隐藏工作表单独统计（默认不计入合计，UI 勾选后才并入）
                             val hiddenStats = res.hiddenSheets.map { (n, t) ->
                                 val s = countTextKotlin(t)
