@@ -84,7 +84,7 @@ object FileProcessor {
                 "meta" to emptyMap<String, Any?>(),
                 "pages" to denomPagesFast,
                 "diag" to "【PDF诊断】Kotlin快速路径：${ktStats.fourth}字(fe=${ktStats.second},nc=${ktStats.third})/${denomPagesFast}页，跳过Python/OCR",
-                "ocrNote" to "文本提取充分，未触发OCR"
+                "ocrNote" to "文本提取充分，未触发OCR(快速路径:${ktStats.fourth}字/可靠=${ktRes.reliable}/${denomPagesFast}页)"
             ), null)
         }
 
@@ -181,7 +181,7 @@ object FileProcessor {
                 "meta" to emptyMap<String, Any?>(),
                 "pages" to (if (realPages > 1) realPages else bestPages),
                 "diag" to pdfDiag,
-                "ocrNote" to "文本提取充分，未触发OCR"
+                "ocrNote" to "文本提取充分，未触发OCR(needOcr=false: fe=$bestFe,chars=$bestChars,density=${"%.0f".format(avgCharsPerPage)})"
             )
             ProcessOutput(resMap, null)
         } else {
