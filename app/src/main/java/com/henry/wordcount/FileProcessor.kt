@@ -70,14 +70,20 @@ object FileProcessor {
         // 再兜底：可靠且总字符>=1000也直接走文字层，避免正常文字型 PDF（如 3b016...）被误判进 OCR。
         val denomPagesFast = if (realPages > 1) realPages else 1
         val ktCharsPerPage = ktStats.fourth.toDouble() / denomPagesFast
+        val ktWordsPerPage = ktStats.first.toDouble() / denomPagesFast
         val suspiciousLowFe = ktStats.second > 0 && ktStats.second < 30
         // v1.9.120: 检测 L1 原始文本是否被 CID 解码失败污染——若整段就是 (cid:/Latin-1 垃圾，
         // 即使 sanitize 后剩 >=500 nc 字符触发快速路径，结果也是垃圾，必须走 Python/OCR 兜底。
         val l1RawPoisoned = ktRes.text.length >= 10 && pdfTextIsPoisoned(ktRes.text)
+        // v1.9.123: 专治 L1 静默丢失中文（无 PUA/(cid: 标记）但仍触发快速路径的场景：
+        // 当 fe=0 且字符数在 5..10000 之间、又不是高密度纯英文文档时，禁止快速路径秒出，
+        // 必须继续走 Python pdfminer 或 OCR 兜底，与桌面 _pdf_text_is_poisoned 对齐。
+        val silentChineseLossFast = ktStats.second == 0 && ktStats.fourth in 5..10000
+            && !(ktCharsPerPage >= 800.0 && ktWordsPerPage >= 200.0)
         val pureNonCjkFast = ktStats.second == 0 && ktStats.third >= 500 && ktCharsPerPage >= 200.0
         val normalFast = ktRes.reliable && ktStats.fourth >= 500 && ktCharsPerPage >= 200.0 && !suspiciousLowFe
         val anyReliableFast = ktRes.reliable && ktStats.fourth >= 1000 && ktCharsPerPage >= 100.0
-        if ((normalFast || pureNonCjkFast || anyReliableFast) && !l1RawPoisoned) {
+        if ((normalFast || pureNonCjkFast || anyReliableFast) && !l1RawPoisoned && !silentChineseLossFast) {
             return ProcessOutput(mapOf(
                 "name" to dName, "ext" to ".pdf",
                 "stats" to mapOf("words" to ktStats.first, "fe" to ktStats.second, "nc" to ktStats.third, "chars" to ktStats.fourth),
@@ -86,6 +92,9 @@ object FileProcessor {
                 "diag" to "【PDF诊断】Kotlin快速路径：${ktStats.fourth}字(fe=${ktStats.second},nc=${ktStats.third})/${denomPagesFast}页，跳过Python/OCR",
                 "ocrNote" to "文本提取充分，未触发OCR(快速路径:${ktStats.fourth}字/可靠=${ktRes.reliable}/${denomPagesFast}页)"
             ), null)
+        }
+        if (silentChineseLossFast) {
+            Log.d("WordCount", "PDF $dName: 快速路径被 silentChineseLoss 拦截（fe=0, chars=${ktStats.fourth}），继续走 Python/OCR")
         }
 
         // ── Level 2: Python pdfminer（文字型 PDF 的主力，与单独打开完全一致）──
