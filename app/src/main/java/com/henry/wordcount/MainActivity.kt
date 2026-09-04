@@ -3907,10 +3907,19 @@ internal suspend fun processBatchToEntries(
                         val avgCharsPerPage = bestChars.toDouble() / maxOf(1, realPages)
                         val avgWordsPerPage = bestWords.toDouble() / maxOf(1, realPages)
                         val lowDensity = avgCharsPerPage < 800.0 || avgWordsPerPage < 200.0
-                        val needOcr = bestChars < 10 || (!bestTextReliable && bestChars < 50) || looksLikeGarbage || isFailedChinesePdf || lowDensity || cjkLooksLikeCidGarbage || (l1RawPoisoned && !usePython)
-                        Diag.d( "PDF OCR决策 $dName: bestChars=$bestChars bestFe=$bestFe bestPages=$bestPages realPages=$realPages avgChars/p=$avgCharsPerPage avgWords/p=$avgWordsPerPage lowDensity=$lowDensity needOcr=$needOcr (garbage=$looksLikeGarbage failedCn=$isFailedChinesePdf cidGarbage=$cjkLooksLikeCidGarbage)")
+                        // v1.9.121: 专治 L1 静默丢失中文（返回干净 ASCII、fe=0、pdfTextIsPoisoned 判 false）——
+                        // 既有 isFailedChinesePdf(仅捕 bestChars<500) / lowDensity / looksLikeGarbage 在个别样本上未生效，
+                        // 此处直接以「有字符但零中文」强制 OCR，与桌面 _pdf_text_is_poisoned 口径对齐。
+                        // 为避免纯英文文字层 PDF 被误强 OCR（v1.9.53 回归：3b01623708fda016f81421fd6e4244dd.pdf
+                        // 19页英文 fe=0 被误判→整本走 PaddleOCR 极慢），仅在「非高密度英文文档」时触发：
+                        // 高密度纯英文文档 avgCharsPerPage>=800 且 avgWordsPerPage>=200 视为正常文字层、不强制。
+                        val silentChineseLoss = bestFe == 0 && bestChars in 5..10000
+                            && !(avgCharsPerPage >= 800.0 && avgWordsPerPage >= 200.0)
+                        val needOcr = bestChars < 10 || (!bestTextReliable && bestChars < 50) || looksLikeGarbage || isFailedChinesePdf || lowDensity || cjkLooksLikeCidGarbage || (l1RawPoisoned && !usePython) || silentChineseLoss
+                        Diag.d( "PDF OCR决策 $dName: bestChars=$bestChars bestFe=$bestFe bestPages=$bestPages realPages=$realPages avgChars/p=$avgCharsPerPage avgWords/p=$avgWordsPerPage lowDensity=$lowDensity needOcr=$needOcr (garbage=$looksLikeGarbage failedCn=$isFailedChinesePdf cidGarbage=$cjkLooksLikeCidGarbage silent=$silentChineseLoss)")
                         if (lowDensity) pdfDiag += "\nOCR触发: 低字数密度(avg ${"%.0f".format(avgWordsPerPage)}字/页<200)→按桌面口径强制全页OCR"
                         if (cjkLooksLikeCidGarbage) pdfDiag += "\nOCR触发: CJK常用字占比过低(${"%.2f".format(cjkCommonRatio)})，疑似CID/hex伪中文"
+                        if (silentChineseLoss) pdfDiag += "\nOCR触发: 有字符但零中文(fe=0)，疑似CID静默丢失→强制OCR(对齐桌面_poisoned)"
 
                         if (!needOcr) {
                             // ★ 文本提取足够好 → 直接使用
