@@ -71,10 +71,13 @@ object FileProcessor {
         val denomPagesFast = if (realPages > 1) realPages else 1
         val ktCharsPerPage = ktStats.fourth.toDouble() / denomPagesFast
         val suspiciousLowFe = ktStats.second > 0 && ktStats.second < 30
+        // v1.9.120: 检测 L1 原始文本是否被 CID 解码失败污染——若整段就是 (cid:/Latin-1 垃圾，
+        // 即使 sanitize 后剩 >=500 nc 字符触发快速路径，结果也是垃圾，必须走 Python/OCR 兜底。
+        val l1RawPoisoned = ktRes.text.length >= 10 && pdfTextIsPoisoned(ktRes.text)
         val pureNonCjkFast = ktStats.second == 0 && ktStats.third >= 500 && ktCharsPerPage >= 200.0
         val normalFast = ktRes.reliable && ktStats.fourth >= 500 && ktCharsPerPage >= 200.0 && !suspiciousLowFe
         val anyReliableFast = ktRes.reliable && ktStats.fourth >= 1000 && ktCharsPerPage >= 100.0
-        if (normalFast || pureNonCjkFast || anyReliableFast) {
+        if ((normalFast || pureNonCjkFast || anyReliableFast) && !l1RawPoisoned) {
             return ProcessOutput(mapOf(
                 "name" to dName, "ext" to ".pdf",
                 "stats" to mapOf("words" to ktStats.first, "fe" to ktStats.second, "nc" to ktStats.third, "chars" to ktStats.fourth),
@@ -158,7 +161,7 @@ object FileProcessor {
         val avgCharsPerPage = bestChars.toDouble() / denomPages
         val avgWordsPerPage = bestWords.toDouble() / denomPages
         val lowDensity = avgCharsPerPage < 800.0 || avgWordsPerPage < 200.0
-        val needOcr = bestChars < 10 || (!bestTextReliable && bestChars < 50) || looksLikeGarbage || isFailedChinesePdf || lowDensity || cjkLooksLikeCidGarbage
+        val needOcr = bestChars < 10 || (!bestTextReliable && bestChars < 50) || looksLikeGarbage || isFailedChinesePdf || lowDensity || cjkLooksLikeCidGarbage || (l1RawPoisoned && !usePython)
         if (lowDensity) pdfDiag += "\nOCR触发: 低字数密度(avg ${"%.0f".format(avgWordsPerPage)}字/页<200)→按桌面口径强制全页OCR"
         if (cjkLooksLikeCidGarbage) pdfDiag += "\nOCR触发: CJK常用字占比过低(${"%.2f".format(cjkCommonRatio)})，疑似CID/hex伪中文"
 

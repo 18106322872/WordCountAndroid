@@ -2005,7 +2005,11 @@ private val PDF_FW_PUNCT_RE = Regex("[\\uFF00-\\uFF0F\\uFF1A-\\uFF20\\uFF3B-\\uF
 private val PDF_LEADER_DOT_RE = Regex("[・･]{2,}")
 private val PDF_CID_RE = Regex("\\(cid:|\\(CID:", RegexOption.IGNORE_CASE)
 
-private fun pdfTextIsPoisoned(para: String): Boolean {
+/**
+ * v1.9.120: 改为 internal 以便 FileProcessor.kt 复用，检测 L1 整体是否被 CID/PUA/异常字符污染。
+ * 检测依据与桌面 wordcount.py _pdf_text_is_poisoned 一致：(cid: 标记 + 大量 PUA/Exotic 字符。
+ */
+internal fun pdfTextIsPoisoned(para: String): Boolean {
     if (para.isEmpty()) return true
     val s = para.trim()
     if (s.length < 10) return false
@@ -3777,10 +3781,14 @@ internal suspend fun processBatchToEntries(
                         val denomPagesFast = if (realPages > 1) realPages else 1
                         val ktCharsPerPage = ktStats.fourth.toDouble() / denomPagesFast
                         val suspiciousLowFe = ktStats.second > 0 && ktStats.second < 30
+                        // v1.9.120: 检测 L1 原始文本是否被 CID 解码失败污染——若整段就是 (cid:/Latin-1 垃圾，
+                        // 即使 sanitizePdfTextLayer 剥离后剩 >=500 nc 字符触发快速路径，也是垃圾结果，
+                        // 必须走 Python/OCR 兜底（与桌面 _pdf_text_is_poisoned 口径对齐）。
+                        val l1RawPoisoned = ktRes.text.length >= 10 && pdfTextIsPoisoned(ktRes.text)
                         val pureNonCjkFast = ktStats.second == 0 && ktStats.third >= 500 && ktCharsPerPage >= 200.0
                         val normalFast = ktRes.reliable && ktStats.fourth >= 500 && ktCharsPerPage >= 200.0 && !suspiciousLowFe
                         val anyReliableFast = ktRes.reliable && ktStats.fourth >= 1000 && ktCharsPerPage >= 100.0
-                        if (normalFast || pureNonCjkFast || anyReliableFast) {
+                        if ((normalFast || pureNonCjkFast || anyReliableFast) && !l1RawPoisoned) {
                             val pdfDiag = buildString {
                                 appendLine("【PDF诊断】Kotlin快速路径：${ktStats.fourth}字(fe=${ktStats.second},nc=${ktStats.third})/${denomPagesFast}页，跳过Python/OCR")
                                 appendLine("KT内部: ${ktRes.diag}")
@@ -3899,7 +3907,7 @@ internal suspend fun processBatchToEntries(
                         val avgCharsPerPage = bestChars.toDouble() / maxOf(1, realPages)
                         val avgWordsPerPage = bestWords.toDouble() / maxOf(1, realPages)
                         val lowDensity = avgCharsPerPage < 800.0 || avgWordsPerPage < 200.0
-                        val needOcr = bestChars < 10 || (!bestTextReliable && bestChars < 50) || looksLikeGarbage || isFailedChinesePdf || lowDensity || cjkLooksLikeCidGarbage
+                        val needOcr = bestChars < 10 || (!bestTextReliable && bestChars < 50) || looksLikeGarbage || isFailedChinesePdf || lowDensity || cjkLooksLikeCidGarbage || (l1RawPoisoned && !usePython)
                         Diag.d( "PDF OCR决策 $dName: bestChars=$bestChars bestFe=$bestFe bestPages=$bestPages realPages=$realPages avgChars/p=$avgCharsPerPage avgWords/p=$avgWordsPerPage lowDensity=$lowDensity needOcr=$needOcr (garbage=$looksLikeGarbage failedCn=$isFailedChinesePdf cidGarbage=$cjkLooksLikeCidGarbage)")
                         if (lowDensity) pdfDiag += "\nOCR触发: 低字数密度(avg ${"%.0f".format(avgWordsPerPage)}字/页<200)→按桌面口径强制全页OCR"
                         if (cjkLooksLikeCidGarbage) pdfDiag += "\nOCR触发: CJK常用字占比过低(${"%.2f".format(cjkCommonRatio)})，疑似CID/hex伪中文"
