@@ -11,7 +11,8 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 
 /**
- * OCR 引擎（v1.0.18+）：基于 Google ML Kit Text Recognition（中文识别器，同时兼容拉丁字母）。
+ * OCR 引擎（v1.0.18+ / v1.9.119 加 PaddleOCR 兜底）：基于 Google ML Kit Text Recognition（中文识别器，同时兼容拉丁字母），
+ * ML Kit 失败/空结果时自动切到内置 PaddleOCR（PP-OCRv4）兜底。
  *
  * ML Kit 的 Latin 识别器选项类（TextRecognizerOptions）在本项目的依赖图谱下无法稳定参与编译
  * （16.0.0 改为 Play Services 动态分发，AAR 内不含该类），因此统一使用「中文识别器」，
@@ -40,16 +41,47 @@ object OcrEngine {
 
     /**
      * 识别图片文件中的文字。
+     * v1.9.119: ML Kit 中文识别器失败后，用内置 PaddleOCR（PP-OCRv4）兜底，
+     * 避免某些设备/图片因 ML Kit 模型未就绪导致整张图片无法统计。
      * @return 识别到的文字；失败或空图返回空串。
      */
     fun recognize(context: Context, imageFile: File): String {
         if (!ocrEnabled) return ""
+        // 每次调用重置失败标志，避免“模型未就绪”提示粘滞到下一次正常调用
+        ocrFailed = false
         return try {
             val bitmap = decodeSampled(imageFile, 2048) ?: return ""
-            val image = InputImage.fromBitmap(bitmap, 0)
-            val raw = tryRecognize(image, 20)
-            if (raw.isBlank()) return ""
-            postFilter(raw)
+
+            // 1) ML Kit 主路径
+            val raw = try {
+                val image = InputImage.fromBitmap(bitmap, 0)
+                tryRecognize(image, 20)
+            } catch (e: Throwable) {
+                Log.w("WordCount", "ML Kit OCR 失败 ${imageFile.name}: ${e.javaClass.simpleName}: ${e.message}")
+                ocrFailed = true
+                ""
+            }
+            if (raw.isNotBlank()) return postFilter(raw)
+
+            // 2) ML Kit 空/失败 → 尝试内置 PaddleOCR 兜底
+            PaddleOcr.ensureInit(context)
+            if (PaddleOcr.available) {
+                val strong = try {
+                    PaddleOcr.recognize(bitmap)
+                } catch (e: Throwable) {
+                    Log.w("WordCount", "PaddleOCR 兜底失败 ${imageFile.name}: ${e.javaClass.simpleName}: ${e.message}")
+                    null
+                }
+                if (!strong.isNullOrBlank()) {
+                    // 兜底成功，清除 ML Kit 触发的失败标志
+                    ocrFailed = false
+                    return postFilter(strong)
+                }
+            }
+
+            // 都失败：若 ML Kit 抛了异常则保持 ocrFailed=true（UI 提示模型未就绪），
+            // 否则保持 false（UI 提示未识别到文字）
+            ""
         } catch (e: Throwable) {
             Log.w("WordCount", "OCR 失败 ${imageFile.name}: ${e.javaClass.simpleName}: ${e.message}")
             ocrFailed = true
@@ -64,6 +96,8 @@ object OcrEngine {
      */
     fun recognizeBitmap(bitmap: android.graphics.Bitmap, skipPostFilter: Boolean = false): String {
         if (!ocrEnabled) return ""
+        // v1.9.119: 每次调用重置失败标志
+        ocrFailed = false
         return try {
             val image = InputImage.fromBitmap(bitmap, 0)
             val raw = tryRecognize(image, 20)
