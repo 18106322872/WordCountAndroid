@@ -1022,6 +1022,13 @@ def _count_geom_frames(rects, min_side=150, min_area=40000, max_ar=10):
 
     maximal.sort(key=lambda r: -r[4])
 
+    # v1.9.128: 端口桌面 _count_geom_frames——最终只剩 2 个框且最大面积 >= 3× 次大框时
+    # 视为『主图 + 附属块/标题栏/修订表』，合并为 1 张图（XT26224：主图框 18.3M
+    # 与右侧附属块 5.84M 比值 3.13× → 合并为 1 页）。仅在未发生拼板展开时启用。
+    if not did_expand and len(maximal) == 2:
+        if maximal[0][4] >= 3.0 * maximal[1][4]:
+            return 1
+
     # 3) 未发生拼板展开时，沿用旧的断层裁剪 + 绝对面积阈值
     if not did_expand:
         # 按面积自然聚类：最大断层以上的矩形视为真正图框，
@@ -1439,7 +1446,7 @@ def count_cad_frames(dxf_path):
         # 全部图纸空间布局都是「仅视口」空布局（无标题块/图框/文字，图纸内容全在
         # Model 空间）→ 真实出图内容只有 Model 里的单张图，按 1 页计。
         # （全铜SS11-2500-35-0.4外形图.dwg：2 个仅视口布局 + Model 1 张图）
-        if bare_viewport_layouts >= 1 and ms_ents > 50:
+        if bare_viewport_layouts >= 1 and ms_ents > 50 and geo <= 1:
             return 1, "Model单图·图纸布局仅含视口", paper
 
         # 2) 标题块不重复图号 + 详图聚类
