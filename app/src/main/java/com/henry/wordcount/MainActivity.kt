@@ -1198,9 +1198,7 @@ fun FileCard(
                             }
                             else -> null
                         }
-                        val isErrorNote = shortNote != null &&
-                            (shortNote.contains("OCR未成功") || shortNote.contains("失败") || shortNote.contains("err="))
-                        if (isErrorNote) {
+                        if (shortNote != null && (shortNote.contains("OCR未成功") || shortNote.contains("失败") || shortNote.contains("err="))) {
                             Text(
                                 shortNote,
                                 style = MaterialTheme.typography.labelSmall,
