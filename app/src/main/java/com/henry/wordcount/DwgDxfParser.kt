@@ -667,10 +667,16 @@ object DwgDxfParser {
         // 图纸空间布局：优先按桌面 ezdxf 的 LAYOUT 对象计数（OBJECTS 段），
         // 缺失或为零时回退到 BLOCKS 段的 *Paper_SpaceN 块计数。
         val layoutCount = countLayoutObjects(lines)
-        val paperCounts = paperBlockEntityCounts(sec.blocks)
-        val blockPaper = paperCounts.values.count { it > 0 }
-        val paper = if (layoutCount >= 1) layoutCount else blockPaper
-        val paperTotalEnts = paperCounts.values.sum()
+        val blockStats = paperBlockStats(sec.blocks)
+        // v1.9.126: 区分「含真实(非视口)实体的布局」(paper) 与「仅视口布局」(bareViewport)，
+        // 对齐桌面 count_cad_frames 的 paper / bare_viewport_layouts 口径。
+        val bareViewport = blockStats.count { it.total > 0 && it.nonVp == 0 }
+        val paperTotalEnts = blockStats.sumOf { it.total }
+        var paper = blockStats.count { it.nonVp > 0 }
+        if (paper == 0 && bareViewport == 0 && layoutCount >= 1) {
+            // 兜底：BLOCKS 段未解析出纸张布局时，退回 LAYOUT 对象计数（旧行为）
+            paper = layoutCount
+        }
 
         // v1.5.59: 优先采用 LWPOLYLINE 闭合图框（CAD 图纸图框通常用 LWPOLYLINE 绘制）
         //   并补上 INSERT 块引用还原的图框（对齐桌面 _detect_lwpolyline_sheets：
@@ -683,7 +689,7 @@ object DwgDxfParser {
         val geo = countGeomFrames(rects)
         val sheets = distinctSheetNumbers(entities)
         val det = countDetailSheets(entities, msLines)
-        val (frames, reason) = pickFrames(geoLw, geo, paper, sheets, det, entities.isNotEmpty(), msEnts, paperTotalEnts)
+        val (frames, reason) = pickFrames(geoLw, geo, paper, sheets, det, entities.isNotEmpty(), msEnts, paperTotalEnts, bareViewport)
 
         // ── v1.5.40: 整文件 CJK 兜底恢复 ─────────────────────────────────────
         // 真机上交叉编译的 libdwg2dxf.so 可能把中文写成 GBK 字节 / \U+XXXX 转义 /
@@ -815,7 +821,7 @@ object DwgDxfParser {
 
     /** 端口桌面 count_cad_frames 的判定优先级 */
     private fun pickFrames(geoLw: Int, geo: Int, paper: Int, sheets: Int, det: Int,
-                          hasEntities: Boolean, msEnts: Int, paperTotalEnts: Int): Pair<Int?, String?> {
+                          hasEntities: Boolean, msEnts: Int, paperTotalEnts: Int, bareViewport: Int): Pair<Int?, String?> {
         // 布局稀疏 → 改用几何图框（dwg2dxf 常把所有图挤进 Model 空间）
         val geoBest = if (geoLw >= 1) geoLw else geo
         if (geoBest >= 3 && geoBest > paper + 1 && msEnts > 1000 && paperTotalEnts <= paper * 8) {
@@ -823,6 +829,12 @@ object DwgDxfParser {
             return Pair(geoBest, reason)
         }
         if (paper >= 1) return Pair(paper, "布局计数")
+        // v1.9.126: 端口桌面 v1.8.109——仅视口布局(图纸内容全在 Model 空间)且几何图框≤1 时
+        // 按 1 页计；几何图框>1（多张独立图纸拼在 Model）时不强行 1 页，信任几何
+        // （XT26220/21/22：2 个仅视口布局 + Model 含 3 张独立图框 → 实际 3 页）。
+        if (bareViewport >= 1 && msEnts > 50 && geoBest <= 1) {
+            return Pair(1, "Model单图·图纸布局仅含视口")
+        }
         if (det >= 1 && det >= sheets) return Pair(det, "详图聚类估算")
         if (sheets >= 1) return Pair(sheets, "标题块图号")
         if (geoLw >= 1) return Pair(geoLw, "LWPOLYLINE图框估算")
@@ -900,16 +912,24 @@ object DwgDxfParser {
         return count
     }
 
+    /** 单个纸张布局块的实体统计（端口桌面 count_cad_frames 的 paper / bare_viewport_layouts 区分） */
+    private data class BlockStat(val name: String, val total: Int, val nonVp: Int)
+
     /**
-     * 扫 BLOCKS 段，统计每个 *Paper_SpaceN 块内的顶层实体数。
+     * 扫 BLOCKS 段，统计每个 *Paper_SpaceN 块内的顶层实体数，并区分 VIEWPORT 实体。
+     * v1.9.126: 同时统计 total（含视口）与 nonVp（非视口实体数），据此区分：
+     *   - paper         = 含真实(非视口)实体的布局数（对齐桌面 paper）
+     *   - bareViewport  = 仅含视口、无任何真实实体的布局数（对齐桌面 bare_viewport_layouts）
+     *   - paperTotalEnts= 所有纸张布局实体总数（含视口，对齐桌面 paper_total_ents）
      * 仅作为 LAYOUT 对象缺失时的兜底；桌面版优先使用 LAYOUT 对象计数。
      */
-    private fun paperBlockEntityCounts(blocks: List<String>): Map<String, Int> {
-        val res = LinkedHashMap<String, Int>()
+    private fun paperBlockStats(blocks: List<String>): List<BlockStat> {
+        val res = mutableListOf<BlockStat>()
         var inBlock = false
         var awaitingName = false
         var curName: String? = null
-        var count = 0
+        var total = 0
+        var nonVp = 0
         val n = blocks.size
         var i = 0
         while (i < n - 1) {
@@ -918,17 +938,22 @@ object DwgDxfParser {
             i += 2
             if (code == "0") {
                 if (value == "BLOCK") {
-                    inBlock = true; awaitingName = true; curName = null; count = 0
+                    inBlock = true; awaitingName = true; curName = null; total = 0; nonVp = 0
                 } else if (value == "ENDBLK") {
                     val name = curName
                     // v1.6.6: 过滤极简单/占位 layout block（实体数<2），避免 dwg2dxf 残留的
                     // 空布局或仅含标题块占位符的 block 被误计为独立图纸页。
-                    if (inBlock && name != null && PAPER_BLOCK_NAME.containsMatchIn(name) && count >= 2) {
-                        res[name] = (res[name] ?: 0) + count
+                    if (inBlock && name != null && PAPER_BLOCK_NAME.containsMatchIn(name) && total >= 2) {
+                        res.add(BlockStat(name, total, nonVp))
                     }
-                    inBlock = false; awaitingName = false; curName = null; count = 0
-                } else if (inBlock && value !in SUB_ENTITY_TYPES) {
-                    count++
+                    inBlock = false; awaitingName = false; curName = null; total = 0; nonVp = 0
+                } else if (inBlock) {
+                    if (value == "VIEWPORT") {
+                        // 视口实体：计入 total（桌面 paper_total_ents 含视口），但不计入 nonVp
+                        total++
+                    } else if (value !in SUB_ENTITY_TYPES) {
+                        total++; nonVp++
+                    }
                 }
             } else if (inBlock && awaitingName && code == "2") {
                 curName = value
@@ -1267,6 +1292,14 @@ object DwgDxfParser {
         if (maximal2.isEmpty()) return 0
         maximal2.sortByDescending { it.area }
 
+        if (!didExpand && maximal2.size == 2) {
+            // v1.9.126: 端口桌面 _count_geom_frames——最大框面积 >= 3× 次大框视为
+            // 『主图 + 附属块/标题栏/修订表』，合并为 1 张图（XT26224：主图框 18.3M
+            // 与右侧附属块 5.84M 比值 3.13× → 合并为 1 页）。仅 2 框且未发生拼板展开时启用，
+            // 避免把『1 张大图 + 多张独立小图』的混合图纸误杀（3+ 张走既有拼板/容器逻辑）。
+            val areas = maximal2.map { it.area }.sortedDescending()
+            if (areas[0] >= 3.0 * areas[1]) return 1
+        }
         if (!didExpand) {
             // 未展开时沿用旧逻辑：面积断层裁剪 + 1% 阈值
             if (maximal2.size >= 2) {

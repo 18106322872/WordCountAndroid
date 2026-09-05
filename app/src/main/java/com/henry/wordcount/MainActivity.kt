@@ -1188,8 +1188,7 @@ fun FileCard(
                             statsText,
                             style = MaterialTheme.typography.bodySmall, color = Color.Gray
                         )
-                        // v1.9.60: PDF/DWG 诊断短摘要常显（一眼看出文字层/OCR/OLE 提取状态），
-                        // 完整决策详情见展开明细里的多行诊断文本。
+                        // v1.9.126: 依用户要求移除绿色诊断常显（已无意义），仅保留红色错误提示。
                         val shortNote = when {
                             !r.ocrNote.isNullOrBlank() -> r.ocrNote
                             !r.diag.isNullOrBlank() -> {
@@ -1199,11 +1198,13 @@ fun FileCard(
                             }
                             else -> null
                         }
-                        if (shortNote != null) {
+                        val isErrorNote = shortNote != null &&
+                            (shortNote.contains("OCR未成功") || shortNote.contains("失败") || shortNote.contains("err="))
+                        if (isErrorNote) {
                             Text(
                                 shortNote,
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (shortNote.contains("OCR未成功") || shortNote.contains("失败") || shortNote.contains("err=")) Color(0xFFB00020) else Color(0xFF2E7D32),
+                                color = Color(0xFFB00020),
                                 modifier = Modifier.padding(top = 2.dp)
                             )
                         }

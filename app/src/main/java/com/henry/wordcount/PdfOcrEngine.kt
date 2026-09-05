@@ -65,6 +65,12 @@ object PdfOcrEngine {
     private const val LOW_RECALL = 200       // v1.5.91: 渲染路径召回低于此字数改试内嵌图
     private const val STRONG_TRIGGER = 800    // 方案 C：主路径总字数低于此值才启用强引擎兜底（图纸类 ML Kit 常 <800，故 PaddleOCR 多会介入）
     private const val PER_PAGE_STRONG_TRIGGER = 120  // v1.9.51: 单页 ML Kit 召回低于此值（图纸类页面）即从一开始用 PaddleOCR 兜底；文字型页面 ML Kit 召回高，不触发 → 仅图纸类走 PaddleOCR
+    private const val ADAPT_MIN_CHARS = 400      // v1.9.126: 对齐桌面 _ADAPT_MIN_CHARS，基准倍率识别字数低于此值视为欠识别，触发升采样
+    private const val ADAPT_UPSCALE_PX = 2048    // v1.9.126: 升采样趟每块放大上限（高于基准 1280），让小字以接近原生分辨率喂给检测模型
+
+    // v1.9.126: 对齐桌面 v1.8.109 PDF OCR 自适应升采样——基础倍率下某页识别字数 < 400 时，
+    // 用 6× 重新渲染该页并识别，取字数更多者。图纸类 PDF 密集小字低于检测阈值时召回可提升数倍。
+    private const val ADAPT_SCALE = 6f
 
     data class PdfOcrResult(val text: String, val pages: Int)
 
@@ -300,8 +306,10 @@ object PdfOcrEngine {
      * v1.9.89: 单页渲染辅助——独立打开 PdfRenderer 渲染第 i 页为 Bitmap。
      * 供页级并行任务调用（每任务独立打开，避免共享 PdfRenderer 并发渲染冲突）。
      * 失败返回 null。
+     *
+     * v1.9.126: 增加 scaleOverride 参数，支持自适应 6× 升采样重渲染。
      */
-    private fun renderPageSysBitmap(file: File, i: Int, forPrintMode: Boolean): Bitmap? {
+    private fun renderPageSysBitmap(file: File, i: Int, forPrintMode: Boolean, scaleOverride: Float? = null): Bitmap? {
         return try {
             val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
             val renderer = PdfRenderer(pfd)
@@ -310,9 +318,13 @@ object PdfOcrEngine {
                 try {
                     val w = page.width; val h = page.height
                     if (w <= 0 || h <= 0) return null
-                    val baseScale = computeScale(w, h)
-                    val rawScale = if (forPrintMode) baseScale * 3f else baseScale * 2f
-                    val scale = min(rawScale, MAX_DIM.toFloat() / max(w, h).toFloat())
+                    val scale = if (scaleOverride != null) {
+                        min(scaleOverride, MAX_DIM.toFloat() / max(w, h).toFloat())
+                    } else {
+                        val baseScale = computeScale(w, h)
+                        val rawScale = if (forPrintMode) baseScale * 3f else baseScale * 2f
+                        min(rawScale, MAX_DIM.toFloat() / max(w, h).toFloat())
+                    }
                     val bw = max(1, (w * scale).toInt()); val bh = max(1, (h * scale).toInt())
                     val bmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) ?: return null
                     val renderMode = if (forPrintMode) PdfRenderer.Page.RENDER_MODE_FOR_PRINT else PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY
@@ -366,6 +378,24 @@ object PdfOcrEngine {
             }
         }
 
+        /**
+         * v1.9.126: 单页 PaddleOCR 识别。返回 (rawLen, filteredText)。
+         * rawLen 用于自适应升采样决策（过滤前比较，避免噪声过滤误杀小字）。
+         */
+        fun recognizePageStrong(bmp: Bitmap): Pair<Int, String> {
+            val dark = darkPixelRatio(bmp)
+            val needsInvert = dark > 95.0
+            val baseBmp = if (needsInvert) (invertBitmap(bmp) ?: bmp) else bmp
+            val enhanced = enhanceBitmap(baseBmp) ?: baseBmp
+            val raw = try {
+                recognizeTiledGeneric(enhanced, upscalePx = 1280) { PaddleOcr.recognize(it) ?: "" }
+            } catch (_: Throwable) { "" }
+            val text = filterStrongCjkNoise(raw)
+            if (enhanced !== baseBmp && enhanced !== bmp) enhanced.recycle()
+            if (baseBmp !== bmp) baseBmp.recycle()
+            return raw.length to text
+        }
+
         // Stage 1: 系统 PdfRenderer（2x/3x 渲染），v1.9.89 页级并行
         try {
             val pfd0 = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
@@ -383,17 +413,28 @@ object PdfOcrEngine {
                             else try {
                                 if (isBlankBitmap(bmp)) Triple(i, "", true)
                                 else {
-                                    val dark = darkPixelRatio(bmp)
-                                    val needsInvert = dark > 95.0
-                                    val baseBmp = if (needsInvert) (invertBitmap(bmp) ?: bmp) else bmp
-                                    val enhanced = enhanceBitmap(baseBmp) ?: baseBmp
-                                    val raw = try {
-                                        recognizeTiledGeneric(enhanced, upscalePx = 1280) { PaddleOcr.recognize(it) ?: "" }
-                                    } catch (_: Throwable) { "" }
-                                    val text = filterStrongCjkNoise(raw)
-                                    if (enhanced !== baseBmp && enhanced !== bmp) enhanced.recycle()
-                                    if (baseBmp !== bmp) baseBmp.recycle()
-                                    Triple(i, text, false)
+                                    val (baseRawLen, baseText) = recognizePageStrong(bmp)
+                                    onProgress?.invoke(i + 1, pageCount)
+                                    var bestText = baseText
+                                    var bestRawLen = baseRawLen
+                                    // v1.9.126: 自适应 6× 升采样。基础倍率识别字数偏少时，
+                                    // 用 6× 重新渲染并识别，取字数更多者。
+                                    if (baseRawLen < ADAPT_MIN_CHARS) {
+                                        val upBmp = renderPageSysBitmap(file, i, forPrintMode, ADAPT_SCALE)
+                                        if (upBmp != null) {
+                                            try {
+                                                if (!isBlankBitmap(upBmp)) {
+                                                    val (upRawLen, upText) = recognizePageStrong(upBmp)
+                                                    if (upRawLen > bestRawLen) {
+                                                        bestRawLen = upRawLen
+                                                        bestText = upText
+                                                    }
+                                                }
+                                            } finally { upBmp.recycle() }
+                                        }
+                                        onProgress?.invoke(i + 1 + pageCount, pageCount)
+                                    }
+                                    Triple(i, bestText, false)
                                 }
                             } finally { bmp.recycle() }
                         } catch (_: Throwable) { null }
@@ -401,7 +442,8 @@ object PdfOcrEngine {
                 }
                 for ((idx, f) in futures.withIndex()) {
                     val r = try { f.get(600, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Throwable) { null }
-                    onProgress?.invoke(idx + 1, pageCount)
+                    // v1.9.126: 进度回调已在前台 Callable 内完成（含自适应升采样的中间进度），
+                    // 此处不再重复回调，避免把 upscale 后的 2/1 进度重置回 1/1。
                     if (r == null) { errorCount++; diag.append(" [p${idx+1}:Err]"); continue }
                     val (_, text, blank) = r
                     if (blank) { blankCount++; diag.append(" [p${idx+1}:空白]"); continue }
@@ -493,6 +535,23 @@ object PdfOcrEngine {
 
         diag.append("SysRenderer(MLKit): ${pageCount}页(forPrint=$forPrintMode)")
 
+        /**
+         * v1.9.126: 单页 ML Kit 识别。返回 (rawLen, text)。
+         */
+        fun recognizePageMlKit(bmp: Bitmap): Pair<Int, String> {
+            val darkRatio = darkPixelRatio(bmp)
+            val needsInvert = darkRatio > 95.0
+            var ocrBmp: Bitmap = bmp
+            var inverted: Bitmap? = null
+            if (needsInvert) {
+                inverted = invertBitmap(bmp)
+                if (inverted != null) ocrBmp = inverted
+            }
+            val t = try { recognizeTiled(ocrBmp) } catch (_: Throwable) { "" }
+            inverted?.recycle()
+            return t.length to t
+        }
+
         // v1.9.89: 页级并行提交（渲染 + 反色 + 分块 OCR 全在 worker 线程；
         // ML Kit recognizer.process 线程安全，可并发。结果按页序收集保证文字顺序稳定）
         if (limit > 0) {
@@ -504,17 +563,27 @@ object PdfOcrEngine {
                         else try {
                             if (isBlankBitmap(bmp)) Triple(i, "", true)
                             else {
-                                val darkRatio = darkPixelRatio(bmp)
-                                val needsInvert = darkRatio > 95.0
-                                var ocrBmp: Bitmap = bmp
-                                var inverted: Bitmap? = null
-                                if (needsInvert) {
-                                    inverted = invertBitmap(bmp)
-                                    if (inverted != null) ocrBmp = inverted
+                                val (baseLen, baseText) = recognizePageMlKit(bmp)
+                                onProgress?.invoke(i + 1, pageCount)
+                                var bestText = baseText
+                                var bestLen = baseLen
+                                // v1.9.126: 自适应 6× 升采样。
+                                if (baseLen < ADAPT_MIN_CHARS) {
+                                    val upBmp = renderPageSysBitmap(file, i, forPrintMode, ADAPT_SCALE)
+                                    if (upBmp != null) {
+                                        try {
+                                            if (!isBlankBitmap(upBmp)) {
+                                                val (upLen, upText) = recognizePageMlKit(upBmp)
+                                                if (upLen > bestLen) {
+                                                    bestLen = upLen
+                                                    bestText = upText
+                                                }
+                                            }
+                                        } finally { upBmp.recycle() }
+                                    }
+                                    onProgress?.invoke(i + 1 + pageCount, pageCount)
                                 }
-                                val t = try { recognizeTiled(ocrBmp) } catch (_: Throwable) { "" }
-                                inverted?.recycle()
-                                Triple(i, t, false)
+                                Triple(i, bestText, false)
                             }
                         } finally { bmp.recycle() }
                     } catch (_: Throwable) { null }
@@ -522,7 +591,7 @@ object PdfOcrEngine {
             }
             for ((idx, f) in futures.withIndex()) {
                 val r = try { f.get(600, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Throwable) { null }
-                onProgress?.invoke(idx + 1, pageCount)
+                // v1.9.126: 进度回调已在 Callable 内完成（含自适应升采样中间进度）。
                 if (r == null) {
                     pageErrors++
                     diag.append(" [p${idx+1}:任务异常]")
