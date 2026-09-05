@@ -5349,6 +5349,16 @@ def _count_geom_frames(rects, min_side=150, min_area=40000, max_ar=10):
 
 
 
+    # v1.8.109 对齐：与 LINE 口径一致（_detect_frame_rectangles 的『主导大框>3×次大框→合并为 1』）：
+    # 若最大框面积 >= 3× 次大框，视为『主图 + 附属块/标题栏/修订表』，合并为 1 张
+    # 图（XT26224：主图框 18.3M 与右侧附属块 5.84M 比值 3.13× → 合并为 1 页）。
+    # 仅当最终剩下 2 个框且比值 >=3× 时才合并，避免把『1 张大图 + 多张独立
+    # 小图』的混合图纸误杀（3+ 张时走既有拼板/容器逻辑）。
+    if len(maximal) == 2:
+        _as = sorted((r[4] for r in maximal), reverse=True)
+        if _as[0] >= 3.0 * _as[1]:
+            return 1
+
     return len(maximal)
 
 
@@ -5961,63 +5971,55 @@ def count_cad_frames(dxf_path):
 
 
 
+        # v1.8.109 对齐：区分「含非视口实体的真实布局」与「仅含视口的空布局」。
+        # 后者图纸内容实际在 Model 空间，传统计数会误把视口布局当一页；桌面版在
+        # geo<=1 时按 1 页计，geo>1 时信任几何图框数（XT26220）。
         paper = 0
-
-
-
+        bare_viewport_layouts = 0
+        paper_total_ents = 0
         try:
-
-
-
             for layout in doc.layouts:
-
-
-
                 if layout.name.upper() == "MODEL":
-
-
-
                     continue
-
-
-
                 try:
-
-
-
-                    if len(list(layout)) > 0:
-
-
-
-                        paper += 1
-
-
-
+                    ents = list(layout)
+                    nents = len(ents)
                 except Exception:
-
-
-
-                    pass
-
-
-
+                    ents, nents = [], 0
+                paper_total_ents += nents
+                if nents == 0:
+                    continue
+                non_vp = [e for e in ents if e.dxftype() != "VIEWPORT"]
+                if len(non_vp) > 0:
+                    paper += 1
+                else:
+                    bare_viewport_layouts += 1
         except Exception:
-
-
-
             paper = 0
+        try:
+            ms_ents = len(doc.modelspace())
+        except Exception:
+            ms_ents = 0
 
-
+        # 几何图框预计算（用于交叉校验布局数及 bare_viewport 兜底）
+        geo = 0
+        try:
+            geo_line = _detect_frame_rectangles(doc)
+        except Exception:
+            geo_line = 0
+        try:
+            geo_lw = _detect_lwpolyline_sheets(doc)
+        except Exception:
+            geo_lw = 0
+        geo = geo_lw if geo_lw >= 1 else geo_line
 
         if paper >= 1:
-
-
-
             return paper, "布局计数"
 
-
-
-
+        # 全部图纸空间布局都是「仅视口」空布局 → 真实出图内容在 Model。
+        # v1.8.109：仅当 Model 内几何图框数 <=1 时才按单页计；否则让后续几何图框估算兜底。
+        if bare_viewport_layouts >= 1 and ms_ents > 50 and geo <= 1:
+            return 1, "Model单图·图纸布局仅含视口"
 
 
 
@@ -6089,54 +6091,8 @@ def count_cad_frames(dxf_path):
 
 
 
-        # 3) 几何图框矩形
-
-
-
-        geo = 0
-
-
-
-        try:
-
-
-
-            geo_line = _detect_frame_rectangles(doc)
-
-
-
-        except Exception:
-
-
-
-            geo_line = 0
-
-
-
-        try:
-
-
-
-            geo_lw = _detect_lwpolyline_sheets(doc)
-
-
-
-        except Exception:
-
-
-
-            geo_lw = 0
-
-
-
-        geo = max(geo_line, geo_lw)
-
-
-
+        # 3) 几何图框矩形（已在顶部预计算 geo，LWPOLYLINE 优先）
         if geo >= 1:
-
-
-
             return geo, "几何图框估算"
 
 
