@@ -3805,7 +3805,7 @@ internal suspend fun processBatchToEntries(
                                 "meta" to emptyMap<String, Any?>(),
                                 "pages" to denomPagesFast,
                                 "diag" to pdfDiag,
-                                "ocrNote" to "文本提取充分，未触发OCR(快速路径:${ktStats.fourth}字/可靠=${ktRes.reliable}/${denomPagesFast}页)"
+                                "ocrNote" to "文本提取充分，未触发OCR"
                             )
                             val fr = toFileResult(resMap, f.absolutePath)
                             emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_fast", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
@@ -3938,7 +3938,7 @@ internal suspend fun processBatchToEntries(
                                 "meta" to emptyMap<String, Any?>(),
                                 "pages" to (if (realPages > 1) realPages else bestPages),
                                 "diag" to pdfDiag,
-                                "ocrNote" to "文本提取充分，未触发OCR(needOcr=false: fe=$bestFe,chars=$bestChars,density=${"%.0f".format(avgCharsPerPage)})"
+                                "ocrNote" to "文本提取充分，未触发OCR"
                             )
                             val fr = toFileResult(resMap, f.absolutePath)
                             emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_ok", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
