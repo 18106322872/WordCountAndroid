@@ -40,7 +40,7 @@ interface StrongOcr {
 object PdfOcrEngine {
 
     private const val MAX_PAGES = 40
-    private const val MAX_DIM = 4096         // v1.5.91: 4K 渲染上限
+    private const val MAX_DIM = 6000         // v1.9.129: 渲染上限对齐桌面 uncapped 6x（A4 6x≈5051px）；原 4096 会把 6x 渲染钳在 4096，召回低于桌面 RapidOCR
     // v1.9.89: 页级并行 OCR（对齐桌面 v1.8.92 _pdf_image_ocr 页级并行）——
     //   · 每页一个任务占用一个池 worker，渲染 + 预处理并行（每任务独立打开 PdfRenderer，
     //     避免共享实例并发渲染；开销仅几 ms）；
@@ -61,6 +61,7 @@ object PdfOcrEngine {
     // 不足导致小字漏检、字数反而下降的问题。
     // 每块放大到 1920px 与 detLongSize 对齐，避免二次缩放模糊。
     private const val TILE_SPLIT_PX = 1100
+    private const val TILE_OVERLAP_PX = 150   // v1.9.129: 分块重叠（对齐桌面 RapidOCR 1400px 块/150px 重叠），避免文字被切块边界切断漏识
     private const val TILE_UPSCALE_PX = 2560
     private const val LOW_RECALL = 200       // v1.5.91: 渲染路径召回低于此字数改试内嵌图
     private const val STRONG_TRIGGER = 800    // 方案 C：主路径总字数低于此值才启用强引擎兜底（图纸类 ML Kit 常 <800，故 PaddleOCR 多会介入）
@@ -415,25 +416,20 @@ object PdfOcrEngine {
                                 else {
                                     val (baseRawLen, baseText) = recognizePageStrong(bmp)
                                     onProgress?.invoke(i + 1, pageCount)
+                                    // v1.9.129: 基准倍率 + 6× 升采样双遍并集（不再只取字数更多者）。
+                                    // 移动端 PP-OCRv4(.nb) 模型弱于桌面 RapidOCR，不同渲染倍率会捕获不同文字，
+                                    // 并集可显著提升召回，逼近桌面计数。
                                     var bestText = baseText
-                                    var bestRawLen = baseRawLen
-                                    // v1.9.126: 自适应 6× 升采样。基础倍率识别字数偏少时，
-                                    // 用 6× 重新渲染并识别，取字数更多者。
-                                    if (baseRawLen < ADAPT_MIN_CHARS) {
-                                        val upBmp = renderPageSysBitmap(file, i, forPrintMode, ADAPT_SCALE)
-                                        if (upBmp != null) {
-                                            try {
-                                                if (!isBlankBitmap(upBmp)) {
-                                                    val (upRawLen, upText) = recognizePageStrong(upBmp)
-                                                    if (upRawLen > bestRawLen) {
-                                                        bestRawLen = upRawLen
-                                                        bestText = upText
-                                                    }
-                                                }
-                                            } finally { upBmp.recycle() }
-                                        }
-                                        onProgress?.invoke(i + 1 + pageCount, pageCount)
+                                    val upBmp = renderPageSysBitmap(file, i, forPrintMode, ADAPT_SCALE)
+                                    if (upBmp != null) {
+                                        try {
+                                            if (!isBlankBitmap(upBmp)) {
+                                                val (upRawLen, upText) = recognizePageStrong(upBmp)
+                                                bestText = mergeOcrTexts(baseText, upText)
+                                            }
+                                        } finally { upBmp.recycle() }
                                     }
+                                    onProgress?.invoke(i + 1 + pageCount, pageCount)
                                     Triple(i, bestText, false)
                                 }
                             } finally { bmp.recycle() }
@@ -565,24 +561,18 @@ object PdfOcrEngine {
                             else {
                                 val (baseLen, baseText) = recognizePageMlKit(bmp)
                                 onProgress?.invoke(i + 1, pageCount)
+                                // v1.9.129: 基准倍率 + 6× 升采样双遍并集（同强引擎路径），最大化移动端召回。
                                 var bestText = baseText
-                                var bestLen = baseLen
-                                // v1.9.126: 自适应 6× 升采样。
-                                if (baseLen < ADAPT_MIN_CHARS) {
-                                    val upBmp = renderPageSysBitmap(file, i, forPrintMode, ADAPT_SCALE)
-                                    if (upBmp != null) {
-                                        try {
-                                            if (!isBlankBitmap(upBmp)) {
-                                                val (upLen, upText) = recognizePageMlKit(upBmp)
-                                                if (upLen > bestLen) {
-                                                    bestLen = upLen
-                                                    bestText = upText
-                                                }
-                                            }
-                                        } finally { upBmp.recycle() }
-                                    }
-                                    onProgress?.invoke(i + 1 + pageCount, pageCount)
+                                val upBmp = renderPageSysBitmap(file, i, forPrintMode, ADAPT_SCALE)
+                                if (upBmp != null) {
+                                    try {
+                                        if (!isBlankBitmap(upBmp)) {
+                                            val (upLen, upText) = recognizePageMlKit(upBmp)
+                                            bestText = mergeOcrTexts(baseText, upText)
+                                        }
+                                    } finally { upBmp.recycle() }
                                 }
+                                onProgress?.invoke(i + 1 + pageCount, pageCount)
                                 Triple(i, bestText, false)
                             }
                         } finally { bmp.recycle() }
@@ -938,23 +928,34 @@ object PdfOcrEngine {
     private fun recognizeTiledGeneric(src: Bitmap, upscalePx: Int = TILE_UPSCALE_PX, recognizer: (Bitmap) -> String?): String {
         if (src.width <= 0 || src.height <= 0) return ""
         val target = TILE_SPLIT_PX
-        val cols = minOf(5, maxOf(1, ceil(src.width.toDouble() / target).toInt()))
-        val rows = minOf(5, maxOf(1, ceil(src.height.toDouble() / target).toInt()))
-        if (cols == 1 && rows == 1) {
+        val overlap = TILE_OVERLAP_PX
+        // v1.9.129: 生成带重叠的切块起点（对齐桌面 RapidOCR 1400px 块/150px 重叠）。
+        // 以 step=target-overlap 滑动步进，最后一块锚定到图边(w-target)，保证整图无遗漏覆盖；
+        // 相邻块重叠 overlap 像素，避免文字被切块边界切断而漏识。
+        val step = max(1, target - overlap)
+        fun axisStarts(len: Int): List<Int> {
+            val xs = mutableListOf<Int>()
+            var x = 0
+            while (x + target < len) { xs.add(x); x += step }
+            xs.add(len - target) // 末块锚定图边，覆盖剩余区域（消除旧版无重叠时的边界漏识 & 防止末段遗漏）
+            return xs.distinct().sorted()
+        }
+        val xs = axisStarts(src.width)
+        val ys = axisStarts(src.height)
+        if (xs.size == 1 && ys.size == 1) {
             return try { recognizer(src) ?: "" } catch (_: Throwable) { "" }
         }
+        val cols = xs.size; val rows = ys.size
         val sb = StringBuilder()
         var totalChars = 0
-        for (r in 0 until rows) {
-            val y = (r * src.height) / rows
-            val h = ((r + 1) * src.height) / rows - y
-            for (c in 0 until cols) {
-                val x = (c * src.width) / cols
-                val w = ((c + 1) * src.width) / cols - x
+        for (y0 in ys) {
+            val h = min(target, src.height - y0)
+            for (x0 in xs) {
+                val w = min(target, src.width - x0)
                 if (w <= 0 || h <= 0) continue
                 var tile: Bitmap? = null
                 try {
-                    tile = Bitmap.createBitmap(src, x, y, w, h)
+                    tile = Bitmap.createBitmap(src, x0, y0, w, h)
                     val ocrBmp = if (max(w, h) < upscalePx) {
                         try {
                             val scale = (upscalePx.toDouble() / max(w, h)).coerceAtMost(3.0)
@@ -972,7 +973,7 @@ object PdfOcrEngine {
                 }
             }
         }
-        Log.d("WordCount", "PdfOcr 分块OCR: ${src.width}x${src.height} -> ${cols}x$rows 块, 识别 $totalChars 字")
+        Log.d("WordCount", "PdfOcr 分块OCR: ${src.width}x${src.height} -> ${cols}x$rows 块(重叠$overlap), 识别 $totalChars 字")
         return sb.toString().trim()
     }
 

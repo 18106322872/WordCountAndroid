@@ -3471,10 +3471,13 @@ internal suspend fun processDwgPipelined(
         control.waitIfPaused()
         if (!control.stopped) {
             try {
+                try { onProgress(cf.displayName, 0, 1) } catch (_: Throwable) {}
                 val res = DwgProcessor.process(context, cf.file, cf.displayName)
                 onResult(0, cf.file, cf.displayName, res)
             } catch (e: Throwable) {
                 onError(0, cf.file, cf.displayName, e.message)
+            } finally {
+                try { onProgress(cf.displayName, 1, 1) } catch (_: Throwable) {}
             }
         }
         return
