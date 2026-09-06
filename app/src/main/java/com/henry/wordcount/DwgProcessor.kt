@@ -118,9 +118,9 @@ object DwgProcessor {
         val cadParts: CadPartStats?,
         val finalText: String
     )
-    suspend fun process(context: Context, file: File, dName: String = file.name): DwgProcessResult {
+    suspend fun process(context: Context, file: File, dName: String = file.name, onProgress: ((String, Int, Int) -> Unit)? = null): DwgProcessResult {
         return try {
-            processInner(context, file, dName)
+            processInner(context, file, dName, onProgress)
         } catch (e: Throwable) {
             // v1.8.9: 任何意外异常都归零显示"-"，绝不再把 scanDwgRaw 二进制噪声当作字数。
             // 此前该兜底返回原始字节扫描结果，对编码混乱/不可读的 DWG 会显示 10059 字/中文54
@@ -130,12 +130,17 @@ object DwgProcessor {
             DwgProcessResult(0, 0, 0, 0, 1, "异常兜底", true, "process异常: ${e.message}", null, "")
         }
     }
-    private suspend fun processInner(context: Context, file: File, dName: String): DwgProcessResult {
-        // v1.9.62: 拆成「阶段A 转换」+「阶段B 解析/OCR」。单文件处理与旧行为完全一致，
-        // 只是把两段解耦，供批量流水线（下一份图纸的转换与上一份图纸的 OCR 重叠）复用。
+    private suspend fun processInner(context: Context, file: File, dName: String, onProgress: ((String, Int, Int) -> Unit)? = null): DwgProcessResult {
+        // v1.9.130: 阶段边界回调进度（仅单文件调用方传入 onProgress 时生效；批量路径用自身 per-file 进度，
+        // 传 null 避免与批次总进度 total 冲突）。调用方以 total=4 播放：0 起始 → 1 转换完 → 2 解析开始 →
+        // 3 解析+计数完 → 4 最终，主界面进度文本随之从「0/4」逐步走到「4/4」，不再卡死在 0/1。
         val conv = convertPhase(context, file)
+        runCatching { onProgress?.invoke(dName, 1, 4) }
         return try {
-            analyzePhase(context, file, dName, conv.dxfPath, conv.diagnostics)
+            runCatching { onProgress?.invoke(dName, 2, 4) }
+            val res = analyzePhase(context, file, dName, conv.dxfPath, conv.diagnostics)
+            runCatching { onProgress?.invoke(dName, 3, 4) }
+            res
         } finally {
             deleteIntermediateDxf(conv.dxfPath)
         }

@@ -3465,23 +3465,26 @@ internal suspend fun processDwgPipelined(
 ) {
     if (dwgFiles.isEmpty()) return
     val total = dwgFiles.size
-    if (total == 1) {
-        // 单文件无需重叠，走原路径（与旧版行为完全一致）
-        val cf = dwgFiles[0]
-        control.waitIfPaused()
-        if (!control.stopped) {
-            try {
-                try { onProgress(cf.displayName, 0, 1) } catch (_: Throwable) {}
-                val res = DwgProcessor.process(context, cf.file, cf.displayName)
-                onResult(0, cf.file, cf.displayName, res)
-            } catch (e: Throwable) {
-                onError(0, cf.file, cf.displayName, e.message)
-            } finally {
-                try { onProgress(cf.displayName, 1, 1) } catch (_: Throwable) {}
+        if (total == 1) {
+            // 单文件无需重叠，走原路径（与旧版行为完全一致）
+            val cf = dwgFiles[0]
+            control.waitIfPaused()
+            if (!control.stopped) {
+                try {
+                    // v1.9.130: 单文件 DWG 进度细分（total=4：转换→解析→计数→完成），
+                    // 解决「单文件统计主界面长时间卡在 0/1 无进度」的问题。DwgProcessor 内部按阶段回调 1/4→3/4。
+                    try { onProgress(cf.displayName, 0, 4) } catch (_: Throwable) {}
+                    val res = DwgProcessor.process(context, cf.file, cf.displayName,
+                        onProgress = { _, step, _ -> try { onProgress(cf.displayName, step, 4) } catch (_: Throwable) {} })
+                    onResult(0, cf.file, cf.displayName, res)
+                } catch (e: Throwable) {
+                    onError(0, cf.file, cf.displayName, e.message)
+                } finally {
+                    try { onProgress(cf.displayName, 4, 4) } catch (_: Throwable) {}
+                }
             }
+            return
         }
-        return
-    }
     // v1.9.88: 批量预算——40 分钟硬约束从「本批第一个 DWG 开始转换」起算（转换也占用预算），
     // 覆盖整批所有 DWG；消费者每完成一个文件 endFile() 配平，perFileBudgetMs 据此动态收紧。
     DwgProcessor.beginBatch(total)
@@ -3796,7 +3799,12 @@ internal suspend fun processBatchToEntries(
                         val pureNonCjkFast = ktStats.second == 0 && ktStats.third >= 500 && ktCharsPerPage >= 200.0
                         val normalFast = ktRes.reliable && ktStats.fourth >= 500 && ktCharsPerPage >= 200.0 && !suspiciousLowFe
                         val anyReliableFast = ktRes.reliable && ktStats.fourth >= 1000 && ktCharsPerPage >= 100.0
-                        if ((normalFast || pureNonCjkFast || anyReliableFast) && !l1RawPoisoned && !silentChineseLossFast) {
+                        // v1.9.130: 快速路径(跳过 Python/OCR) 必须同时满足「明显高密度文本」——
+                        // avgCharsPerPage>=800 且 avgWordsPerPage>=200（对齐桌面"整篇文字层充分"判定）。
+                        // 否则（如头盔烘干机 PDF：4 页仅 ~128 字/页）即便 Kotlin L1 抽到几百字也疑似抽取不全，
+                        // 必须落入后续 Python + OCR 决策，避免被秒出导致"512 字 vs 桌面 1422 字"的落差。
+                        val denseTextFast = ktCharsPerPage >= 800.0 && ktWordsPerPage >= 200.0
+                        if ((normalFast || pureNonCjkFast || anyReliableFast) && !l1RawPoisoned && !silentChineseLossFast && denseTextFast) {
                             val pdfDiag = buildString {
                                 appendLine("【PDF诊断】Kotlin快速路径：${ktStats.fourth}字(fe=${ktStats.second},nc=${ktStats.third})/${denomPagesFast}页，跳过Python/OCR")
                                 appendLine("KT内部: ${ktRes.diag}")
@@ -3960,21 +3968,39 @@ internal suspend fun processBatchToEntries(
                             })
 
                             if (ocrRes != null) {
-                                // v1.9.52: 对齐桌面版 extract_pdf 的 whole_poisoned 口径——触发 OCR 分支说明
-                                // 该 PDF 是图纸类/图片型/文字层污染，应以整页 OCR 结果为准，不再把 Level1/Level2
-                                // 的少量文本层补回 OCR（避免重复计数/污染）。
                                 val finalText = PdfOcrEngine.stripNoiseFarEast(PdfOcrEngine.filterStrongCjkNoise(ocrRes.text))
                                 val ocrStats = countTextKotlin(finalText)
-                                val resMap = mapOf(
-                                    "name" to dName, "ext" to ".pdf",
-                                    "stats" to mapOf("words" to ocrStats.first, "fe" to ocrStats.second, "nc" to ocrStats.third, "chars" to ocrStats.fourth),
-                                    "meta" to emptyMap<String, Any?>(),
-                                    "pages" to ocrRes.pages,
-                                    "diag" to "$pdfDiag\n(OCR补充)",
-                                    "ocrNote" to PdfOcrEngine.buildOcrNote(ocrRes.pages, "")
-                                )
-                                val fr = toFileResult(resMap, f.absolutePath)
-                                emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_ocr", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                                // v1.9.130: OCR 与文本层取优——移动端 PP-OCRv4 量化模型对纯文本 PDF 偶尔
+                                // 识别字数少于干净的文本层（如头盔 PDF：文本层 1422 字、OCR 仅 ~1400）。
+                                // 仅当 OCR 字数 >= 文本层时才采用 OCR 结果；否则保留文本层并标注「OCR已跑但略少」，
+                                // 避免弱模型 OCR 反而把字数拉低（与桌面「文本充分时以文本层为准」一致）。
+                                if (ocrStats.fourth >= bestChars) {
+                                    // v1.9.52: 对齐桌面版 extract_pdf 的 whole_poisoned 口径——OCR 字数不少于文本层，
+                                    // 以整页 OCR 结果为准，不再把 Level1/Level2 的少量文本层补回（避免重复计数/污染）。
+                                    val resMap = mapOf(
+                                        "name" to dName, "ext" to ".pdf",
+                                        "stats" to mapOf("words" to ocrStats.first, "fe" to ocrStats.second, "nc" to ocrStats.third, "chars" to ocrStats.fourth),
+                                        "meta" to emptyMap<String, Any?>(),
+                                        "pages" to ocrRes.pages,
+                                        "diag" to "$pdfDiag\n(OCR补充)",
+                                        "ocrNote" to PdfOcrEngine.buildOcrNote(ocrRes.pages, "")
+                                    )
+                                    val fr = toFileResult(resMap, f.absolutePath)
+                                    emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_ocr", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                                } else {
+                                    // OCR 字数少于文本层 → 保留更完整的文本层结果（仍标注 OCR 已触发跑过）
+                                    Diag.d( "PDF OCR取优 $dName: OCR=${ocrStats.fourth}ch < 文本层=${bestChars}ch，保留文本层")
+                                    val resMap = mapOf(
+                                        "name" to dName, "ext" to ".pdf",
+                                        "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars),
+                                        "meta" to emptyMap<String, Any?>(),
+                                        "pages" to (if (realPages > 1) realPages else bestPages),
+                                        "diag" to "$pdfDiag\n(OCR已触发但字数少于文本层，保留文本层)",
+                                        "ocrNote" to "OCR已触发，结果并入文本层"
+                                    )
+                                    val fr = toFileResult(resMap, f.absolutePath)
+                                    emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_txt", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                                }
                             } else {
                                 // 全部失败 → 显示最佳可用结果或错误
                                 if (bestChars > 0) {

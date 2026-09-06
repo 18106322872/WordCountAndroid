@@ -141,13 +141,19 @@ object PdfOcrEngine {
         lastPaddleInitError = PaddleOcr.lastError ?: ""
         Log.d("WordCount", "PdfOcr 开始: ${file.name} (${file.length()} bytes) printMode=$forPrintMode ocrEnabled=${OcrEngine.ocrEnabled} ocrFailed=${OcrEngine.ocrFailed} strongOcr=${PaddleOcr.available} paddleErr=${lastPaddleInitError}")
 
-        // v1.9.52: 对齐桌面版 extract_pdf 口径——进入 OCR 分支的 PDF 已被判定为图纸类/图片型/文字层污染，
-        // 直接走单一 OCR 引擎整页识别，不再先 ML Kit 再 PaddleOCR 双跑。
-        // 进度回调在“每页渲染+识别”完全结束后才触发，确保走到 N/N 时结果已出、不再卡在最后进度。
+        // v1.9.130: 三级 OCR 回退链——任一引擎失败(返回 null)立即试下一个，避免「PaddleOCR 可用却在本文件上
+        // 失败 → 直接 null → 显示'OCR未成功'」的致命缺口（如纯图片 PDF P403051）。
+        //   ① 强引擎 PaddleOCR(available 时)
+        //   ② ML Kit（系统 PdfRenderer 渲染，走与强引擎不同的渲染路径，常能补 PaddleOCR 漏掉的页）
+        //   ③ PdfiumAndroid（第三渲染后端，对个别 PdfRenderer/PaddleOCR 双双失败的 PDF 仍有机会出图）
+        // 仅当三者全部失败才返回 null，界面才会显示「OCR未成功」。
         val result = if (PaddleOcr.available) {
             renderAndRecognizeStrong(context, file, forPrintMode, onProgress)
+                ?: renderWithSystemMlKit(context, file, forPrintMode, onProgress)
+                ?: renderWithPdfium(context, file, forPrintMode)
         } else {
             renderWithSystemMlKit(context, file, forPrintMode, onProgress)
+                ?: renderWithPdfium(context, file, forPrintMode)
         }
 
         lastMergedChars = result?.text?.length ?: 0
@@ -414,7 +420,7 @@ object PdfOcrEngine {
                             else try {
                                 if (isBlankBitmap(bmp)) Triple(i, "", true)
                                 else {
-                                    val (baseRawLen, baseText) = recognizePageStrong(bmp)
+                                    val (_, baseText) = recognizePageStrong(bmp)
                                     onProgress?.invoke(i + 1, pageCount)
                                     // v1.9.129: 基准倍率 + 6× 升采样双遍并集（不再只取字数更多者）。
                                     // 移动端 PP-OCRv4(.nb) 模型弱于桌面 RapidOCR，不同渲染倍率会捕获不同文字，
@@ -424,7 +430,7 @@ object PdfOcrEngine {
                                     if (upBmp != null) {
                                         try {
                                             if (!isBlankBitmap(upBmp)) {
-                                                val (upRawLen, upText) = recognizePageStrong(upBmp)
+                                                val (_, upText) = recognizePageStrong(upBmp)
                                                 bestText = mergeOcrTexts(baseText, upText)
                                             }
                                         } finally { upBmp.recycle() }
@@ -559,7 +565,7 @@ object PdfOcrEngine {
                         else try {
                             if (isBlankBitmap(bmp)) Triple(i, "", true)
                             else {
-                                val (baseLen, baseText) = recognizePageMlKit(bmp)
+                                val (_, baseText) = recognizePageMlKit(bmp)
                                 onProgress?.invoke(i + 1, pageCount)
                                 // v1.9.129: 基准倍率 + 6× 升采样双遍并集（同强引擎路径），最大化移动端召回。
                                 var bestText = baseText
@@ -567,7 +573,7 @@ object PdfOcrEngine {
                                 if (upBmp != null) {
                                     try {
                                         if (!isBlankBitmap(upBmp)) {
-                                            val (upLen, upText) = recognizePageMlKit(upBmp)
+                                            val (_, upText) = recognizePageMlKit(upBmp)
                                             bestText = mergeOcrTexts(baseText, upText)
                                         }
                                     } finally { upBmp.recycle() }
