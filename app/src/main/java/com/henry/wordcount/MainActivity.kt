@@ -1555,8 +1555,8 @@ fun buildPdfPartStats(text: String, fe: Int, nc: Int, chars: Int): PdfPartStats 
     val numChars = countPureDigitChars(text)
     val numWords = countPureDigitWords(text)
     val textFe = fe
-    val textNc = max(0, nc - numWords)
-    val textChars = max(0, chars - numChars)
+    val textNc = maxOf(0, nc - numWords)
+    val textChars = maxOf(0, chars - numChars)
     val textWords = textFe + textNc
     return PdfPartStats(
         textWords = textWords, textFe = textFe, textNc = textNc, textChars = textChars,
