@@ -212,18 +212,10 @@ object FileProcessor {
                 )
                 ProcessOutput(resMap, null)
             } else {
-                if (bestChars > 0) {
-                    val ocrDiag = PdfOcrEngine.lastDiag
-                    val resMap = mapOf(
-                        "name" to dName, "ext" to ".pdf",
-                        "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars),
-                        "meta" to emptyMap<String, Any?>(),
-                        "pages" to (if (realPages > 1) realPages else bestPages),
-                        "diag" to "$pdfDiag\n(降级:文本少+OCR失败)\nOCR详情: ${if (ocrDiag.isNotEmpty()) ocrDiag else "无"}",
-                        "ocrNote" to "⚠️ OCR未成功，已用文本层降级(详见诊断)"
-                    )
-                    ProcessOutput(resMap, null)
-                } else {
+                // v1.9.136: OCR 已判定文本层不可靠（needOcr=true）且全部 OCR 路径失败，
+                //   不再降级使用 L1/L2 文本层（避免图片 PDF 把嵌入垃圾/结构字符当正文）。
+                val ocrDiag = PdfOcrEngine.lastDiag
+                Diag.w("PDF OCR全部失败(不再降级文本层): $dName best=${bestChars}ch ocrDiag=$ocrDiag")
                     var pdfPageCount = if (bestPages > 1) bestPages else 1
                     try {
                         val pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)

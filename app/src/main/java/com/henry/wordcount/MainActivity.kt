@@ -4130,49 +4130,38 @@ internal suspend fun processBatchToEntries(
                                     emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_txt", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                                 }
                             } else {
-                                // 全部失败 → 显示最佳可用结果或错误
-                                if (bestChars > 0) {
-                                    // 有一些文本（虽然少）→ 降级使用
-                                    val ocrDiag = PdfOcrEngine.lastDiag
-                                    Diag.w( "PDF 降级(文本少+OCR失败): $dName best=${bestChars}ch ocrDiag=$ocrDiag")
-                                    val resMap = mapOf(
-                                        "name" to dName, "ext" to ".pdf",
-                                        "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars),
-                                        "meta" to emptyMap<String, Any?>(),
-                                        "pages" to (if (realPages > 1) realPages else bestPages),
-                                        "diag" to "$pdfDiag\n(降级:文本少+OCR失败)\nOCR详情: ${if (ocrDiag.isNotEmpty()) ocrDiag else "无"}",
-                                        "ocrNote" to "⚠️ OCR未成功，已用文本层降级(详见诊断)"
-                                    )
-                                    val fr = toFileResult(resMap, f.absolutePath)
-                                    emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_fallback", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-                                } else {
-                                    // 完全没有文本 → 报错
-                                    var pdfPageCount = if (bestPages > 1) bestPages else 1
-                                    try {
-                                        val pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
-                                        val renderer = PdfRenderer(pfd)
-                                        pdfPageCount = renderer.pageCount
-                                        renderer.close(); pfd.close()
-                                    } catch (_: Throwable) {}
-                                    val reason = PdfOcrEngine.lastFailReason
-                                    val detail = PdfOcrEngine.lastFailDetail
-                                    val errMsg = when (reason) {
-                                        PdfOcrEngine.FailReason.OCR_DISABLED ->
-                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），OCR 引擎未就绪。"
-                                        PdfOcrEngine.FailReason.RENDER_FAILED,
-                                        PdfOcrEngine.FailReason.PDFIUM_FAILED,
-                                        PdfOcrEngine.FailReason.PDFIUM_UNAVAILABLE,
-                                        PdfOcrEngine.FailReason.RENDER_BLANK,
-                                        PdfOcrEngine.FailReason.PDFIUM_BLANK ->
-                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），渲染引擎无法处理（可能为 JPEG2000/JBIG2 编码）。${if(detail.isNotBlank()) "($detail)" else ""}"
-                                        PdfOcrEngine.FailReason.OCR_EMPTY,
-                                        PdfOcrEngine.FailReason.NO_EMBEDDED_IMAGES ->
-                                            "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），OCR 未识别到有效文字。"
-                                        PdfOcrEngine.FailReason.RENDER_PARTIAL ->
-                                            "此 PDF 部分页面渲染异常（$pdfPageCount 页），OCR 结果不完整。"
-                                        else -> "无法从该 PDF 提取文字（$pdfPageCount 页，可能为纯图片、加密或损坏文件）。${if(detail.isNotBlank()) "\n原因: $detail" else ""}"
-                                    }
-                                    emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_err", displayName = dName, cachePath = f.absolutePath, error = errMsg))
+                                // v1.9.136: OCR 已判定文本层不可靠（needOcr=true）且全部 OCR 路径失败，
+                                //   不再降级使用 L1/L2 文本层。P403051 类图片 PDF 的 L1 字符来自嵌入垃圾/结构字符，
+                                //   当正文用会虚增字数。直接报错并给出 OCR 失败原因。
+                                val ocrDiag = PdfOcrEngine.lastDiag
+                                Diag.w( "PDF OCR全部失败(不再降级文本层): $dName best=${bestChars}ch ocrDiag=$ocrDiag")
+                                // OCR 全部失败 → 报错（不再用文本层兜底）
+                                var pdfPageCount = if (bestPages > 1) bestPages else 1
+                                try {
+                                    val pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
+                                    val renderer = PdfRenderer(pfd)
+                                    pdfPageCount = renderer.pageCount
+                                    renderer.close(); pfd.close()
+                                } catch (_: Throwable) {}
+                                val reason = PdfOcrEngine.lastFailReason
+                                val detail = PdfOcrEngine.lastFailDetail
+                                val errMsg = when (reason) {
+                                    PdfOcrEngine.FailReason.OCR_DISABLED ->
+                                        "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），OCR 引擎未就绪。"
+                                    PdfOcrEngine.FailReason.RENDER_FAILED,
+                                    PdfOcrEngine.FailReason.PDFIUM_FAILED,
+                                    PdfOcrEngine.FailReason.PDFIUM_UNAVAILABLE,
+                                    PdfOcrEngine.FailReason.RENDER_BLANK,
+                                    PdfOcrEngine.FailReason.PDFIUM_BLANK ->
+                                        "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），渲染引擎无法处理（可能为 JPEG2000/JBIG2 编码）。${if(detail.isNotBlank()) "($detail)" else ""}"
+                                    PdfOcrEngine.FailReason.OCR_EMPTY,
+                                    PdfOcrEngine.FailReason.NO_EMBEDDED_IMAGES ->
+                                        "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），OCR 未识别到有效文字。"
+                                    PdfOcrEngine.FailReason.RENDER_PARTIAL ->
+                                        "此 PDF 部分页面渲染异常（$pdfPageCount 页），OCR 结果不完整。"
+                                    else -> "无法从该 PDF 提取文字（$pdfPageCount 页，可能为纯图片、加密或损坏文件）。${if(detail.isNotBlank()) "\n原因: $detail" else ""}"
+                                }
+                                emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_err", displayName = dName, cachePath = f.absolutePath, error = errMsg))
                                 }
                             }
                         }
