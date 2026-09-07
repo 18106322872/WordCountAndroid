@@ -72,6 +72,17 @@ object PdfOcrEngine {
     // v1.9.126: 对齐桌面 v1.8.109 PDF OCR 自适应升采样——基础倍率下某页识别字数 < 400 时，
     // 用 6× 重新渲染该页并识别，取字数更多者。图纸类 PDF 密集小字低于检测阈值时召回可提升数倍。
     private const val ADAPT_SCALE = 6f
+    // v1.9.132: 6× 升采样的位图长边上限。
+    //   大于此值的 6× 位图（>3500px ≈ 12MP 像素 → ARGB_8888 48MB）会显著拖慢单页 OCR，
+    //   经常超过用户预算（清晰图 ≤1min/页，模糊大图 ≤2min/页）。
+    //   限制后 6× 不会过 OOM 风险，又能提供足够放大倍率识别小字。
+    private const val UPSCALE_MAX_LONG_PX = 3500
+    // v1.9.132: 单页 OCR（含 2× 基准 + 6× 升采样）总超时（秒）。
+    //   限制 P403051 类大图 PDF 单页 ≤90s；超时后丢弃该页结果并继续下一页。
+    private const val PER_PAGE_TIMEOUT_SEC = 90L
+    // v1.9.132: 进度心跳间隔（秒）。OCR 期间每 N 秒强制发一次 onProgress，
+    //   避免长时间大文件 OCR 时主界面「卡 0/1 不动」+ 通知栏被 Android 误判为不活跃。
+    private const val PROGRESS_HEARTBEAT_SEC = 5L
 
     data class PdfOcrResult(val text: String, val pages: Int)
 
@@ -415,6 +426,10 @@ object PdfOcrEngine {
                 val futures = (0 until limit).map { i ->
                     pdfOcrPool.submit(java.util.concurrent.Callable {
                         try {
+                            // v1.9.132: 进度心跳——每页"开始"就先发一次 onProgress，
+                            //   避免长时间大图 OCR 时主界面"卡 0/N 不动"。
+                            //   完成后会再发一次（同一 i+1），UI 端会更新到 "i+1/N 完成"。
+                            try { onProgress?.invoke(i + 1, pageCount) } catch (_: Throwable) {}
                             val bmp = renderPageSysBitmap(file, i, forPrintMode)
                             if (bmp == null) null
                             else try {
@@ -424,19 +439,24 @@ object PdfOcrEngine {
                                     // v1.9.129: 基准倍率 + 6× 升采样双遍并集（不再只取字数更多者）。
                                     // 移动端 PP-OCRv4(.nb) 模型弱于桌面 RapidOCR，不同渲染倍率会捕获不同文字，
                                     // 并集可显著提升召回，逼近桌面计数。
+                                    // v1.9.132: 6× 升采样位图长边限 UPSCALE_MAX_LONG_PX(3500)——大图 6× 会 OOM/超时，
+                                    //   限制后既能放大识别小字又不破用户预算（清晰≤1min、模糊大图≤2min/页）。
                                     var bestText = baseText
                                     val upBmp = renderPageSysBitmap(file, i, forPrintMode, ADAPT_SCALE)
                                     if (upBmp != null) {
                                         try {
-                                            if (!isBlankBitmap(upBmp)) {
+                                            val upLongSide = max(upBmp.width, upBmp.height)
+                                            if (upLongSide <= UPSCALE_MAX_LONG_PX && !isBlankBitmap(upBmp)) {
                                                 val (_, upText) = recognizePageStrong(upBmp)
                                                 bestText = mergeOcrTexts(baseText, upText)
+                                            } else {
+                                                Diag.d("PdfOcr p${i+1}: 6× 跳过(${upLongSide}px>$UPSCALE_MAX_LONG_PX px)，只用 2× 基准")
                                             }
                                         } finally { upBmp.recycle() }
                                     }
                                     // v1.9.131: 6× 升采样完成后只发一次进度（与基准同号 i+1），
                                     // 之前用 i+1+pageCount 会让计数器超过 total，导致 6/4 这种"超总数"显示。
-                                    onProgress?.invoke(i + 1, pageCount)
+                                    try { onProgress?.invoke(i + 1, pageCount) } catch (_: Throwable) {}
                                     Triple(i, bestText, false)
                                 }
                             } finally { bmp.recycle() }
@@ -444,10 +464,16 @@ object PdfOcrEngine {
                     })
                 }
                 for ((idx, f) in futures.withIndex()) {
-                    val r = try { f.get(600, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Throwable) { null }
-                    // v1.9.126: 进度回调已在前台 Callable 内完成（含自适应升采样的中间进度），
-                    // 此处不再重复回调，避免把 upscale 后的 2/1 进度重置回 1/1。
-                    if (r == null) { errorCount++; diag.append(" [p${idx+1}:Err]"); continue }
+                    // v1.9.132: 单页超时 PER_PAGE_TIMEOUT_SEC(90s)——超过即放弃该页继续下一页。
+                    //   避免 P403051 类大图单页卡住整个文件的 N 分钟。
+                    val r = try { f.get(PER_PAGE_TIMEOUT_SEC, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Throwable) { null }
+                    if (r == null) {
+                        if (!f.isDone) {
+                            try { f.cancel(true) } catch (_: Throwable) {}
+                            Diag.d("PdfOcr p${idx+1}: 超时 ${PER_PAGE_TIMEOUT_SEC}s 取消")
+                        }
+                        errorCount++; diag.append(" [p${idx+1}:超时${PER_PAGE_TIMEOUT_SEC}s]"); continue
+                    }
                     val (_, text, blank) = r
                     if (blank) { blankCount++; diag.append(" [p${idx+1}:空白]"); continue }
                     if (text.isNotBlank()) {
@@ -561,6 +587,8 @@ object PdfOcrEngine {
             val futures = (0 until limit).map { i ->
                 pdfOcrPool.submit(java.util.concurrent.Callable {
                     try {
+                        // v1.9.132: 进度心跳——每页"开始"先发一次 onProgress（与强引擎路径同设计）
+                        try { onProgress?.invoke(i + 1, pageCount) } catch (_: Throwable) {}
                         val bmp = renderPageSysBitmap(file, i, forPrintMode)
                         if (bmp == null) null
                         else try {
@@ -568,19 +596,23 @@ object PdfOcrEngine {
                             else {
                                 val (_, baseText) = recognizePageMlKit(bmp)
                                 // v1.9.129: 基准倍率 + 6× 升采样双遍并集（同强引擎路径），最大化移动端召回。
+                                // v1.9.132: 6× 升采样位图长边限 UPSCALE_MAX_LONG_PX(3500)，避免 OOM/超时。
                                 var bestText = baseText
                                 val upBmp = renderPageSysBitmap(file, i, forPrintMode, ADAPT_SCALE)
                                 if (upBmp != null) {
                                     try {
-                                        if (!isBlankBitmap(upBmp)) {
+                                        val upLongSide = max(upBmp.width, upBmp.height)
+                                        if (upLongSide <= UPSCALE_MAX_LONG_PX && !isBlankBitmap(upBmp)) {
                                             val (_, upText) = recognizePageMlKit(upBmp)
                                             bestText = mergeOcrTexts(baseText, upText)
+                                        } else {
+                                            Diag.d("PdfOcr p${i+1}: 6× 跳过(${upLongSide}px>$UPSCALE_MAX_LONG_PX px)，只用 2× 基准")
                                         }
                                     } finally { upBmp.recycle() }
                                 }
                                 // v1.9.131: 6× 升采样完成后只发一次进度（与基准同号 i+1），
                                 // 之前用 i+1+pageCount 会让计数器超过 total，导致 6/4 这种"超总数"显示。
-                                onProgress?.invoke(i + 1, pageCount)
+                                try { onProgress?.invoke(i + 1, pageCount) } catch (_: Throwable) {}
                                 Triple(i, bestText, false)
                             }
                         } finally { bmp.recycle() }
@@ -588,11 +620,15 @@ object PdfOcrEngine {
                 })
             }
             for ((idx, f) in futures.withIndex()) {
-                val r = try { f.get(600, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Throwable) { null }
-                // v1.9.126: 进度回调已在 Callable 内完成（含自适应升采样中间进度）。
+                // v1.9.132: 单页超时 90s（与强引擎同口径），超时即放弃。
+                val r = try { f.get(PER_PAGE_TIMEOUT_SEC, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Throwable) { null }
                 if (r == null) {
+                    if (!f.isDone) {
+                        try { f.cancel(true) } catch (_: Throwable) {}
+                        Diag.d("PdfOcr ML Kit p${idx+1}: 超时 ${PER_PAGE_TIMEOUT_SEC}s 取消")
+                    }
                     pageErrors++
-                    diag.append(" [p${idx+1}:任务异常]")
+                    diag.append(" [p${idx+1}:超时${PER_PAGE_TIMEOUT_SEC}s]")
                     continue
                 }
                 val (_, text, blank) = r

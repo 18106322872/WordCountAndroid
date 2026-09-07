@@ -393,6 +393,19 @@ data class CadPartStats(
     val textItems: Int, val codeItems: Int
 )
 
+/**
+ * v1.9.132: PDF 文字拆分（文字部分 / 纯编号部分），对齐桌面 DWG 风格的"分文和号"展开。
+ *   文字部分 = 中文 + 英文（不翻译部分）
+ *   纯编号部分 = 纯数字字符（导线号 / 端子号 / 尺寸数字，通常不翻译）
+ *   拆分依据：numChars = ASCII 0-9 字符数；numWords = 纯数字的非 CJK 词数。
+ *   文字部分 nc 已扣除 numWords，文字 chars = total - num（≈ 文字部分 + 标点 + 符号）。
+ *   文字 words = 文字 fe + 文字 nc；编号 words = numWords（每个纯数字词计 1）。
+ */
+data class PdfPartStats(
+    val textWords: Int, val textFe: Int, val textNc: Int, val textChars: Int,
+    val numWords: Int, val numFe: Int, val numNc: Int, val numChars: Int,
+)
+
 data class FileResult(
     val name: String,
     val ext: String,
@@ -420,6 +433,8 @@ data class FileResult(
     val needsPdf: Boolean = false,
     // v1.5.61: CAD 文字/纯编号拆分（仅 DWG 文件可能非空）
     val cadParts: CadPartStats? = null,
+    // v1.9.132: PDF 文字/纯编号拆分（与 DWG 风格一致；与 cadParts 独立）
+    val pdfParts: PdfPartStats? = null,
     // v1.9.111: 文档内嵌图片可选统计（对齐桌面 v1.8.102/1.8.103「文档中图片字数」行）
     //   docImageCount —— 阶段二提取到的内嵌图片张数（此阶段只提取不 OCR，避免拖慢字数显示）
     //   docImgDir     —— 图片落盘的临时目录（cacheDir/wc_docimg_*），供 OCR 与清理使用
@@ -1218,6 +1233,8 @@ fun FileCard(
                             (r.hiddenSheets?.size ?: 0) +
                             (if (r.notesSlides?.isNotEmpty() == true) 1 else 0) +
                             (if (r.cadParts != null) 2 else 0) +
+                            // v1.9.132: PDF 文字/纯编号拆分（与 DWG cadParts 同级独立计数）
+                            (if (r.pdfParts != null) 2 else 0) +
                             // v1.9.111: 内嵌图片行（docImageCount 为提取阶段真实张数，老路径退回 imageCount）
                             if (r.docImageCount > 0 || r.imageCount > 0) 1 else 0
                         if (detailCount > 0) {
@@ -1363,6 +1380,26 @@ fun FileCard(
                     Text("字 ${cadParts.codeWords} 中 ${cadParts.codeFe} 非 ${cadParts.codeNc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
             }
+            // v1.9.132: PDF 文字/纯编号拆分（与 DWG cadParts 风格一致，标签换"文/号"，默认都勾选）
+            val pdfParts = entry.result?.pdfParts
+            if (pdfParts != null) {
+                val textKey = "${entry.id}::pdf::text"
+                val numKey = "${entry.id}::pdf::num"
+                val textChecked = hiddenSelected[textKey] ?: true
+                val numChecked = hiddenSelected[numKey] ?: true
+                Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("文", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2B579A))
+                    Checkbox(checked = textChecked, onCheckedChange = { hiddenSelected[textKey] = !(hiddenSelected[textKey] ?: true) }, modifier = Modifier.size(24.dp))
+                    Text("文字部分（中文 / 英文）", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    Text("字 ${pdfParts.textWords} 中 ${pdfParts.textFe} 非 ${pdfParts.textNc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                }
+                Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("号", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2B579A))
+                    Checkbox(checked = numChecked, onCheckedChange = { hiddenSelected[numKey] = !(hiddenSelected[numKey] ?: true) }, modifier = Modifier.size(24.dp))
+                    Text("纯编号部分（导线号 / 端子号 / 尺寸数字，通常不翻译）", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    Text("字 ${pdfParts.numWords} 中 ${pdfParts.numFe} 非 ${pdfParts.numNc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                }
+            }
             // v1.9.111: 文档中图片字数（对齐桌面 v1.8.102 的 DOCIMG 行）。
             //   未 OCR：显示「共 N 张图片，勾选后识别」+ 选择框；
             //   已 OCR：显示 OCR 出的字数；勾选状态同步控制底部合计（v1.9.116：
@@ -1482,6 +1519,65 @@ fun countPureDigitChars(text: String): Int {
     for (c in text) if (c in '0'..'9') n++
     return n
 }
+
+/**
+ * v1.9.132: 统计纯数字的"非 CJK 词"数（如 "12.5" / "100" / "M12-A" 视作词）—— 仅当整词由 0-9 + 标点（.-_/）组成时算 1。
+ * 用于 PDF「纯编号部分」字数估算：
+ *   numWords = 纯数字词数（导线号/端子号/尺寸数字等通常不翻译部分）
+ *   numChars = 纯数字字符数（更细的统计，与 v1.9.131 的 num 同义）
+ *   文字部分 nc = nc - numWords（去掉纯数字词后剩下的英文/符号词）
+ */
+fun countPureDigitWords(text: String): Int {
+    if (text.isEmpty()) return 0
+    val nonCjkRegex = Regex("[^\\s\\u1100-\\u11FF\\u3000-\\u303F\\u3130-\\u318F\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uA960-\\uA97C\\uAC00-\\uD7A3\\uD7B0-\\uD7FF\\uF900-\\uFAFF\\uFF00-\\uFFEF]+")
+    var n = 0
+    for (m in nonCjkRegex.findAll(text)) {
+        val token = m.value
+        if (token.isNotEmpty() && token.all { it.isDigit() || it == '.' || it == '-' || it == '_' || it == '/' }) {
+            n++
+        }
+    }
+    return n
+}
+
+/**
+ * v1.9.132: 从已有统计 + 文本构造 PDF 拆分（文字部分 / 纯编号部分），
+ * 用于 UI 展开后分别显示（与 DWG cadParts 风格一致）。
+ *   textFe = fe（中文不动）
+ *   textNc = max(0, nc - numWords)（去掉纯数字词后的英文/符号词）
+ *   textChars = max(0, chars - numChars)（总字符减纯数字字符）
+ *   textWords = textFe + textNc
+ *   numChars = countPureDigitChars(text)
+ *   numWords = countPureDigitWords(text)
+ *   numFe = 0；numNc = numWords
+ */
+fun buildPdfPartStats(text: String, fe: Int, nc: Int, chars: Int): PdfPartStats {
+    val numChars = countPureDigitChars(text)
+    val numWords = countPureDigitWords(text)
+    val textFe = fe
+    val textNc = max(0, nc - numWords)
+    val textChars = max(0, chars - numChars)
+    val textWords = textFe + textNc
+    return PdfPartStats(
+        textWords = textWords, textFe = textFe, textNc = textNc, textChars = textChars,
+        numWords = numWords, numFe = 0, numNc = numWords, numChars = numChars
+    )
+}
+
+/**
+ * v1.9.132: 把 PdfPartStats 序列化成 meta["pdf_parts"] 用的 Map，供 toFileResult 反序列化。
+ * 字段命名与 CadPartStats 一致（text_* / num_*）。
+ */
+fun pdfPartsToMap(p: PdfPartStats): Map<String, Any> = mapOf(
+    "text_words" to p.textWords,
+    "text_fe" to p.textFe,
+    "text_nc" to p.textNc,
+    "text_chars" to p.textChars,
+    "num_words" to p.numWords,
+    "num_fe" to p.numFe,
+    "num_nc" to p.numNc,
+    "num_chars" to p.numChars,
+)
 
 // ---------------------------------------------------------------------------
 // v1.9.111: 文档内嵌图片提取 + 并行 OCR
@@ -3829,10 +3925,11 @@ internal suspend fun processBatchToEntries(
                                 appendLine("【PDF诊断】Kotlin快速路径：${ktStats.fourth}字(fe=${ktStats.second},nc=${ktStats.third})/${denomPagesFast}页，跳过Python/OCR")
                                 appendLine("KT内部: ${ktRes.diag}")
                             }.trimEnd()
+                            val pdfP = buildPdfPartStats(ktRes.text, ktStats.second, ktStats.third, ktStats.fourth)
                             val resMap = mapOf(
                                 "name" to dName, "ext" to ".pdf",
-                                "stats" to mapOf("words" to ktStats.first, "fe" to ktStats.second, "nc" to ktStats.third, "chars" to ktStats.fourth, "num" to countPureDigitChars(ktRes.text)),
-                                "meta" to emptyMap<String, Any?>(),
+                                "stats" to mapOf("words" to ktStats.first, "fe" to ktStats.second, "nc" to ktStats.third, "chars" to ktStats.fourth, "num" to pdfP.numChars),
+                                "meta" to mapOf<String, Any?>("pdf_parts" to pdfPartsToMap(pdfP)),
                                 "pages" to denomPagesFast,
                                 "diag" to pdfDiag,
                                 "ocrNote" to "文本提取充分，未触发OCR"
@@ -3924,6 +4021,8 @@ internal suspend fun processBatchToEntries(
                         val bestChars = if (usePython) pyChars else ktStats.fourth
                         val bestPages = if (usePython && pyPages > 0) pyPages else ktRes.pages
                         val bestTextReliable = if (usePython) true else ktRes.reliable
+                        // v1.9.132: 选中结果的原文（用于 PDF 文字/纯编号拆分）—— Python 时无原文，先取 kt 原文作 fallback
+                        val bestText = if (usePython) ktRes.text else ktRes.text
 
                         // 判定是否还需要尝试 OCR
                         val bestCjkRatio = if (bestChars > 0) bestFe.toDouble() / bestChars else 0.0
@@ -3967,11 +4066,12 @@ internal suspend fun processBatchToEntries(
 
                         if (!needOcr) {
                             // ★ 文本提取足够好 → 直接使用
-                            // v1.9.131: 纯数字字符数（bestText 不变量已隐含中文+非中文文本，此处只能近似用 chars 估算或保持 0）
+                            // v1.9.132: PDF 文字/纯编号拆分（与 DWG cadParts 同级展示）
+                            val pdfP = buildPdfPartStats(bestText, bestFe, bestNc, bestChars)
                             val resMap = mapOf(
                                 "name" to dName, "ext" to ".pdf",
-                                "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars, "num" to 0),
-                                "meta" to emptyMap<String, Any?>(),
+                                "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars, "num" to pdfP.numChars),
+                                "meta" to mapOf<String, Any?>("pdf_parts" to pdfPartsToMap(pdfP)),
                                 "pages" to (if (realPages > 1) realPages else bestPages),
                                 "diag" to pdfDiag,
                                 "ocrNote" to "文本提取充分，未触发OCR"
@@ -4003,10 +4103,11 @@ internal suspend fun processBatchToEntries(
                                 if (ocrStats.fourth >= bestChars) {
                                     // v1.9.52: 对齐桌面版 extract_pdf 的 whole_poisoned 口径——OCR 字数不少于文本层，
                                     // 以整页 OCR 结果为准，不再把 Level1/Level2 的少量文本层补回（避免重复计数/污染）。
+                                    val pdfP = buildPdfPartStats(finalText, ocrStats.second, ocrStats.third, ocrStats.fourth)
                                     val resMap = mapOf(
                                         "name" to dName, "ext" to ".pdf",
-                                        "stats" to mapOf("words" to ocrStats.first, "fe" to ocrStats.second, "nc" to ocrStats.third, "chars" to ocrStats.fourth, "num" to countPureDigitChars(finalText)),
-                                        "meta" to emptyMap<String, Any?>(),
+                                        "stats" to mapOf("words" to ocrStats.first, "fe" to ocrStats.second, "nc" to ocrStats.third, "chars" to ocrStats.fourth, "num" to pdfP.numChars),
+                                        "meta" to mapOf<String, Any?>("pdf_parts" to pdfPartsToMap(pdfP)),
                                         "pages" to ocrRes.pages,
                                         "diag" to "$pdfDiag\n(OCR补充)",
                                         "ocrNote" to PdfOcrEngine.buildOcrNote(ocrRes.pages, "")
@@ -4016,10 +4117,11 @@ internal suspend fun processBatchToEntries(
                                 } else {
                                     // OCR 字数少于文本层 → 保留更完整的文本层结果（仍标注 OCR 已触发跑过）
                                     Diag.d( "PDF OCR取优 $dName: OCR=${ocrStats.fourth}ch < 文本层=${bestChars}ch，保留文本层")
+                                    val pdfP = buildPdfPartStats(finalText, bestFe, bestNc, bestChars)
                                     val resMap = mapOf(
                                         "name" to dName, "ext" to ".pdf",
-                                        "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars, "num" to countPureDigitChars(finalText)),
-                                        "meta" to emptyMap<String, Any?>(),
+                                        "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars, "num" to pdfP.numChars),
+                                        "meta" to mapOf<String, Any?>("pdf_parts" to pdfPartsToMap(pdfP)),
                                         "pages" to (if (realPages > 1) realPages else bestPages),
                                         "diag" to "$pdfDiag\n(OCR已触发但字数少于文本层，保留文本层)",
                                         "ocrNote" to "OCR已触发，结果并入文本层"
@@ -4352,6 +4454,20 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
             codeItems = (it["code_items"] as? Number)?.toInt() ?: 0
         )
     }
+    // v1.9.132: PDF 文字/纯编号拆分（与 cadParts 独立，来自 meta["pdf_parts"]）
+    val pdfPartsMap = meta["pdf_parts"] as? Map<*, *>
+    val pdfParts = pdfPartsMap?.let {
+        PdfPartStats(
+            textWords = (it["text_words"] as? Number)?.toInt() ?: 0,
+            textFe = (it["text_fe"] as? Number)?.toInt() ?: 0,
+            textNc = (it["text_nc"] as? Number)?.toInt() ?: 0,
+            textChars = (it["text_chars"] as? Number)?.toInt() ?: 0,
+            numWords = (it["num_words"] as? Number)?.toInt() ?: 0,
+            numFe = (it["num_fe"] as? Number)?.toInt() ?: 0,
+            numNc = (it["num_nc"] as? Number)?.toInt() ?: 0,
+            numChars = (it["num_chars"] as? Number)?.toInt() ?: 0,
+        )
+    }
     return FileResult(
         name = (m?.get("name") as? String) ?: "",
         ext = ext,
@@ -4382,7 +4498,9 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
         // v1.5.36: DWG 统计不准、需文字型 PDF 重新统计时由扫描分支置 true
         needsPdf = (meta["needs_pdf"] as? Boolean) ?: false,
         // v1.5.61: CAD 文字/纯编号拆分
-        cadParts = cadParts
+        cadParts = cadParts,
+        // v1.9.132: PDF 文字/纯编号拆分（与 DWG cadParts 同级，独立字段）
+        pdfParts = pdfParts,
     )
 }
 
