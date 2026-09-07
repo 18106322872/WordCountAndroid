@@ -127,7 +127,7 @@ object OcrEngine {
             if (vt != null) {
                 for (b in vt.textBlocks) for (ln in b.lines) {
                     val bb = ln.boundingBox
-                    if (bb != null) out.add(OcrLine(ln.text ?: "", bb.height))
+                    if (bb != null) out.add(OcrLine(ln.text ?: "", bb.height()))
                 }
             }
             out

@@ -1088,7 +1088,7 @@ object PdfOcrEngine {
 
     // ════════════════ v1.9.134: 字高分布门禁（决定要不要跑 6× 升采样）════════════════
 
-    /** 取行高直方图众数（主体字高）。 */
+    /** 取行高直方图众数（主体字高）。出现次数最多者为众数；并列时取较大字高。 */
     private fun dominantHeight(lines: List<OcrEngine.OcrLine>): Int? {
         if (lines.isEmpty()) return null
         val bins = mutableMapOf<Int, Int>()
@@ -1097,9 +1097,15 @@ object PdfOcrEngine {
             val b = (l.height / binW) * binW
             bins[b] = (bins[b] ?: 0) + 1
         }
-        return bins.entries.maxWithOrNull(
-            compareByDescending<MutableMap.MutableEntry<Int, Int>> { it.value }.thenByDescending { it.key }
-        )?.key
+        var bestKey: Int? = null
+        var bestCount = -1
+        for ((k, v) in bins) {
+            if (v > bestCount || (v == bestCount && k > (bestKey ?: 0))) {
+                bestCount = v
+                bestKey = k
+            }
+        }
+        return bestKey
     }
 
     /**
