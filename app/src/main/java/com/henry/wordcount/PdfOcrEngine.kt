@@ -421,7 +421,6 @@ object PdfOcrEngine {
                                 if (isBlankBitmap(bmp)) Triple(i, "", true)
                                 else {
                                     val (_, baseText) = recognizePageStrong(bmp)
-                                    onProgress?.invoke(i + 1, pageCount)
                                     // v1.9.129: 基准倍率 + 6× 升采样双遍并集（不再只取字数更多者）。
                                     // 移动端 PP-OCRv4(.nb) 模型弱于桌面 RapidOCR，不同渲染倍率会捕获不同文字，
                                     // 并集可显著提升召回，逼近桌面计数。
@@ -435,7 +434,9 @@ object PdfOcrEngine {
                                             }
                                         } finally { upBmp.recycle() }
                                     }
-                                    onProgress?.invoke(i + 1 + pageCount, pageCount)
+                                    // v1.9.131: 6× 升采样完成后只发一次进度（与基准同号 i+1），
+                                    // 之前用 i+1+pageCount 会让计数器超过 total，导致 6/4 这种"超总数"显示。
+                                    onProgress?.invoke(i + 1, pageCount)
                                     Triple(i, bestText, false)
                                 }
                             } finally { bmp.recycle() }
@@ -566,7 +567,6 @@ object PdfOcrEngine {
                             if (isBlankBitmap(bmp)) Triple(i, "", true)
                             else {
                                 val (_, baseText) = recognizePageMlKit(bmp)
-                                onProgress?.invoke(i + 1, pageCount)
                                 // v1.9.129: 基准倍率 + 6× 升采样双遍并集（同强引擎路径），最大化移动端召回。
                                 var bestText = baseText
                                 val upBmp = renderPageSysBitmap(file, i, forPrintMode, ADAPT_SCALE)
@@ -578,7 +578,9 @@ object PdfOcrEngine {
                                         }
                                     } finally { upBmp.recycle() }
                                 }
-                                onProgress?.invoke(i + 1 + pageCount, pageCount)
+                                // v1.9.131: 6× 升采样完成后只发一次进度（与基准同号 i+1），
+                                // 之前用 i+1+pageCount 会让计数器超过 total，导致 6/4 这种"超总数"显示。
+                                onProgress?.invoke(i + 1, pageCount)
                                 Triple(i, bestText, false)
                             }
                         } finally { bmp.recycle() }

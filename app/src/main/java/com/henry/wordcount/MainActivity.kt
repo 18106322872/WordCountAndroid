@@ -433,6 +433,10 @@ data class FileResult(
     val docImgNc: Int = 0,
     val docImgChars: Int = 0,
     val docImgDone: Boolean = false,
+    // v1.9.131: 纯数字字符数（连续数字串的字符总数），用于「统计精确 + DWG 风格按文字/数字拆分」展示。
+    //   拆分 = 中文(fe) + 英文/符号(nc) + 纯数字(num) ≈ chars。用户可一眼看清哪些是数字、哪些是文字。
+    //   多数构造点（缺 text 时）默认 0，UI 仅在 num>0 时显示该字段。
+    val num: Int = 0,
 )
 
 data class FileEntry(
@@ -1181,7 +1185,9 @@ fun FileCard(
                             "字数 - ｜ 中文 - ｜ 非中文 - ｜ $pageLabel" +
                                     (if (r.pagesReason != null && !isEstimated) " ｜ ${r.pagesReason}" else "")
                         } else {
-                            "字数 ${r.words} ｜ 中文 ${r.fe} ｜ 非中文 ${r.nc} ｜ $pageLabel" +
+                            // v1.9.131: 若有「纯数字」拆分数据，附加展示，供用户按 DWG 风格区分文字/数字。
+                            val numSuffix = if (r.num > 0) " ｜ 纯数字 ${r.num}" else ""
+                            "字数 ${r.words} ｜ 中文 ${r.fe} ｜ 非中文 ${r.nc}$numSuffix ｜ $pageLabel" +
                                     (if (r.pagesReason != null && !isEstimated) " ｜ ${r.pagesReason}" else "")
                         }
                         Text(
@@ -1461,6 +1467,20 @@ fun countTextKotlin(text: String): Quadruple<Int, Int, Int, Int> {
 
     val words = totalFe + totalNc
     return Quadruple(words, totalFe, totalNc, totalChars)
+}
+
+/**
+ * v1.9.131: 统计文本中纯数字字符数（0-9 各位数字）—— 用于「DWG 风格按文字/数字拆分」展示。
+ * 用户常见诉求：纯数字/符号不算字数，需分开展示。
+ *   返回：所有 ASCII 数字字符的总数（0-9）。中文数字「一二三」按字面非 ASCII 数字，故不计入。
+ *   仅算 0-9 这 10 个字符；纯数字词（如 "123"）的字符数 3；含数字的混合词（如 "M12"）的字符数 2。
+ *   文本为空返回 0。
+ */
+fun countPureDigitChars(text: String): Int {
+    if (text.isEmpty()) return 0
+    var n = 0
+    for (c in text) if (c in '0'..'9') n++
+    return n
 }
 
 // ---------------------------------------------------------------------------
@@ -3811,7 +3831,7 @@ internal suspend fun processBatchToEntries(
                             }.trimEnd()
                             val resMap = mapOf(
                                 "name" to dName, "ext" to ".pdf",
-                                "stats" to mapOf("words" to ktStats.first, "fe" to ktStats.second, "nc" to ktStats.third, "chars" to ktStats.fourth),
+                                "stats" to mapOf("words" to ktStats.first, "fe" to ktStats.second, "nc" to ktStats.third, "chars" to ktStats.fourth, "num" to countPureDigitChars(ktRes.text)),
                                 "meta" to emptyMap<String, Any?>(),
                                 "pages" to denomPagesFast,
                                 "diag" to pdfDiag,
@@ -3934,7 +3954,12 @@ internal suspend fun processBatchToEntries(
                         // 高密度纯英文文档 avgCharsPerPage>=800 且 avgWordsPerPage>=200 视为正常文字层、不强制。
                         val silentChineseLoss = bestFe == 0 && bestChars in 5..10000
                             && !(avgCharsPerPage >= 800.0 && avgWordsPerPage >= 200.0)
-                        val needOcr = bestChars < 10 || (!bestTextReliable && bestChars < 50) || looksLikeGarbage || isFailedChinesePdf || lowDensity || cjkLooksLikeCidGarbage || (l1RawPoisoned && !usePython) || silentChineseLoss
+                        // v1.9.131: 收紧 OCR 触发条件——
+                        //   桌面 Word COM 口径：只要 PDF 文本层非空就以文本层为准（桌面文本层=OCR文本层，
+                        //   因为 Word 自己会解 CID/ToUnicode）。手机端若也用低密度阈值触发 OCR，移动
+                        //   PP-OCRv4(.nb) 弱模型对纯文本 PDF 反而会输出噪声、把字数拉高（实测头盔烘干机
+                        //   1422→2643）。故移除 `lowDensity` 触发；只在文本层确为空/乱码时才走 OCR。
+                        val needOcr = bestChars < 10 || (!bestTextReliable && bestChars < 50) || looksLikeGarbage || isFailedChinesePdf || cjkLooksLikeCidGarbage || (l1RawPoisoned && !usePython) || silentChineseLoss
                         Diag.d( "PDF OCR决策 $dName: bestChars=$bestChars bestFe=$bestFe bestPages=$bestPages realPages=$realPages avgChars/p=$avgCharsPerPage avgWords/p=$avgWordsPerPage lowDensity=$lowDensity needOcr=$needOcr (garbage=$looksLikeGarbage failedCn=$isFailedChinesePdf cidGarbage=$cjkLooksLikeCidGarbage silent=$silentChineseLoss)")
                         if (lowDensity) pdfDiag += "\nOCR触发: 低字数密度(avg ${"%.0f".format(avgWordsPerPage)}字/页<200)→按桌面口径强制全页OCR"
                         if (cjkLooksLikeCidGarbage) pdfDiag += "\nOCR触发: CJK常用字占比过低(${"%.2f".format(cjkCommonRatio)})，疑似CID/hex伪中文"
@@ -3942,9 +3967,10 @@ internal suspend fun processBatchToEntries(
 
                         if (!needOcr) {
                             // ★ 文本提取足够好 → 直接使用
+                            // v1.9.131: 纯数字字符数（bestText 不变量已隐含中文+非中文文本，此处只能近似用 chars 估算或保持 0）
                             val resMap = mapOf(
                                 "name" to dName, "ext" to ".pdf",
-                                "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars),
+                                "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars, "num" to 0),
                                 "meta" to emptyMap<String, Any?>(),
                                 "pages" to (if (realPages > 1) realPages else bestPages),
                                 "diag" to pdfDiag,
@@ -3979,7 +4005,7 @@ internal suspend fun processBatchToEntries(
                                     // 以整页 OCR 结果为准，不再把 Level1/Level2 的少量文本层补回（避免重复计数/污染）。
                                     val resMap = mapOf(
                                         "name" to dName, "ext" to ".pdf",
-                                        "stats" to mapOf("words" to ocrStats.first, "fe" to ocrStats.second, "nc" to ocrStats.third, "chars" to ocrStats.fourth),
+                                        "stats" to mapOf("words" to ocrStats.first, "fe" to ocrStats.second, "nc" to ocrStats.third, "chars" to ocrStats.fourth, "num" to countPureDigitChars(finalText)),
                                         "meta" to emptyMap<String, Any?>(),
                                         "pages" to ocrRes.pages,
                                         "diag" to "$pdfDiag\n(OCR补充)",
@@ -3992,7 +4018,7 @@ internal suspend fun processBatchToEntries(
                                     Diag.d( "PDF OCR取优 $dName: OCR=${ocrStats.fourth}ch < 文本层=${bestChars}ch，保留文本层")
                                     val resMap = mapOf(
                                         "name" to dName, "ext" to ".pdf",
-                                        "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars),
+                                        "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars, "num" to countPureDigitChars(finalText)),
                                         "meta" to emptyMap<String, Any?>(),
                                         "pages" to (if (realPages > 1) realPages else bestPages),
                                         "diag" to "$pdfDiag\n(OCR已触发但字数少于文本层，保留文本层)",
@@ -4340,6 +4366,7 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
         hiddenSheets = (meta["hidden_sheets"] as? List<*>)?.mapNotNull { it as? SheetStat } ?: emptyList(),
         // v1.3.32: PPT 备注幻灯片
         notesSlides = (meta["notes_slides"] as? List<*>)?.mapNotNull { it as? SheetStat } ?: emptyList(),
+        num = (stats["num"] as? Number)?.toInt() ?: 0,
         // v1.3.32: PPT 嵌入图片数量
         imageCount = imageCount,
         // v1.3.32: 文件内部标题
