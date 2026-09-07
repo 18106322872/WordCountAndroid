@@ -245,7 +245,6 @@ object FileProcessor {
                 }
             }
         }
-    }
 
     // ───────────────────────── OOXML ─────────────────────────
     private fun processOoXml(f: File, dName: String): ProcessOutput {

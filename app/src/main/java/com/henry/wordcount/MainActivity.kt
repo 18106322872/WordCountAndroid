@@ -4128,7 +4128,6 @@ internal suspend fun processBatchToEntries(
                                     )
                                     val fr = toFileResult(resMap, f.absolutePath)
                                     emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_txt", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-                                }
                             } else {
                                 // v1.9.136: OCR 已判定文本层不可靠（needOcr=true）且全部 OCR 路径失败，
                                 //   不再降级使用 L1/L2 文本层。P403051 类图片 PDF 的 L1 字符来自嵌入垃圾/结构字符，
