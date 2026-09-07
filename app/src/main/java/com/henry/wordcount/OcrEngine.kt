@@ -115,7 +115,7 @@ object OcrEngine {
 
     /**
      * 返回位图中所有文本行及其包围盒高度（ML Kit，快速、线程安全）。
-     * v1.9.134: 用于判断"主体字高"是否已被 2× 基准捕获，决定要不要跑 6× 升采样。
+     * v1.9.135: 用于判断"主体字高"是否已被 2× 基准捕获，决定要不要跑 6× 升采样。
      */
     fun recognizeLines(bitmap: android.graphics.Bitmap): List<OcrLine> {
         if (!ocrEnabled) return emptyList()
