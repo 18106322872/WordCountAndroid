@@ -83,6 +83,13 @@ object PdfOcrEngine {
     // v1.9.132: 进度心跳间隔（秒）。OCR 期间每 N 秒强制发一次 onProgress，
     //   避免长时间大文件 OCR 时主界面「卡 0/1 不动」+ 通知栏被 Android 误判为不活跃。
     private const val PROGRESS_HEARTBEAT_SEC = 5L
+    // v1.9.134: 字高分布门禁——仅当 2× 基准漏抓"主体字"时才跑 6× 升采样（用户提速诉求）。
+    //   先由 ML Kit 探针取该页所有行高 → 直方图众数=主体字高 → 统计主体字总字数：
+    //     · 主体字总字数 < BODY_MIN_CHARS：稀疏页/只有极小标签，跑 6× 也捡不到主体 → 跳过 6×。
+    //     · 2× 基准已捕获 ≥ BODY_CAPTURE_RATIO 的主体字：主体已抓到，仅极小字漏 → 跳过 6×。
+    //     · 其余（主体字 2× 没抓到）：跑 6× 并集（符合"连主体大小都统计不出就跑 6×"）。
+    private const val BODY_MIN_CHARS = 30
+    private const val BODY_CAPTURE_RATIO = 0.6f
 
     data class PdfOcrResult(val text: String, val pages: Int)
 
@@ -368,6 +375,8 @@ object PdfOcrEngine {
         var blankCount = 0
         var errorCount = 0
         var pageCount = 0
+        // v1.9.133: 超时页兜底用——每页 2× 基准结果算完后立即发布到这里，超时分支读取作最优可用解。
+        val pageBase = java.util.concurrent.ConcurrentHashMap<Int, String>()
 
         fun processBitmap(bmp: Bitmap, source: String, pageIdx: Int) {
             try {
@@ -436,6 +445,7 @@ object PdfOcrEngine {
                                 if (isBlankBitmap(bmp)) Triple(i, "", true)
                                 else {
                                     val (_, baseText) = recognizePageStrong(bmp)
+                                    pageBase[i] = baseText   // v1.9.133: 发布 2× 基准，供超时兜底
                                     // v1.9.129: 基准倍率 + 6× 升采样双遍并集（不再只取字数更多者）。
                                     // 移动端 PP-OCRv4(.nb) 模型弱于桌面 RapidOCR，不同渲染倍率会捕获不同文字，
                                     // 并集可显著提升召回，逼近桌面计数。
@@ -447,8 +457,13 @@ object PdfOcrEngine {
                                         try {
                                             val upLongSide = max(upBmp.width, upBmp.height)
                                             if (upLongSide <= UPSCALE_MAX_LONG_PX && !isBlankBitmap(upBmp)) {
-                                                val (_, upText) = recognizePageStrong(upBmp)
-                                                bestText = mergeOcrTexts(baseText, upText)
+                                                // v1.9.134: 字高分布门禁——仅当 2× 基准漏抓"主体字"时才跑 6× 升采样
+                                                if (isBodyCaptured(bmp, baseText)) {
+                                                    Diag.d("PdfOcr p${i+1}: 6× 跳过(主体字已抓到/稀疏页)，只用 2× 基准")
+                                                } else {
+                                                    val (_, upText) = recognizePageStrong(upBmp)
+                                                    bestText = mergeOcrTexts(baseText, upText)
+                                                }
                                             } else {
                                                 Diag.d("PdfOcr p${i+1}: 6× 跳过(${upLongSide}px>$UPSCALE_MAX_LONG_PX px)，只用 2× 基准")
                                             }
@@ -472,7 +487,16 @@ object PdfOcrEngine {
                             try { f.cancel(true) } catch (_: Throwable) {}
                             Diag.d("PdfOcr p${idx+1}: 超时 ${PER_PAGE_TIMEOUT_SEC}s 取消")
                         }
-                        errorCount++; diag.append(" [p${idx+1}:超时${PER_PAGE_TIMEOUT_SEC}s]"); continue
+                        // v1.9.133: 超时页不再丢弃，用已发布的 2× 基准（最优可用解）兜底，宁可少算 6× 补的小字也比计 0 字强。
+                        val fb = pageBase[idx]
+                        if (!fb.isNullOrBlank()) {
+                            sb.append(fb).append('\n'); anyText = true
+                            lastStrongChars += fb.length
+                            diag.append(" [p${idx+1}:超时→2×基准兜底${fb.length}字]")
+                        } else {
+                            errorCount++; diag.append(" [p${idx+1}:超时且无基准]")
+                        }
+                        continue
                     }
                     val (_, text, blank) = r
                     if (blank) { blankCount++; diag.append(" [p${idx+1}:空白]"); continue }
@@ -540,6 +564,8 @@ object PdfOcrEngine {
      */
     private fun renderWithSystemMlKit(context: Context, file: File, forPrintMode: Boolean, onProgress: ((Int, Int) -> Unit)?): PdfOcrResult? {
         val diag = StringBuilder()
+        // v1.9.133: 超时页兜底用——每页 2× 基准结果算完后立即发布，超时分支读取作最优可用解。
+        val pageBase = java.util.concurrent.ConcurrentHashMap<Int, String>()
         val pfd0 = try {
             ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
         } catch (e: Throwable) {
@@ -595,6 +621,7 @@ object PdfOcrEngine {
                             if (isBlankBitmap(bmp)) Triple(i, "", true)
                             else {
                                 val (_, baseText) = recognizePageMlKit(bmp)
+                                pageBase[i] = baseText   // v1.9.133: 发布 2× 基准，供超时兜底
                                 // v1.9.129: 基准倍率 + 6× 升采样双遍并集（同强引擎路径），最大化移动端召回。
                                 // v1.9.132: 6× 升采样位图长边限 UPSCALE_MAX_LONG_PX(3500)，避免 OOM/超时。
                                 var bestText = baseText
@@ -603,8 +630,13 @@ object PdfOcrEngine {
                                     try {
                                         val upLongSide = max(upBmp.width, upBmp.height)
                                         if (upLongSide <= UPSCALE_MAX_LONG_PX && !isBlankBitmap(upBmp)) {
-                                            val (_, upText) = recognizePageMlKit(upBmp)
-                                            bestText = mergeOcrTexts(baseText, upText)
+                                            // v1.9.134: 字高分布门禁——仅当 2× 基准漏抓"主体字"时才跑 6× 升采样
+                                            if (isBodyCaptured(bmp, baseText)) {
+                                                Diag.d("PdfOcr p${i+1}: 6× 跳过(主体字已抓到/稀疏页)，只用 2× 基准")
+                                            } else {
+                                                val (_, upText) = recognizePageMlKit(upBmp)
+                                                bestText = mergeOcrTexts(baseText, upText)
+                                            }
                                         } else {
                                             Diag.d("PdfOcr p${i+1}: 6× 跳过(${upLongSide}px>$UPSCALE_MAX_LONG_PX px)，只用 2× 基准")
                                         }
@@ -627,8 +659,15 @@ object PdfOcrEngine {
                         try { f.cancel(true) } catch (_: Throwable) {}
                         Diag.d("PdfOcr ML Kit p${idx+1}: 超时 ${PER_PAGE_TIMEOUT_SEC}s 取消")
                     }
-                    pageErrors++
-                    diag.append(" [p${idx+1}:超时${PER_PAGE_TIMEOUT_SEC}s]")
+                    // v1.9.133: 超时页用已发布的 2× 基准兜底（最优可用解），不丢弃。
+                    val fb = pageBase[idx]
+                    if (!fb.isNullOrBlank()) {
+                        sb.append(fb).append('\n'); anyRenderedContent = true
+                        diag.append(" [p${idx+1}:超时→2×基准兜底${fb.length}字]")
+                    } else {
+                        pageErrors++
+                        diag.append(" [p${idx+1}:超时且无基准]")
+                    }
                     continue
                 }
                 val (_, text, blank) = r
@@ -1045,6 +1084,41 @@ object PdfOcrEngine {
             }
         }
         return sb.toString().trim()
+    }
+
+    // ════════════════ v1.9.134: 字高分布门禁（决定要不要跑 6× 升采样）════════════════
+
+    /** 取行高直方图众数（主体字高）。 */
+    private fun dominantHeight(lines: List<OcrEngine.OcrLine>): Int? {
+        if (lines.isEmpty()) return null
+        val bins = mutableMapOf<Int, Int>()
+        val binW = 6
+        for (l in lines) {
+            val b = (l.height / binW) * binW
+            bins[b] = (bins[b] ?: 0) + 1
+        }
+        return bins.entries.maxWithOrNull(
+            compareByDescending<MutableMap.MutableEntry<Int, Int>> { it.value }.thenByDescending { it.key }
+        )?.key
+    }
+
+    /**
+     * 判断 2× 基准是否已抓到"主体字"。
+     * true  = 主体已抓到 / 稀疏页 / 纯图无字 → 跳过 6× 升采样（省时，符合用户"主体已统计就不跑 6×"诉求）。
+     * false = 主体字 2× 没抓到 → 跑 6× 并集（符合用户"连主体大小都统计不出就跑 6×"诉求）。
+     */
+    private fun isBodyCaptured(bmp: Bitmap, baseText: String): Boolean {
+        val lines = OcrEngine.recognizeLines(bmp)
+        if (lines.isEmpty()) {
+            // 探针(ML Kit)整页没认出字：若强引擎 2× 也没认出 → 真无字，跳过无所谓；
+            // 若强引擎 2× 认出了字而 ML Kit 没认出 → 字体特殊/ML Kit 弱，保守跑 6× 不跳过。
+            return baseText.isBlank()
+        }
+        val bodyH = dominantHeight(lines) ?: return baseText.isBlank()
+        val band = max(4, (bodyH * 0.3).toInt())
+        val bodyChars = lines.filter { kotlin.math.abs(it.height - bodyH) <= band }.sumOf { it.text.length }
+        if (bodyChars < BODY_MIN_CHARS) return true   // 稀疏页/只有极小标签，跑 6× 也捡不到主体，省时跳过
+        return baseText.length >= (bodyChars * BODY_CAPTURE_RATIO).toInt()
     }
 
     /** 归一化行文本用于去重（去空白、去标点符号、小写）。 */

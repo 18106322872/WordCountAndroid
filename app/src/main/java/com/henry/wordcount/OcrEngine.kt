@@ -110,6 +110,30 @@ object OcrEngine {
         }
     }
 
+    /** OCR 单行结果（含包围盒高度），供字高分布分析（v1.9.134）。 */
+    data class OcrLine(val text: String, val height: Int)
+
+    /**
+     * 返回位图中所有文本行及其包围盒高度（ML Kit，快速、线程安全）。
+     * v1.9.134: 用于判断"主体字高"是否已被 2× 基准捕获，决定要不要跑 6× 升采样。
+     */
+    fun recognizeLines(bitmap: android.graphics.Bitmap): List<OcrLine> {
+        if (!ocrEnabled) return emptyList()
+        ocrFailed = false
+        return try {
+            val image = InputImage.fromBitmap(bitmap, 0)
+            val vt = try { Tasks.await(recognizer.process(image), 20, TimeUnit.SECONDS) } catch (_: Throwable) { null }
+            val out = mutableListOf<OcrLine>()
+            if (vt != null) {
+                for (b in vt.blocks) for (ln in b.lines) {
+                    val bb = ln.boundingBox
+                    if (bb != null) out.add(OcrLine(ln.text ?: "", bb.height))
+                }
+            }
+            out
+        } catch (_: Throwable) { emptyList() }
+    }
+
     private fun tryRecognize(image: InputImage, timeoutSec: Long): String {
         return try {
             val visionText = Tasks.await(recognizer.process(image), timeoutSec, TimeUnit.SECONDS)
