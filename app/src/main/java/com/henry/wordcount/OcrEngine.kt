@@ -125,7 +125,7 @@ object OcrEngine {
             val vt = try { Tasks.await(recognizer.process(image), 20, TimeUnit.SECONDS) } catch (_: Throwable) { null }
             val out = mutableListOf<OcrLine>()
             if (vt != null) {
-                for (b in vt.blocks) for (ln in b.lines) {
+                for (b in vt.textBlocks) for (ln in b.lines) {
                     val bb = ln.boundingBox
                     if (bb != null) out.add(OcrLine(ln.text ?: "", bb.height))
                 }
