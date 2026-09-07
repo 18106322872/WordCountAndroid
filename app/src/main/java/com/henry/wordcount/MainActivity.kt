@@ -4115,20 +4115,38 @@ internal suspend fun processBatchToEntries(
                                     val fr = toFileResult(resMap, f.absolutePath)
                                     emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_ocr", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
                                 } else {
-                                    // OCR 字数少于文本层 → 保留更完整的文本层结果（仍标注 OCR 已触发跑过）
-                                    Diag.d( "PDF OCR取优 $dName: OCR=${ocrStats.fourth}ch < 文本层=${bestChars}ch，保留文本层")
-                                    val pdfP = buildPdfPartStats(finalText, bestFe, bestNc, bestChars)
-                                    val resMap = mapOf(
-                                        "name" to dName, "ext" to ".pdf",
-                                        "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars, "num" to pdfP.numChars),
-                                        "meta" to mapOf<String, Any?>("pdf_parts" to pdfPartsToMap(pdfP)),
-                                        "pages" to (if (realPages > 1) realPages else bestPages),
-                                        "diag" to "$pdfDiag\n(OCR已触发但字数少于文本层，保留文本层)",
-                                        "ocrNote" to "OCR已触发，结果并入文本层"
-                                    )
-                                    val fr = toFileResult(resMap, f.absolutePath)
-                                    emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_txt", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
-                            } else {
+                                    if (needOcr) {
+                                        // 扫描件/无真实文本层：即便 OCR 字数少于文本层（文本层是垃圾/结构字符），
+                                        // 也以 OCR 结果为准——绝不用垃圾文本层虚增字数（P403051 类图片 PDF 的"文本层"来自嵌入碎片）。
+                                        Diag.d( "PDF OCR取优 $dName: needOcr 场景 OCR=${ocrStats.fourth}ch 虽<文本层=${bestChars}ch，仍采用 OCR(文本层为垃圾)")
+                                        val pdfP = buildPdfPartStats(finalText, ocrStats.second, ocrStats.third, ocrStats.fourth)
+                                        val resMap = mapOf(
+                                            "name" to dName, "ext" to ".pdf",
+                                            "stats" to mapOf("words" to ocrStats.first, "fe" to ocrStats.second, "nc" to ocrStats.third, "chars" to ocrStats.fourth, "num" to pdfP.numChars),
+                                            "meta" to mapOf<String, Any?>("pdf_parts" to pdfPartsToMap(pdfP)),
+                                            "pages" to ocrRes.pages,
+                                            "diag" to "$pdfDiag\n(OCR已采用，文本层为垃圾未采用)",
+                                            "ocrNote" to PdfOcrEngine.buildOcrNote(ocrRes.pages, "")
+                                        )
+                                        val fr = toFileResult(resMap, f.absolutePath)
+                                        emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_ocr", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                                    } else {
+                                        // OCR 字数少于文本层 → 保留更完整的文本层结果（仍标注 OCR 已触发跑过）
+                                        Diag.d( "PDF OCR取优 $dName: OCR=${ocrStats.fourth}ch < 文本层=${bestChars}ch，保留文本层")
+                                        val pdfP = buildPdfPartStats(finalText, bestFe, bestNc, bestChars)
+                                        val resMap = mapOf(
+                                            "name" to dName, "ext" to ".pdf",
+                                            "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars, "num" to pdfP.numChars),
+                                            "meta" to mapOf<String, Any?>("pdf_parts" to pdfPartsToMap(pdfP)),
+                                            "pages" to (if (realPages > 1) realPages else bestPages),
+                                            "diag" to "$pdfDiag\n(OCR已触发但字数少于文本层，保留文本层)",
+                                            "ocrNote" to "OCR已触发，结果并入文本层"
+                                        )
+                                        val fr = toFileResult(resMap, f.absolutePath)
+                                        emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_txt", displayName = dName, cachePath = f.absolutePath, result = fr, rawResult = resMap))
+                                    }
+                                }
+} else {
                                 // v1.9.136: OCR 已判定文本层不可靠（needOcr=true）且全部 OCR 路径失败，
                                 //   不再降级使用 L1/L2 文本层。P403051 类图片 PDF 的 L1 字符来自嵌入垃圾/结构字符，
                                 //   当正文用会虚增字数。直接报错并给出 OCR 失败原因。
@@ -4162,7 +4180,6 @@ internal suspend fun processBatchToEntries(
                                 }
                                 emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_err", displayName = dName, cachePath = f.absolutePath, error = errMsg))
                                 }
-                            }
                         }
                     } catch (e: Throwable) {
                         Diag.w( "PDF 解析失败 ${f.name}: ${e.message}")
