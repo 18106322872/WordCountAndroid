@@ -91,7 +91,6 @@ object PdfOcrEngine {
     //   240s 留 2× 余量让 16 块 PaddleOCR 跑完，native 线程正常 return → 不 OOM → 进程存活。
     //   仍保留 cancel + 2× 基准兜底（v1.9.133），万一真超 240s 也不至于永久卡死。
     private const val PER_PAGE_TIMEOUT_SEC = 240L
-    private const val PER_PAGE_TIMEOUT_SEC = 90L
     // v1.9.132: 进度心跳间隔（秒）。OCR 期间每 N 秒强制发一次 onProgress，
     //   避免长时间大文件 OCR 时主界面「卡 0/1 不动」+ 通知栏被 Android 误判为不活跃。
     private const val PROGRESS_HEARTBEAT_SEC = 5L
