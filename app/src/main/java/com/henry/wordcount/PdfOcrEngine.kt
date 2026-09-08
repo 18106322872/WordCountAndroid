@@ -72,9 +72,12 @@ object PdfOcrEngine {
     // v1.9.126: 对齐桌面 v1.8.109 PDF OCR 自适应升采样——基础倍率下某页识别字数 < 400 时，
     // 用 6× 重新渲染该页并识别，取字数更多者。图纸类 PDF 密集小字低于检测阈值时召回可提升数倍。
     private const val ADAPT_SCALE = 6f
-    // v1.9.136(修正2): 6× 升采样不再按长边硬性跳过，改为由 MAX_DIM(6000) 钳制渲染尺寸；
-    //   重复计数问题在 mergeOcrTexts 里用模糊去重解决（子串包含+高词重叠），而不是牺牲召回直接跳过 6×。
-    //   P403051 实测：跳过 6× 会导致 2× 基准完全识别为空；必须跑 6× 才有字。
+    // v1.9.139: 6× 升采样位图长边上限——P403051 类扫描件必须跑 6× 才有字（2× 认不出），
+    //   但满幅 6×(6000px) ≈ 35 块 PaddleOCR 会超时/OOM（v1.9.138 翻车）。
+    //   改为"钳制到 4000px 再识别"（不是跳过）：P403051 2×≈1684px，6× 实际渲染 4000px≈12 块，
+    //   ~40-50s 完成，远低于 90s 预算；分块重叠由 mergeOcrTexts 模糊去重处理。
+    //   v1.9.132 旧版是"超限即跳过"，导致 P403051 2× 空 → OCR 失败；本版只钳尺寸、绝不跳。
+    private const val UPSCALE_MAX_LONG_PX = 4000
     // v1.9.132: 单页 OCR（含 2× 基准 + 6× 升采样）总超时（秒）。
     //   限制 P403051 类大图 PDF 单页 ≤90s；超时后丢弃该页结果并继续下一页。
     private const val PER_PAGE_TIMEOUT_SEC = 90L
@@ -449,10 +452,11 @@ object PdfOcrEngine {
                                     // 并集可显著提升召回，逼近桌面计数。
                                     // v1.9.136(修正2): 6× 升采样由 MAX_DIM(6000) 钳制尺寸；重复计数靠 mergeOcrTexts 模糊去重。
                                     var bestText = baseText
-                                    // v1.9.136(修正2): 恢复 6× 升采样（不再因 >3500px 跳过），
-                                    //   由 MAX_DIM(6000) 钳制位图尺寸守内存上限；同时强化 mergeOcrTexts 模糊去重，
-                                    //   解决满幅 6× 分块重叠把 P403051 ~1000 字虚增到 ~6000 字的问题。
-                                    val upBmp = renderPageSysBitmap(file, i, forPrintMode, ADAPT_SCALE)
+                                    // v1.9.139: 6× 升采样钳制到 UPSCALE_MAX_LONG_PX(4000px)——既保证 P403051
+                                    //   类扫描件能读出字（2× 认不出），又避免满幅 6× 35 块 PaddleOCR 超时/OOM。
+                                    //   与 v1.9.132 的"超限即跳过"不同：只钳尺寸、绝不跳。
+                                    val upScale = min(ADAPT_SCALE, UPSCALE_MAX_LONG_PX.toFloat() / max(bmp.width, bmp.height).toFloat())
+                                    val upBmp = renderPageSysBitmap(file, i, forPrintMode, upScale)
                                     if (upBmp != null) {
                                         try {
                                             if (!isBlankBitmap(upBmp)) {
@@ -462,7 +466,7 @@ object PdfOcrEngine {
                                                 } else {
                                                     val (_, upText) = recognizePageStrong(upBmp)
                                                     bestText = mergeOcrTexts(baseText, upText)
-                                                    Diag.d("PdfOcr p${i+1}: 6×升采样(钳制≤${MAX_DIM}px) 合并 +${upText.length}字")
+                                                    Diag.d("PdfOcr p${i+1}: 6×升采样 scale=${"%.2f".format(upScale)} → ${upBmp.width}x${upBmp.height} 合并 +${upText.length}字")
                                                 }
                                             } else {
                                                 Diag.d("PdfOcr p${i+1}: 升采样位图空白，跳过")
@@ -625,9 +629,10 @@ object PdfOcrEngine {
                                 // v1.9.129: 基准倍率 + 6× 升采样双遍并集（同强引擎路径），最大化移动端召回。
                                 // v1.9.136(修正2): 6× 升采样由 MAX_DIM(6000) 钳制尺寸；重复计数靠 mergeOcrTexts 模糊去重。
                                 var bestText = baseText
-                                // v1.9.136(修正2): 同强引擎路径，恢复 6× 升采样并由 MAX_DIM 钳制尺寸；
-                                //   用强化后的 mergeOcrTexts 模糊去重解决分块重叠重复计数。
-                                val upBmp = renderPageSysBitmap(file, i, forPrintMode, ADAPT_SCALE)
+                                // v1.9.139: 同强引擎路径，6× 钳制到 UPSCALE_MAX_LONG_PX(4000px)——P403051
+                                //   类扫描件必须升采样才有字，但满幅 6× 35 块 PaddleOCR/MLKit 会超时。
+                                val upScale = min(ADAPT_SCALE, UPSCALE_MAX_LONG_PX.toFloat() / max(bmp.width, bmp.height).toFloat())
+                                val upBmp = renderPageSysBitmap(file, i, forPrintMode, upScale)
                                 if (upBmp != null) {
                                     try {
                                         if (!isBlankBitmap(upBmp)) {
@@ -635,9 +640,9 @@ object PdfOcrEngine {
                                             if (isBodyCaptured(bmp, baseText)) {
                                                 Diag.d("PdfOcr p${i+1}: 升采样跳过(主体字已抓到/稀疏页)，只用 2× 基准")
                                             } else {
-                                                val (_, upText) = recognizePageMlKit(upBmp)
-                                                bestText = mergeOcrTexts(baseText, upText)
-                                                Diag.d("PdfOcr p${i+1}: 6×升采样(钳制≤${MAX_DIM}px) 合并 +${upText.length}字")
+                                                    val (_, upText) = recognizePageMlKit(upBmp)
+                                                    bestText = mergeOcrTexts(baseText, upText)
+                                                    Diag.d("PdfOcr p${i+1}: 6×升采样(MLKit) scale=${"%.2f".format(upScale)} → ${upBmp.width}x${upBmp.height} 合并 +${upText.length}字")
                                             }
                                         } else {
                                             Diag.d("PdfOcr p${i+1}: 升采样位图空白，跳过")
