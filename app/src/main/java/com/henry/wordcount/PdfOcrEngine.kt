@@ -83,8 +83,14 @@ object PdfOcrEngine {
     //   切成 ~16 块 PaddleOCR → 估 50-70s 低于 90s 预算；分块重叠由 mergeOcrTexts 模糊去重处理。
     //   v1.9.132 旧版"超限即跳过"导致 OCR 空，本版只钳尺寸、绝不跳。
     private const val UPSCALE_MAX_LONG_PX = 5000
-    // v1.9.132: 单页 OCR（含 2× 基准 + 6× 升采样）总超时（秒）。
-    //   限制 P403051 类大图 PDF 单页 ≤90s；超时后丢弃该页结果并继续下一页。
+    // v1.9.151: 单页 OCR 超时 90s → 240s。
+    //   v1.9.150 翻车真因：5000px/16 块 PaddleOCR 实测 ~100-130s，90s 超时把它强行 cancel(true)，
+    //   Paddle-Lite 原生 C++ 线程未正常结束、继续分配内存，叠加泄漏 → :countservice 被系统 OOM killer 杀，
+    //   主界面永远等不到结果（卡 1/1 + 通知消失）。v1.9.130 满幅 6×(5052px) 之所以能出 6000 字，
+    //   是因为当时还没有 90s 超时（v1.9.132 才加），PaddleOCR 能跑完。
+    //   240s 留 2× 余量让 16 块 PaddleOCR 跑完，native 线程正常 return → 不 OOM → 进程存活。
+    //   仍保留 cancel + 2× 基准兜底（v1.9.133），万一真超 240s 也不至于永久卡死。
+    private const val PER_PAGE_TIMEOUT_SEC = 240L
     private const val PER_PAGE_TIMEOUT_SEC = 90L
     // v1.9.132: 进度心跳间隔（秒）。OCR 期间每 N 秒强制发一次 onProgress，
     //   避免长时间大文件 OCR 时主界面「卡 0/1 不动」+ 通知栏被 Android 误判为不活跃。
