@@ -501,7 +501,7 @@ object PdfOcrEngine {
                                                 } else if (isBodyCaptured(bmp, baseText)) {
                                                     Diag.d("PdfOcr p${i+1}: 升采样跳过(主体字已抓到/稀疏页)，只用 2× 基准")
                                                 } else {
-                                                    val (_, upText) = recognizePageStrong(upBmp)
+                                                    val upText = recognizeBitmapMlKit(upBmp)
                                                     bestText = mergeOcrTexts(baseText, upText)
                                                     Diag.d("PdfOcr p${i+1}: 6×升采样 → ${upBmp.width}x${upBmp.height}(≤${UPSCALE_MAX_LONG_PX}px) 合并 +${upText.length}字")
                                                 }
@@ -886,7 +886,24 @@ object PdfOcrEngine {
     //   针对 P403051 类把整张扫描图切成多张横向 JPEG 内嵌在页里的 PDF：整页渲染会引入大量白边且分辨率不足，
     //   直接提取内嵌图并按 EMBEDDED_IMAGE_MAX_DIM 降采样后纵向拼接，像素数只有整页渲染 ~40%，块数 4 vs 12，
     //   能在 ~100s 内出 ~1000 词（匹配桌面 WordCount 1119 词），且不走 6× 升采样超时路径。
-    private fun ocrEmbeddedImages(file: File): String {
+        // v1.9.155: 模块级 ML Kit 识别（端侧 GPU 加速，替代慢速 PaddleOCR 避免 6x 升采样超时）。
+    //   用于 6x 升采样高分辨率 OCR 的快速通道：ML Kit 端侧 GPU 加速，远比 PaddleOCR 快，
+    //   对 P403051 类大扫描页（6x 渲染 ~5000x1500、~8 块）~30-40s 完成，不再触发 240s 超时崩溃。
+    private fun recognizeBitmapMlKit(bmp: Bitmap): String {
+        val darkRatio = darkPixelRatio(bmp)
+        val needsInvert = darkRatio > 95.0
+        var ocrBmp: Bitmap = bmp
+        var inverted: Bitmap? = null
+        if (needsInvert) {
+            inverted = invertBitmap(bmp)
+            if (inverted != null) ocrBmp = inverted
+        }
+        val t = try { recognizeTiled(ocrBmp) } catch (_: Throwable) { "" }
+        inverted?.recycle()
+        return t
+    }
+
+private fun ocrEmbeddedImages(file: File): String {
         try {
             val bmps = extractEmbeddedImages(file, EMBEDDED_IMAGE_MAX_DIM)
             if (bmps.isEmpty()) return ""
