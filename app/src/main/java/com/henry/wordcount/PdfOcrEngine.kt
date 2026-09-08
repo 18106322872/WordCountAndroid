@@ -72,10 +72,9 @@ object PdfOcrEngine {
     // v1.9.126: 对齐桌面 v1.8.109 PDF OCR 自适应升采样——基础倍率下某页识别字数 < 400 时，
     // 用 6× 重新渲染该页并识别，取字数更多者。图纸类 PDF 密集小字低于检测阈值时召回可提升数倍。
     private const val ADAPT_SCALE = 6f
-    // v1.9.136(修正): 6× 升采样仅当候选长边 ≤ UPSCALE_MAX_LONG_PX 才跑；超过则跳过 6× 只用 2× 基准。
-    //   实测满幅 6× 会因分块重叠把 P403051 的 ~1000+ 字虚增到 ~6000 字（v1.9.130 与本版初版均踩坑），
-    //   故恢复 v1.9.135 的"大页跳过 6×"策略——2× 基准量级正确且不会翻倍计数，也守住内存/超时预算。
-    private const val UPSCALE_MAX_LONG_PX = 3500
+    // v1.9.136(修正2): 6× 升采样不再按长边硬性跳过，改为由 MAX_DIM(6000) 钳制渲染尺寸；
+    //   重复计数问题在 mergeOcrTexts 里用模糊去重解决（子串包含+高词重叠），而不是牺牲召回直接跳过 6×。
+    //   P403051 实测：跳过 6× 会导致 2× 基准完全识别为空；必须跑 6× 才有字。
     // v1.9.132: 单页 OCR（含 2× 基准 + 6× 升采样）总超时（秒）。
     //   限制 P403051 类大图 PDF 单页 ≤90s；超时后丢弃该页结果并继续下一页。
     private const val PER_PAGE_TIMEOUT_SEC = 90L
@@ -448,33 +447,27 @@ object PdfOcrEngine {
                                     // v1.9.129: 基准倍率 + 6× 升采样双遍并集（不再只取字数更多者）。
                                     // 移动端 PP-OCRv4(.nb) 模型弱于桌面 RapidOCR，不同渲染倍率会捕获不同文字，
                                     // 并集可显著提升召回，逼近桌面计数。
-                                    // v1.9.132: 6× 升采样位图长边限 UPSCALE_MAX_LONG_PX(3500)——大图 6× 会 OOM/超时，
-                                    //   限制后既能放大识别小字又不破用户预算（清晰≤1min、模糊大图≤2min/页）。
+                                    // v1.9.136(修正2): 6× 升采样由 MAX_DIM(6000) 钳制尺寸；重复计数靠 mergeOcrTexts 模糊去重。
                                     var bestText = baseText
-                                    // v1.9.136(修正): 大页 6× 升采样仅当候选长边 ≤ UPSCALE_MAX_LONG_PX(3500px) 才跑。
-                                    //   超过则跳过 6× 只用 2× 基准——实测满幅 6× 会因分块重叠把 P403051 ~1000+ 字虚增到 ~6000 字
-                                    //   （v1.9.130 与本版初版均踩坑），故恢复 v1.9.135 的"大页跳过 6×"策略。
-                                    val upLongEdge = (max(bmp.width, bmp.height) * ADAPT_SCALE).toInt()
-                                    if (upLongEdge <= UPSCALE_MAX_LONG_PX) {
-                                        val upBmp = renderPageSysBitmap(file, i, forPrintMode, ADAPT_SCALE)
-                                        if (upBmp != null) {
-                                            try {
-                                                if (!isBlankBitmap(upBmp)) {
-                                                    // v1.9.134: 字高分布门禁——仅当 2× 基准漏抓"主体字"时才跑 6× 升采样
-                                                    if (isBodyCaptured(bmp, baseText)) {
-                                                        Diag.d("PdfOcr p${i+1}: 升采样跳过(主体字已抓到/稀疏页)，只用 2× 基准")
-                                                    } else {
-                                                        val (_, upText) = recognizePageStrong(upBmp)
-                                                        bestText = mergeOcrTexts(baseText, upText)
-                                                        Diag.d("PdfOcr p${i+1}: 6×升采样(≤${UPSCALE_MAX_LONG_PX}px) 合并 +${upText.length}字")
-                                                    }
+                                    // v1.9.136(修正2): 恢复 6× 升采样（不再因 >3500px 跳过），
+                                    //   由 MAX_DIM(6000) 钳制位图尺寸守内存上限；同时强化 mergeOcrTexts 模糊去重，
+                                    //   解决满幅 6× 分块重叠把 P403051 ~1000 字虚增到 ~6000 字的问题。
+                                    val upBmp = renderPageSysBitmap(file, i, forPrintMode, ADAPT_SCALE)
+                                    if (upBmp != null) {
+                                        try {
+                                            if (!isBlankBitmap(upBmp)) {
+                                                // v1.9.134: 字高分布门禁——仅当 2× 基准漏抓"主体字"时才跑 6× 升采样
+                                                if (isBodyCaptured(bmp, baseText)) {
+                                                    Diag.d("PdfOcr p${i+1}: 升采样跳过(主体字已抓到/稀疏页)，只用 2× 基准")
                                                 } else {
-                                                    Diag.d("PdfOcr p${i+1}: 升采样位图空白，跳过")
+                                                    val (_, upText) = recognizePageStrong(upBmp)
+                                                    bestText = mergeOcrTexts(baseText, upText)
+                                                    Diag.d("PdfOcr p${i+1}: 6×升采样(钳制≤${MAX_DIM}px) 合并 +${upText.length}字")
                                                 }
-                                            } finally { upBmp.recycle() }
-                                        }
-                                    } else {
-                                        Diag.d("PdfOcr p${i+1}: 6×升采样跳过(候选长边≈${upLongEdge}px > ${UPSCALE_MAX_LONG_PX}，防重复计数)")
+                                            } else {
+                                                Diag.d("PdfOcr p${i+1}: 升采样位图空白，跳过")
+                                            }
+                                        } finally { upBmp.recycle() }
                                     }
                                     // v1.9.131: 6× 升采样完成后只发一次进度（与基准同号 i+1），
                                     // 之前用 i+1+pageCount 会让计数器超过 total，导致 6/4 这种"超总数"显示。
@@ -630,31 +623,26 @@ object PdfOcrEngine {
                                 val (_, baseText) = recognizePageMlKit(bmp)
                                 pageBase[i] = baseText   // v1.9.133: 发布 2× 基准，供超时兜底
                                 // v1.9.129: 基准倍率 + 6× 升采样双遍并集（同强引擎路径），最大化移动端召回。
-                                // v1.9.132: 6× 升采样位图长边限 UPSCALE_MAX_LONG_PX(3500)，避免 OOM/超时。
+                                // v1.9.136(修正2): 6× 升采样由 MAX_DIM(6000) 钳制尺寸；重复计数靠 mergeOcrTexts 模糊去重。
                                 var bestText = baseText
-                                // v1.9.136(修正): 同强引擎路径——大页 6× 升采样仅当候选长边 ≤ UPSCALE_MAX_LONG_PX(3500px) 才跑。
-                                //   超过则跳过 6× 只用 2× 基准，避免满幅 6× 分块重叠把字数翻倍虚增（P403051 ~6000 字问题）。
-                                val upLongEdge = (max(bmp.width, bmp.height) * ADAPT_SCALE).toInt()
-                                if (upLongEdge <= UPSCALE_MAX_LONG_PX) {
-                                    val upBmp = renderPageSysBitmap(file, i, forPrintMode, ADAPT_SCALE)
-                                    if (upBmp != null) {
-                                        try {
-                                            if (!isBlankBitmap(upBmp)) {
-                                                // v1.9.134: 字高分布门禁——仅当 2× 基准漏抓"主体字"时才跑 6× 升采样
-                                                if (isBodyCaptured(bmp, baseText)) {
-                                                    Diag.d("PdfOcr p${i+1}: 升采样跳过(主体字已抓到/稀疏页)，只用 2× 基准")
-                                                } else {
-                                                    val (_, upText) = recognizePageMlKit(upBmp)
-                                                    bestText = mergeOcrTexts(baseText, upText)
-                                                    Diag.d("PdfOcr p${i+1}: 6×升采样(≤${UPSCALE_MAX_LONG_PX}px) 合并 +${upText.length}字")
-                                                }
+                                // v1.9.136(修正2): 同强引擎路径，恢复 6× 升采样并由 MAX_DIM 钳制尺寸；
+                                //   用强化后的 mergeOcrTexts 模糊去重解决分块重叠重复计数。
+                                val upBmp = renderPageSysBitmap(file, i, forPrintMode, ADAPT_SCALE)
+                                if (upBmp != null) {
+                                    try {
+                                        if (!isBlankBitmap(upBmp)) {
+                                            // v1.9.134: 字高分布门禁——仅当 2× 基准漏抓"主体字"时才跑 6× 升采样
+                                            if (isBodyCaptured(bmp, baseText)) {
+                                                Diag.d("PdfOcr p${i+1}: 升采样跳过(主体字已抓到/稀疏页)，只用 2× 基准")
                                             } else {
-                                                Diag.d("PdfOcr p${i+1}: 升采样位图空白，跳过")
+                                                val (_, upText) = recognizePageMlKit(upBmp)
+                                                bestText = mergeOcrTexts(baseText, upText)
+                                                Diag.d("PdfOcr p${i+1}: 6×升采样(钳制≤${MAX_DIM}px) 合并 +${upText.length}字")
                                             }
-                                        } finally { upBmp.recycle() }
-                                    }
-                                } else {
-                                    Diag.d("PdfOcr MLKit p${i+1}: 6×升采样跳过(候选长边≈${upLongEdge}px > ${UPSCALE_MAX_LONG_PX}，防重复计数)")
+                                        } else {
+                                            Diag.d("PdfOcr p${i+1}: 升采样位图空白，跳过")
+                                        }
+                                    } finally { upBmp.recycle() }
                                 }
                                 // v1.9.131: 6× 升采样完成后只发一次进度（与基准同号 i+1），
                                 // 之前用 i+1+pageCount 会让计数器超过 total，导致 6/4 这种"超总数"显示。
@@ -1074,7 +1062,9 @@ object PdfOcrEngine {
         return sb.toString().trim()
     }
 
-    /** 合并两份 OCR 结果：以 primary 为基准，把 secondary 中未出现过的行按 normKey 去重追加。 */
+    /** 合并两份 OCR 结果：以 primary 为基准，把 secondary 中未出现过的行按 normKey 去重追加。
+     *  v1.9.136(修正2): 增加模糊去重——对 6× 升采样分块重叠导致的"同一行被切到多块、
+     *    或相邻块读出几乎相同内容"进行子串包含/高词重叠检测，避免把 ~1000 字虚增到 ~6000 字。 */
     private fun mergeOcrTexts(primary: String, secondary: String): String {
         if (primary.isBlank()) return secondary.trim()
         if (secondary.isBlank()) return primary.trim()
@@ -1089,7 +1079,7 @@ object PdfOcrEngine {
         for (ln in secondary.lines()) {
             val k = normKey(ln)
             if (k.isEmpty()) continue
-            if (k in seenLines) continue
+            if (isDuplicateOcrLine(k, seenLines)) continue
             val words = ln.split(Regex("\\s+")).map { normKey(it) }.filter { it.length >= 2 }
             val redundant = words.isNotEmpty() && words.all { it in primaryWords }
             if (!redundant) {
@@ -1098,6 +1088,24 @@ object PdfOcrEngine {
             }
         }
         return sb.toString().trim()
+    }
+
+    /** 判断新行是否与已保留行重复/近似重复。 */
+    private fun isDuplicateOcrLine(k: String, seen: Set<String>): Boolean {
+        if (k in seen) return true
+        val kw = k.split(Regex("\\s+")).filter { it.length >= 2 }
+        for (s in seen) {
+            // 子串包含：一行完全或部分出现在另一行中（分块边界常把同一行切成两半）
+            if (k.contains(s) || s.contains(k)) return true
+            // 高词重叠：较长行（≥3 个有效词）若与已保留行共享 ≥80% 有效词，视为同一句重复识别
+            val sw = s.split(Regex("\\s+")).filter { it.length >= 2 }
+            if (kw.size >= 3 && sw.size >= 3) {
+                val inter = kw.intersect(sw).size
+                val minLen = minOf(kw.size, sw.size)
+                if (inter * 10 >= minLen * 8) return true
+            }
+        }
+        return false
     }
 
     // ════════════════ v1.9.134: 字高分布门禁（决定要不要跑 6× 升采样）════════════════
