@@ -1136,16 +1136,17 @@ object PdfOcrEngine {
      * false = 主体字 2× 没抓到 → 跑 6× 并集（符合用户"连主体大小都统计不出就跑 6×"诉求）。
      */
     private fun isBodyCaptured(bmp: Bitmap, baseText: String): Boolean {
+        // v1.9.138 修正: 2× 基准 OCR 是真相——若根本没认到字或极少，
+        // 不能因 ML Kit 视觉探针"检测到行框"就跳过 6×（P403051 案例：2× 探针能检测到行框
+        // 但分辨率太低认不出字 → 必须 6× 升采样才能读出）。只信任 2× OCR 实际字数。
+        if (baseText.isBlank() || baseText.length < BODY_MIN_CHARS) return false
+        // 2× 已抓到一定量字：走原 v1.9.134 探针逻辑确认主体覆盖，省 6×
         val lines = OcrEngine.recognizeLines(bmp)
-        if (lines.isEmpty()) {
-            // 探针(ML Kit)整页没认出字：若强引擎 2× 也没认出 → 真无字，跳过无所谓；
-            // 若强引擎 2× 认出了字而 ML Kit 没认出 → 字体特殊/ML Kit 弱，保守跑 6× 不跳过。
-            return baseText.isBlank()
-        }
-        val bodyH = dominantHeight(lines) ?: return baseText.isBlank()
+        if (lines.isEmpty()) return true   // 探针空 + 2× 有字 → 已够，跳过
+        val bodyH = dominantHeight(lines) ?: return true
         val band = max(4, (bodyH * 0.3).toInt())
         val bodyChars = lines.filter { kotlin.math.abs(it.height - bodyH) <= band }.sumOf { it.text.length }
-        if (bodyChars < BODY_MIN_CHARS) return true   // 稀疏页/只有极小标签，跑 6× 也捡不到主体，省时跳过
+        if (bodyChars < BODY_MIN_CHARS) return true   // 稀疏页
         return baseText.length >= (bodyChars * BODY_CAPTURE_RATIO).toInt()
     }
 
