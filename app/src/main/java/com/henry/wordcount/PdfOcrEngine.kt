@@ -904,41 +904,109 @@ object PdfOcrEngine {
     }
 
 private fun ocrEmbeddedImages(file: File): String {
-        try {
-            val bmps = extractEmbeddedImages(file, EMBEDDED_IMAGE_MAX_DIM)
-            if (bmps.isEmpty()) return ""
-            Diag.d("PdfOcr 内嵌图片: 提取 ${bmps.size} 张, 开始拼接 OCR")
-
-            val maxW = bmps.maxOfOrNull { it.width } ?: return ""
-            val totalH = bmps.sumOf { it.height }
-            if (maxW <= 0 || totalH <= 0) {
-                for (b in bmps) b.recycle()
+        // v1.9.158: P403051 类「整张扫描图切成多张横向 JPEG 内嵌」PDF 的可靠 OCR 路径。
+        //   根因：页面仅 842pt，扫描图原生 ~29195x897（整体≈2.4亿像素），任何整页渲染（6x=5000px）都会把
+        //   原生扫描缩小 ~5.8x，文字压到 ~1px -> PaddleOCR/ML Kit 都认不出（v1.9.155 仍 0 字，v1.9.156 只修了
+        //   Pdfium 崩溃但 Pdfium 同样按页 pt 缩放，仍 0 字）。
+        //   正确做法：直接提取内嵌扫描切片字节，用 BitmapRegionDecoder 在原生分辨率下按 ~2500px 宽切片逐块 OCR
+        //   （每块 ~9MB，峰值内存可控不 OOM），绕开整页缩小的死路。命中即采用，跳过 6x 升采样。
+        return try {
+            val data = file.readBytes()
+            val slices = collectEmbeddedImageBytes(data, 3000)
+            if (slices.isEmpty()) {
+                Diag.d("PdfOcr 内嵌图片: 未提取到原生扫描切片(宽>=3000)")
                 return ""
             }
-            val stitched = android.graphics.Bitmap.createBitmap(maxW, totalH, android.graphics.Bitmap.Config.ARGB_8888)
-            val canvas = android.graphics.Canvas(stitched)
-            var y = 0
-            for (bmp in bmps) {
-                // 宽度对齐：若某张图宽度不足 maxW（例如末张窄条），居中贴入。
-                val x = (maxW - bmp.width) / 2
-                canvas.drawBitmap(bmp, x.toFloat(), y.toFloat(), null)
-                y += bmp.height
-                bmp.recycle()
+            Diag.d("PdfOcr 内嵌图片: 提取 ${slices.size} 张原生扫描切片, 开始逐张分块OCR")
+            val sb = StringBuilder()
+            for (raw in slices) {
+                val t = ocrNativeSlice(raw)
+                if (t.isNotBlank()) sb.append(t).append('\n')
             }
-
-            val text = recognizeBitmapStrongText(stitched)
-            val chars = text.length
-            Diag.d("PdfOcr 内嵌图片OCR: 拼接 ${maxW}x${totalH}, +$chars 字")
-            stitched.recycle()
-            return text
+            val text = sb.toString().trim()
+            Diag.d("PdfOcr 内嵌图片OCR: 原生切片分块 -> +${text.length}字")
+            text
         } catch (e: Throwable) {
             Log.w("WordCount", "PdfOcr 内嵌图片OCR 异常: ${e.javaClass.simpleName}: ${e.message}")
-            return ""
+            ""
         }
     }
 
-    /** 策略A: 标准 /Type/XObject /Subtype/Image ... /Length N 字典 */
-    private fun strategyA_XObjectImage(data: ByteArray, out: MutableList<Bitmap>, seen: MutableSet<Int>, maxDim: Int = 0) {
+    // 用 BitmapRegionDecoder 在原生分辨率下对单张超大扫描切片（如 29195x897）分块 OCR，
+    // 避免整图解码 ~104MB 或整页缩小导致文字不可读。每块宽 ~2500px（<2560，recognizeTiled 不再二次缩小），
+    // 高度保持原生 897 -> 文字约 57px 高，ML Kit/PaddleOCR 均可稳定识别。
+    private fun ocrNativeSlice(raw: ByteArray): String {
+        var decoder: android.graphics.BitmapRegionDecoder? = null
+        return try {
+            decoder = android.graphics.BitmapRegionDecoder.newInstance(raw, 0, raw.size)
+            val fullW = decoder.width
+            val fullH = decoder.height
+            if (fullW <= 0 || fullH <= 0) return ""
+            val sb = StringBuilder()
+            var x = 0
+            val tileW = 2500
+            while (x < fullW) {
+                val tw = min(tileW, fullW - x)
+                val tile = try {
+                    decoder.decodeRegion(
+                        android.graphics.Rect(x, 0, x + tw, fullH),
+                        android.graphics.BitmapFactory.Options().apply {
+                            inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
+                        }
+                    )
+                } catch (_: Throwable) { null } ?: break
+                try {
+                    val t = recognizeTiled(tile)
+                    if (t.isNotBlank()) sb.append(t).append('\n')
+                } finally { tile.recycle() }
+                x += tw
+            }
+            sb.toString().trim()
+        } catch (e: Throwable) {
+            Log.w("WordCount", "PdfOcr 原生切片OCR 异常: ${e.javaClass.simpleName}: ${e.message}")
+            ""
+        } finally {
+            runCatching { decoder?.recycle() }
+        }
+    }
+
+    // 扫描 PDF 字节流，收集宽 >= minWidth 的内嵌图像原始字节（即 P403051 类原生扫描切片，排除 tiny logo/图标）。
+    // 基于 XObject /Subtype/Image 字典 + /Length 定位 stream；仅用边界解码判断宽度，不解码整图。
+    private fun collectEmbeddedImageBytes(data: ByteArray, minWidth: Int): List<ByteArray> {
+        val out = mutableListOf<ByteArray>()
+        val seen = mutableSetOf<Int>()
+        val limit = min(data.size, 12 * 1024 * 1024)
+        val str = String(data, 0, limit, Charsets.ISO_8859_1)
+        val imgPattern = Regex("/Type\s*/XObject\s*/Subtype\s*/Image[^>]*?/Length\s+(\d+)")
+        for (m in imgPattern.findAll(str)) {
+            if (out.size >= 20) break
+            try {
+                val length = m.groupValues[1].trim().toIntOrNull() ?: continue
+                if (length < 100 || length > 50_000_000) continue
+                val dictEnd = m.range.last
+                val streamStart = str.indexOf("stream", dictEnd)
+                if (streamStart < 0 || streamStart > dictEnd + 500) continue
+                val b1 = data.getOrNull(streamStart + 6)?.toInt() ?: 0
+                val off = when {
+                    b1 == 0x0D -> 2
+                    b1 == 0x0A -> 1
+                    else -> 0
+                }.coerceAtMost(2)
+                val dataStart = streamStart + 7 + off
+                if (dataStart + length > data.size || seen.contains(dataStart)) continue
+                seen.add(dataStart)
+                val imgBytes = data.sliceArray(dataStart until dataStart + length)
+                val opts = android.graphics.BitmapFactory.Options()
+                opts.inJustDecodeBounds = true
+                android.graphics.BitmapFactory.decodeByteArray(imgBytes, 0, imgBytes.size, opts)
+                if (opts.outWidth < minWidth) continue
+                out.add(imgBytes)
+            } catch (_: Throwable) {}
+        }
+        return out
+    }
+
+private fun strategyA_XObjectImage(data: ByteArray, out: MutableList<Bitmap>, seen: MutableSet<Int>, maxDim: Int = 0) {
         val str = String(data, 0, min(data.size, 10 * 1024 * 1024), Charsets.ISO_8859_1)
         val imgPattern = Regex("""/Type\s*/XObject\s*/Subtype\s*/Image[^>]*?/Length\s+(\d+)""")
         for (match in imgPattern.findAll(str)) {
