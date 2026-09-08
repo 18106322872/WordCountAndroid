@@ -1021,35 +1021,37 @@ object PdfOcrEngine {
 
     // ───────────────────── 工具函数 ─────────────────────
 
-    private fun BitmapFactoryDecode(bytes: ByteArray, maxDim: Int = 0): Bitmap? = try {
-        if (maxDim > 0) {
-            // v1.9.152: 内嵌图可能极大（如 29195×897），先只读边界算 inSampleSize，解码后再精确压到 maxDim，避免 OOM。
-            val opts = android.graphics.BitmapFactory.Options()
-            opts.inJustDecodeBounds = true
-            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-            val maxSide = max(opts.outWidth, opts.outHeight)
-            if (maxSide > 0) {
-                val sample = Integer.highestOneBit((maxSide / maxDim).coerceAtLeast(1))
-                val opts2 = android.graphics.BitmapFactory.Options()
-                opts2.inSampleSize = sample.coerceAtLeast(1)
-                val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts2)
-                    ?: return@BitmapFactoryDecode null
-                val w = bmp.width; val h = bmp.height
-                if (w > maxDim || h > maxDim) {
-                    val scale = maxDim.toFloat() / max(w, h).toFloat()
-                    val nw = (w * scale).toInt().coerceAtLeast(1)
-                    val nh = (h * scale).toInt().coerceAtLeast(1)
-                    val scaled = android.graphics.Bitmap.createScaledBitmap(bmp, nw, nh, true)
-                    bmp.recycle()
-                    return@BitmapFactoryDecode scaled
+    private fun BitmapFactoryDecode(bytes: ByteArray, maxDim: Int = 0): Bitmap? {
+        try {
+            if (maxDim > 0) {
+                // v1.9.152: 内嵌图可能极大（如 29195×897），先只读边界算 inSampleSize，解码后再精确压到 maxDim，避免 OOM。
+                val opts = android.graphics.BitmapFactory.Options()
+                opts.inJustDecodeBounds = true
+                android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                val maxSide = max(opts.outWidth, opts.outHeight)
+                if (maxSide > 0) {
+                    val sample = Integer.highestOneBit((maxSide / maxDim).coerceAtLeast(1))
+                    val opts2 = android.graphics.BitmapFactory.Options()
+                    opts2.inSampleSize = sample.coerceAtLeast(1)
+                    val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts2)
+                        ?: return null
+                    val w = bmp.width; val h = bmp.height
+                    if (w > maxDim || h > maxDim) {
+                        val scale = maxDim.toFloat() / max(w, h).toFloat()
+                        val nw = (w * scale).toInt().coerceAtLeast(1)
+                        val nh = (h * scale).toInt().coerceAtLeast(1)
+                        val scaled = android.graphics.Bitmap.createScaledBitmap(bmp, nw, nh, true)
+                        bmp.recycle()
+                        return scaled
+                    }
+                    return bmp
                 }
-                return@BitmapFactoryDecode bmp
             }
-        }
-        val opts = android.graphics.BitmapFactory.Options()
-        opts.inSampleSize = 1
-        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-    } catch (_: Throwable) { null }
+            val opts = android.graphics.BitmapFactory.Options()
+            opts.inSampleSize = 1
+            return android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+        } catch (_: Throwable) { return null }
+    }
 
     private fun isBlankBitmap(bmp: Bitmap): Boolean {
         return try {
