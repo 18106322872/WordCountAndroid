@@ -977,7 +977,7 @@ private fun ocrEmbeddedImages(file: File): String {
         val seen = mutableSetOf<Int>()
         val limit = min(data.size, 12 * 1024 * 1024)
         val str = String(data, 0, limit, Charsets.ISO_8859_1)
-        val imgPattern = Regex("/Type\s*/XObject\s*/Subtype\s*/Image[^>]*?/Length\s+(\d+)")
+        val imgPattern = Regex("""/Type\s*/XObject\s*/Subtype\s*/Image[^>]*?/Length\s+(\d+)""")
         for (m in imgPattern.findAll(str)) {
             if (out.size >= 20) break
             try {
