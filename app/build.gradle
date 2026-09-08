@@ -14,8 +14,8 @@ android {
         // minSdk 26：Apache POI 5.x / log4j 用到 MethodHandle.invoke，D8 要求 Android O(26) 起
         minSdk 26
         targetSdk 34
-        versionCode 399
-        versionName '1.9.155'
+        versionCode 500
+        versionName '1.9.156'
 
         // 只编 arm64-v8a（华为等现代手机），缩小体积、功能零影响
         ndk {
@@ -123,8 +123,11 @@ dependencies {
     // 仅在 ML Kit 主路径召回偏低时启用；模型(.nb)由 CI 下载进 assets/models/ch_PP-OCRv4 随 APK 内置，缺失时自动降级为零回归。
     implementation 'com.github.equationl.paddleocr4android:paddleocr4android:v1.3.0'
     // PDF 扫描件渲染后备：PdfiumAndroid（内置 Pdfium 编译启用 OpenJPEG，可渲染 JPEG2000/JBIG2 压缩的扫描图；
-    //   系统 PdfRenderer/Pdfium 不支持这两种格式，会导致扫描件页面渲染为空白、OCR 认不出字）。
-    // 注：该库传递依赖旧版 com.android.support:support-compat，与 AndroidX 冲突，需 exclude 掉（其运行时不依赖它）。
+    //   系统 PdfRenderer 不支持这两种格式，会导致扫描件页面渲染为空白、OCR 认不出字）。
+    // 注：该库基于旧版 Support Library 编译，内部引用 android.support.v4.util.ArrayMap。
+    //   项目已启用 Jetifier（gradle.properties: android.enableJetifier=true），构建期自动把该引用
+    //   重写到 androidx.collection.ArrayMap，避免真机 renderWithPdfium 构造 PdfiumCore 时
+    //   抛 NoClassDefFoundError: android/support/v4/util/ArrayMap 崩溃。故此处无需再手动 exclude。
     implementation('com.github.barteksc:pdfium-android:1.9.0') {
         exclude group: 'com.android.support', module: 'support-compat'
     }
