@@ -195,7 +195,7 @@ object FileProcessor {
             ProcessOutput(resMap, null)
         } else {
             val ocrForPrintMode = looksLikeGarbage || isFailedChinesePdf
-            val ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = ocrForPrintMode)
+            val ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = ocrForPrintMode, isScanPdf = needOcr)
             if (ocrRes != null) {
                 // v1.9.52: 对齐桌面版 extract_pdf 的 whole_poisoned 口径——触发 OCR 分支说明
                 // 该 PDF 是图纸类/图片型/文字层污染，应以整页 OCR 结果为准，不再把 Level1/Level2

@@ -1408,6 +1408,31 @@ fun FileCard(
                     }
                 }
             }
+            // v1.9.168: 恢复 PDF「文字部分 / 纯编号部分」拆分展开，但仅限图纸/扫描类 PDF
+            //   （ocrNote 含「扫描」或 DWG 派生 needsPdf=true）；普通文字 PDF 不展开（v1.9.166 用户要求）。
+            val pdfP2 = entry.result?.pdfParts
+            val isScanDrawingPdf = pdfP2 != null && (
+                (entry.result?.ocrNote?.contains("扫描") == true) || (entry.result?.needsPdf == true)
+            )
+            if (isScanDrawingPdf && pdfP2 != null) {
+                val pp = pdfP2
+                val textKey = "${entry.id}::pdf::text"
+                val codeKey = "${entry.id}::pdf::code"
+                val textChecked = hiddenSelected[textKey] ?: true
+                val codeChecked = hiddenSelected[codeKey] ?: true
+                Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("文", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2B579A))
+                    Checkbox(checked = textChecked, onCheckedChange = { hiddenSelected[textKey] = !(hiddenSelected[textKey] ?: true) }, modifier = Modifier.size(24.dp))
+                    Text("文字部分", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    Text("字 ${pp.textWords} 中 ${pp.textFe} 非 ${pp.textNc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                }
+                Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("编", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2B579A))
+                    Checkbox(checked = codeChecked, onCheckedChange = { hiddenSelected[codeKey] = !(hiddenSelected[codeKey] ?: true) }, modifier = Modifier.size(24.dp))
+                    Text("纯编号部分", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    Text("字 ${pp.numWords} 中 ${pp.numFe} 非 ${pp.numNc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                }
+            }
             // v1.9.58: PDF/DWG 完整诊断（含决策路径）放到展开明细末尾，便于复制发开发者定位。
             val diagText = entry.result?.diag
             if (!diagText.isNullOrBlank()) {
@@ -4067,7 +4092,7 @@ internal suspend fun processBatchToEntries(
                             //   (更兼容, 文本/图片 PDF 均可靠渲染)，仅保留 looksLikeGarbage/isFailedChinesePdf
                             //   的 PRINT 高分辨率(这两类确需更清晰渲染)。
                             val ocrForPrintMode = looksLikeGarbage || isFailedChinesePdf
-                            val ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = ocrForPrintMode, onProgress = { done, total ->
+                            val ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = ocrForPrintMode, isScanPdf = needOcr, onProgress = { done, total ->
                                 onProgress(dName, done, total)
                             })
 
