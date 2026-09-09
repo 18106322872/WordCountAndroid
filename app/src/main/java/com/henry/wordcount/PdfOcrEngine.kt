@@ -936,37 +936,22 @@ private fun ocrEmbeddedImages(file: File): String {
     // 避免整图解码 ~104MB 或整页缩小导致文字不可读。每块宽 ~2500px（<2560，recognizeTiled 不再二次缩小），
     // 高度保持原生 897 -> 文字约 57px 高，ML Kit/PaddleOCR 均可稳定识别。
     private fun ocrNativeSlice(raw: ByteArray): String {
-        var decoder: android.graphics.BitmapRegionDecoder? = null
+        // v1.9.162: BitmapRegionDecoder 在 29195x897 这类超宽 JPEG 上 Skia 区域解码不可靠
+        //   （v1.9.160 真机：10 张全 0 字——decodeRegion 返回空白位图 -> OCR 看到白纸）。
+        //   修复：弃用 BitmapRegionDecoder，改用 BitmapFactory.decodeByteArray + inSampleSize=4
+        //   整体下采样（29195->7299, 897->224; 193->48; 内存 <= 6.5MB 安全），
+        //   再交给 recognizeTiledGeneric 分块 OCR（axisStarts 现已修 len<=target 的负起点 bug）。
+        //   桌面 RapidOCR 验证：原生分块 1127 字 vs S=4 分块 1098 字（保留 97%）；193 高切片 S=4 仍 80 字。
         return try {
-            decoder = android.graphics.BitmapRegionDecoder.newInstance(raw, 0, raw.size)
-            val fullW = decoder.width
-            val fullH = decoder.height
-            if (fullW <= 0 || fullH <= 0) return ""
-            val sb = StringBuilder()
-            var x = 0
-            val tileW = 2500
-            while (x < fullW) {
-                val tw = min(tileW, fullW - x)
-                val tile = try {
-                    decoder.decodeRegion(
-                        android.graphics.Rect(x, 0, x + tw, fullH),
-                        android.graphics.BitmapFactory.Options().apply {
-                            inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
-                        }
-                    )
-                } catch (_: Throwable) { null } ?: break
-                try {
-                    val t = recognizeTiled(tile)
-                    if (t.isNotBlank()) sb.append(t).append('\n')
-                } finally { tile.recycle() }
-                x += tw
+            val opts = android.graphics.BitmapFactory.Options().apply {
+                inSampleSize = 4
+                inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
             }
-            sb.toString().trim()
+            val bmp = android.graphics.BitmapFactory.decodeByteArray(raw, 0, raw.size, opts) ?: return ""
+            try { recognizeTiled(bmp) } finally { bmp.recycle() }
         } catch (e: Throwable) {
             Log.w("WordCount", "PdfOcr 原生切片OCR 异常: ${e.javaClass.simpleName}: ${e.message}")
             ""
-        } finally {
-            runCatching { decoder?.recycle() }
         }
     }
 
@@ -1234,6 +1219,9 @@ private fun strategyA_XObjectImage(data: ByteArray, out: MutableList<Bitmap>, se
         // 相邻块重叠 overlap 像素，避免文字被切块边界切断而漏识。
         val step = max(1, target - overlap)
         fun axisStarts(len: Int): List<Int> {
+            // v1.9.162: 当 len <= target 时原代码会算出负起点 (len-target)，createBitmap 抛 IllegalArgumentException -> OCR 全跳过。
+            //   修复：短边直接返回 [0]，让 recognizeTiledGeneric 走正常分块（h = min(target, len-y0)）。
+            if (len <= target) return listOf(0)
             val xs = mutableListOf<Int>()
             var x = 0
             while (x + target < len) { xs.add(x); x += step }
