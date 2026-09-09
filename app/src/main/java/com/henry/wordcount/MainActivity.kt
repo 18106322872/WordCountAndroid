@@ -1200,9 +1200,8 @@ fun FileCard(
                             "字数 - ｜ 中文 - ｜ 非中文 - ｜ $pageLabel" +
                                     (if (r.pagesReason != null && !isEstimated) " ｜ ${r.pagesReason}" else "")
                         } else {
-                            // v1.9.131: 若有「纯数字」拆分数据，附加展示，供用户按 DWG 风格区分文字/数字。
-                            val numSuffix = if (r.num > 0) " ｜ 纯数字 ${r.num}" else ""
-                            "字数 ${r.words} ｜ 中文 ${r.fe} ｜ 非中文 ${r.nc}$numSuffix ｜ $pageLabel" +
+                            // v1.9.166: 依用户要求移除「纯数字」展示（无用）
+                            "字数 ${r.words} ｜ 中文 ${r.fe} ｜ 非中文 ${r.nc} ｜ $pageLabel" +
                                     (if (r.pagesReason != null && !isEstimated) " ｜ ${r.pagesReason}" else "")
                         }
                         Text(
@@ -1233,8 +1232,6 @@ fun FileCard(
                             (r.hiddenSheets?.size ?: 0) +
                             (if (r.notesSlides?.isNotEmpty() == true) 1 else 0) +
                             (if (r.cadParts != null) 2 else 0) +
-                            // v1.9.132: PDF 文字/纯编号拆分（与 DWG cadParts 同级独立计数）
-                            (if (r.pdfParts != null) 2 else 0) +
                             // v1.9.111: 内嵌图片行（docImageCount 为提取阶段真实张数，老路径退回 imageCount）
                             if (r.docImageCount > 0 || r.imageCount > 0) 1 else 0
                         if (detailCount > 0) {
@@ -1380,26 +1377,7 @@ fun FileCard(
                     Text("字 ${cadParts.codeWords} 中 ${cadParts.codeFe} 非 ${cadParts.codeNc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
             }
-            // v1.9.132: PDF 文字/纯编号拆分（与 DWG cadParts 风格一致，标签换"文/号"，默认都勾选）
-            val pdfParts = entry.result?.pdfParts
-            if (pdfParts != null) {
-                val textKey = "${entry.id}::pdf::text"
-                val numKey = "${entry.id}::pdf::num"
-                val textChecked = hiddenSelected[textKey] ?: true
-                val numChecked = hiddenSelected[numKey] ?: true
-                Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("文", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2B579A))
-                    Checkbox(checked = textChecked, onCheckedChange = { hiddenSelected[textKey] = !(hiddenSelected[textKey] ?: true) }, modifier = Modifier.size(24.dp))
-                    Text("文字部分（中文 / 英文）", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                    Text("字 ${pdfParts.textWords} 中 ${pdfParts.textFe} 非 ${pdfParts.textNc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-                }
-                Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("号", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2B579A))
-                    Checkbox(checked = numChecked, onCheckedChange = { hiddenSelected[numKey] = !(hiddenSelected[numKey] ?: true) }, modifier = Modifier.size(24.dp))
-                    Text("纯编号部分（导线号 / 端子号 / 尺寸数字，通常不翻译）", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-                    Text("字 ${pdfParts.numWords} 中 ${pdfParts.numFe} 非 ${pdfParts.numNc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-                }
-            }
+            // v1.9.166: 依用户要求，普通 PDF 不再展开「文字部分 / 编号部分」——只有图纸(DWG)保留该拆分。
             // v1.9.111: 文档中图片字数（对齐桌面 v1.8.102 的 DOCIMG 行）。
             //   未 OCR：显示「共 N 张图片，勾选后识别」+ 选择框；
             //   已 OCR：显示 OCR 出的字数；勾选状态同步控制底部合计（v1.9.116：

@@ -91,6 +91,13 @@ object PdfOcrEngine {
     //   240s 留 2× 余量让 16 块 PaddleOCR 跑完，native 线程正常 return → 不 OOM → 进程存活。
     //   仍保留 cancel + 2× 基准兜底（v1.9.133），万一真超 240s 也不至于永久卡死。
     private const val PER_PAGE_TIMEOUT_SEC = 240L
+    // v1.9.166: 原生扫描切片 OCR 专用预算（秒）。
+    //   P403051 类 PDF 把整张扫描图切成 10 张 29195x897 的横向 JPEG 内嵌，整页渲染必然压垮文字，
+    //   只能逐张原生切片分块 OCR（50 块 PaddleOCR，实测 ~640s）。而 PER_PAGE_TIMEOUT_SEC 只有 240s，
+    //   v1.9.165 真机因此在 17:13:32 被强行 cancel —— OCR 其实在 17:20:33 跑完并拿到 8343 字
+    //   （桌面真值 8275，误差<1%），结果却被整体丢弃，随后 :countservice 重启 = 用户看到的"又崩了"。
+    //   修复：页任务在进入原生切片 OCR 前置位 pageLongRun，收集端见到该标记即把本页预算放宽到本值。
+    private const val EMBEDDED_OCR_BUDGET_SEC = 1500L
     // v1.9.132: 进度心跳间隔（秒）。OCR 期间每 N 秒强制发一次 onProgress，
     //   避免长时间大文件 OCR 时主界面「卡 0/1 不动」+ 通知栏被 Android 误判为不活跃。
     private const val PROGRESS_HEARTBEAT_SEC = 5L
@@ -401,6 +408,9 @@ object PdfOcrEngine {
         var pageCount = 0
         // v1.9.133: 超时页兜底用——每页 2× 基准结果算完后立即发布到这里，超时分支读取作最优可用解。
         val pageBase = java.util.concurrent.ConcurrentHashMap<Int, String>()
+        // v1.9.166: 长任务标记 + 原生切片 OCR 增量结果（配合 EMBEDDED_OCR_BUDGET_SEC，见其注释）
+        val pageLongRun = java.util.concurrent.ConcurrentHashMap<Int, Boolean>()
+        val embPartial = java.util.concurrent.ConcurrentHashMap<Int, String>()
 
         fun processBitmap(bmp: Bitmap, source: String, pageIdx: Int) {
             try {
@@ -479,7 +489,9 @@ object PdfOcrEngine {
                                     //   P403051 类 PDF 把整张扫描图切成多张横向 JPEG 内嵌在页里；整页渲染会引入大量白边，
                                     //   6× 升采样 12 块 PaddleOCR 超时 OOM。提取内嵌图后纵向拼接，像素数只有整页渲染 ~40%、块数 4，~100s 出 ~1000 词。
                                     if (baseText.length < ADAPT_MIN_CHARS) {
-                                        val embText = ocrEmbeddedImages(file)
+                                        // v1.9.166: 标记本页进入"原生切片 OCR"长任务，收集端据此放宽超时预算
+                                        pageLongRun[i] = true
+                                        val embText = ocrEmbeddedImages(file, i, embPartial)
                                         if (embText.length >= ADAPT_MIN_CHARS) {
                                             bestText = mergeOcrTexts(bestText, embText)
                                             Diag.d("PdfOcr p${i+1}: 内嵌图片OCR +${embText.length}字(≥${ADAPT_MIN_CHARS})，合并后 ${bestText.length}字")
@@ -520,26 +532,44 @@ object PdfOcrEngine {
                     })
                 }
                 for ((idx, f) in futures.withIndex()) {
-                    // v1.9.132: 单页超时 PER_PAGE_TIMEOUT_SEC(90s)——超过即放弃该页继续下一页。
+                    // v1.9.132: 单页超时 PER_PAGE_TIMEOUT_SEC——超过即放弃该页继续下一页。
                     //   避免 P403051 类大图单页卡住整个文件的 N 分钟。
-                    val r = try { f.get(PER_PAGE_TIMEOUT_SEC, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Throwable) { null }
-                    if (r == null) {
+                    // v1.9.166: 预算动态化——页任务一旦进入"原生扫描切片 OCR"（置位 pageLongRun），
+                    //   说明这是 P403051 类巨型扫描件，几十块 PaddleOCR 必然远超 240s；
+                    //   此时把本页预算放宽到 EMBEDDED_OCR_BUDGET_SEC，让它跑完而不是被腰斩。
+                    var budget = PER_PAGE_TIMEOUT_SEC
+                    val tPage0 = System.currentTimeMillis()
+                    var r: Triple<Int, String, Boolean>? = null
+                    while (true) {
+                        try {
+                            r = f.get(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+                            break
+                        } catch (_: Throwable) { }
+                        if (pageLongRun[idx] == true && budget < EMBEDDED_OCR_BUDGET_SEC) {
+                            budget = EMBEDDED_OCR_BUDGET_SEC
+                            Diag.d("PdfOcr p${idx + 1}: 检测到原生切片OCR，页预算放宽到 ${EMBEDDED_OCR_BUDGET_SEC}s")
+                        }
+                        if (System.currentTimeMillis() - tPage0 > budget * 1000L) break
+                    }
+                    val rr = r
+                    if (rr == null) {
                         if (!f.isDone) {
                             try { f.cancel(true) } catch (_: Throwable) {}
-                            Diag.d("PdfOcr p${idx+1}: 超时 ${PER_PAGE_TIMEOUT_SEC}s 取消")
+                            Diag.d("PdfOcr p${idx+1}: 超时 ${budget}s 取消")
                         }
-                        // v1.9.133: 超时页不再丢弃，用已发布的 2× 基准（最优可用解）兜底，宁可少算 6× 补的小字也比计 0 字强。
-                        val fb = pageBase[idx]
+                        // v1.9.166: 兜底优先级——原生切片增量结果（几千字）> 2x 基准（几百字）。
+                        val ep = embPartial[idx]
+                        val fb = if (!ep.isNullOrBlank()) ep else pageBase[idx]
                         if (!fb.isNullOrBlank()) {
                             sb.append(fb).append('\n'); anyText = true
                             lastStrongChars += fb.length
-                            diag.append(" [p${idx+1}:超时→2×基准兜底${fb.length}字]")
+                            diag.append(" [p${idx+1}:超时→${if (!ep.isNullOrBlank()) "切片增量" else "2x基准"}兜底${fb.length}字]")
                         } else {
-                            errorCount++; diag.append(" [p${idx+1}:超时且无基准]")
+                            errorCount++; diag.append(" [p${idx+1}:超时且无兜底]")
                         }
                         continue
                     }
-                    val (_, text, blank) = r
+                    val (_, text, blank) = rr
                     if (blank) { blankCount++; diag.append(" [p${idx+1}:空白]"); continue }
                     if (text.isNotBlank()) {
                         sb.append(text).append('\n')
@@ -903,7 +933,11 @@ object PdfOcrEngine {
         return t
     }
 
-private fun ocrEmbeddedImages(file: File): String {
+private fun ocrEmbeddedImages(
+    file: File,
+    pageIdx: Int = -1,
+    partial: java.util.concurrent.ConcurrentHashMap<Int, String>? = null
+): String {
         // v1.9.165: 速度优化——v1.9.163 真机 10 张切片串行耗时约 14 分钟（且后段严重劣化 28s->328s）。
         //   PaddleOcr.recognize 内部 synchronized 串行（Paddle-Lite predictor 非线程安全），无法并行 OCR；
         //   但 BitmapFactory 解码是线程安全的，可多 worker 并行。故改为「多 worker 并行解码 + 锁内串行 OCR」：
@@ -930,8 +964,16 @@ private fun ocrEmbeddedImages(file: File): String {
             }
             val sb = StringBuilder()
             for (f in futures) {
-                val t = try { f.get(300, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Throwable) { "" }
-                if (t.isNotBlank()) sb.append(t).append('\n')
+                // v1.9.166: 单片上限 300s -> 900s（v1.9.165 真机单片实测最长 246s，排队时更长）
+                val t = try { f.get(900, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Throwable) { "" }
+                if (t.isNotBlank()) {
+                    sb.append(t).append('\n')
+                    // v1.9.166: 增量发布到 embPartial——即使外层页任务最终被取消，也能保住已完成的切片结果
+                    //   （v1.9.165 就是跑完 8343 字却被整体丢弃 -> 主界面看不到结果、随后服务重启）
+                    if (pageIdx >= 0 && partial != null) {
+                        try { partial.merge(pageIdx, t) { a, b -> a + "\n" + b } } catch (_: Throwable) {}
+                    }
+                }
             }
             val text = sb.toString().trim()
             Diag.d("PdfOcr 内嵌图片OCR: 原生切片分块 -> +${text.length}字")
