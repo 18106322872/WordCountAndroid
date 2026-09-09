@@ -904,12 +904,11 @@ object PdfOcrEngine {
     }
 
 private fun ocrEmbeddedImages(file: File): String {
-        // v1.9.158: P403051 类「整张扫描图切成多张横向 JPEG 内嵌」PDF 的可靠 OCR 路径。
-        //   根因：页面仅 842pt，扫描图原生 ~29195x897（整体≈2.4亿像素），任何整页渲染（6x=5000px）都会把
-        //   原生扫描缩小 ~5.8x，文字压到 ~1px -> PaddleOCR/ML Kit 都认不出（v1.9.155 仍 0 字，v1.9.156 只修了
-        //   Pdfium 崩溃但 Pdfium 同样按页 pt 缩放，仍 0 字）。
-        //   正确做法：直接提取内嵌扫描切片字节，用 BitmapRegionDecoder 在原生分辨率下按 ~2500px 宽切片逐块 OCR
-        //   （每块 ~9MB，峰值内存可控不 OOM），绕开整页缩小的死路。命中即采用，跳过 6x 升采样。
+        // v1.9.165: 速度优化——v1.9.163 真机 10 张切片串行耗时约 14 分钟（且后段严重劣化 28s->328s）。
+        //   PaddleOcr.recognize 内部 synchronized 串行（Paddle-Lite predictor 非线程安全），无法并行 OCR；
+        //   但 BitmapFactory 解码是线程安全的，可多 worker 并行。故改为「多 worker 并行解码 + 锁内串行 OCR」：
+        //   解码时间被摊薄到 1/N，OCR 仍串行但总耗时 ≈ 解码总时长/N + OCR 总时长。
+        //   同时为每张切片加解码/OCR 分别计时诊断，便于下轮精确定位瓶颈。
         return try {
             val data = file.readBytes()
             val slices = collectEmbeddedImageBytes(data, 3000)
@@ -917,10 +916,21 @@ private fun ocrEmbeddedImages(file: File): String {
                 Diag.d("PdfOcr 内嵌图片: 未提取到原生扫描切片(宽>=3000)")
                 return ""
             }
-            Diag.d("PdfOcr 内嵌图片: 提取 ${slices.size} 张原生扫描切片, 开始逐张分块OCR")
+            Diag.d("PdfOcr 内嵌图片: 提取 ${slices.size} 张原生扫描切片, 并行解码+串行OCR")
+            val nThreads = minOf(3, slices.size)
+            val pool = java.util.concurrent.Executors.newFixedThreadPool(nThreads)
+            val futures = ArrayList<java.util.concurrent.Future<String>>(slices.size)
+            try {
+                for (i in slices.indices) {
+                    val raw = slices[i]
+                    futures.add(pool.submit(java.util.concurrent.Callable<String> { ocrNativeSlice(raw) }))
+                }
+            } finally {
+                pool.shutdown()
+            }
             val sb = StringBuilder()
-            for (raw in slices) {
-                val t = ocrNativeSlice(raw)
+            for (f in futures) {
+                val t = try { f.get(300, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Throwable) { "" }
                 if (t.isNotBlank()) sb.append(t).append('\n')
             }
             val text = sb.toString().trim()
@@ -932,37 +942,37 @@ private fun ocrEmbeddedImages(file: File): String {
         }
     }
 
-    // 用 BitmapRegionDecoder 在原生分辨率下对单张超大扫描切片（如 29195x897）分块 OCR，
-    // 避免整图解码 ~104MB 或整页缩小导致文字不可读。每块宽 ~2500px（<2560，recognizeTiled 不再二次缩小），
-    // 高度保持原生 897 -> 文字约 57px 高，ML Kit/PaddleOCR 均可稳定识别。
-    private fun ocrNativeSlice(raw: ByteArray): String {
-        // v1.9.163: v1.9.162 真机——10 张切片全部解码成功但 OCR +0 字，且只花 4.3s（说明 ML Kit 确实跑了却一无所获）。
-        //   根因：本 PDF 是 CAD 工程图，标注为 35/34/FILLET 这类孤立稀疏的工程标号，
-        //   ML Kit（面向自然场景/文档文本）会把孤立短 token 当噪声丢弃 -> 恒 0；
-        //   而 PP-OCR 家族可以识别（桌面 RapidOCR 在同样 S=4 分块上实测 1098 字）。
-        //   修复：原生切片主路径改 PaddleOCR（upscalePx=1280，不放大，与桌面验证条件一致），
-        //   PaddleOCR 仍 0 字时再回退 ML Kit（ML Kit 仅 ~0.4s/片，成本极低）。
-        //   另：6x PaddleOCR 实测 ~1.2s/块（5000x3537 约 12 块 = 14s），并不慢；真机 7 分钟卡顿来自其后继流程。
+private fun ocrNativeSlice(raw: ByteArray): String {
+        // v1.9.163: 本 PDF 是 CAD 工程图（35/34/FILLET 等孤立稀疏工程标号），
+        //   ML Kit 会把孤立短 token 当噪声丢弃 -> 恒 0；PP-OCR 家族可以识别
+        //   （桌面 RapidOCR 在同样 S=4 分块上实测 1098 字）。故主路径用 PaddleOCR，
+        //   PaddleOCR 仍 0 字时再回退 ML Kit（~0.4s/片，成本极低）。
+        // v1.9.165: 增加解码/OCR 分段计时诊断，定位串行耗时瓶颈。
         try {
+            val t0 = System.currentTimeMillis()
             val opts = android.graphics.BitmapFactory.Options().apply {
                 inSampleSize = 4
                 inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
             }
             val bmp = android.graphics.BitmapFactory.decodeByteArray(raw, 0, raw.size, opts)
+            val tDec = System.currentTimeMillis() - t0
             if (bmp == null || bmp.width <= 0 || bmp.height <= 0) {
-                Diag.d("PdfOcr 原生切片: 解码失败(null/0尺寸)")
+                Diag.d("PdfOcr 原生切片: 解码失败 耗时 " + tDec + "ms")
                 return ""
             }
-            Diag.d("PdfOcr 原生切片: 解码 " + bmp.width + "x" + bmp.height)
+            Diag.d("PdfOcr 原生切片: 解码 " + bmp.width + "x" + bmp.height + " 耗时 " + tDec + "ms")
             try {
-                val t1 = recognizeTiledGeneric(bmp, upscalePx = 1280) { PaddleOcr.recognize(it) ?: "" }
-                if (t1.length >= 5) {
-                    Diag.d("PdfOcr 原生切片: PaddleOCR 识别 " + t1.length + " 字")
-                    return t1
+                val t1 = System.currentTimeMillis()
+                val tp = recognizeTiledGeneric(bmp, upscalePx = 1280) { PaddleOcr.recognize(it) ?: "" }
+                val tOcr = System.currentTimeMillis() - t1
+                if (tp.length >= 5) {
+                    Diag.d("PdfOcr 原生切片: PaddleOCR 识别 " + tp.length + " 字 耗时 " + tOcr + "ms")
+                    return tp
                 }
-                val t2 = recognizeTiled(bmp)
-                Diag.d("PdfOcr 原生切片: PaddleOCR " + t1.length + " 字 -> MLKit 回退 " + t2.length + " 字")
-                return if (t2.length > t1.length) t2 else t1
+                val t2 = System.currentTimeMillis()
+                val tm = recognizeTiled(bmp)
+                Diag.d("PdfOcr 原生切片: PaddleOCR " + tp.length + "字/" + tOcr + "ms -> MLKit 回退 " + tm.length + "字/" + (System.currentTimeMillis() - t2) + "ms")
+                return if (tm.length > tp.length) tm else tp
             } finally {
                 bmp.recycle()
             }
