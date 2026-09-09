@@ -973,38 +973,47 @@ private fun ocrEmbeddedImages(file: File): String {
     // 扫描 PDF 字节流，收集宽 >= minWidth 的内嵌图像原始字节（即 P403051 类原生扫描切片，排除 tiny logo/图标）。
     // 基于 XObject /Subtype/Image 字典 + /Length 定位 stream；仅用边界解码判断宽度，不解码整图。
     private fun collectEmbeddedImageBytes(data: ByteArray, minWidth: Int): List<ByteArray> {
-        val out = mutableListOf<ByteArray>()
-        val seen = mutableSetOf<Int>()
-        val limit = min(data.size, 12 * 1024 * 1024)
-        val str = String(data, 0, limit, Charsets.ISO_8859_1)
-        val imgPattern = Regex("""/Type\s*/XObject\s*/Subtype\s*/Image[^>]*?/Length\s+(\d+)""")
-        for (m in imgPattern.findAll(str)) {
-            if (out.size >= 20) break
-            try {
-                val length = m.groupValues[1].trim().toIntOrNull() ?: continue
-                if (length < 100 || length > 50_000_000) continue
-                val dictEnd = m.range.last
-                val streamStart = str.indexOf("stream", dictEnd)
-                if (streamStart < 0 || streamStart > dictEnd + 500) continue
-                val b1 = data.getOrNull(streamStart + 6)?.toInt() ?: 0
-                val off = when {
-                    b1 == 0x0D -> 2
-                    b1 == 0x0A -> 1
-                    else -> 0
-                }.coerceAtMost(2)
-                val dataStart = streamStart + 7 + off
-                if (dataStart + length > data.size || seen.contains(dataStart)) continue
-                seen.add(dataStart)
-                val imgBytes = data.sliceArray(dataStart until dataStart + length)
-                val opts = android.graphics.BitmapFactory.Options()
-                opts.inJustDecodeBounds = true
-                android.graphics.BitmapFactory.decodeByteArray(imgBytes, 0, imgBytes.size, opts)
-                if (opts.outWidth < minWidth) continue
-                out.add(imgBytes)
-            } catch (_: Throwable) {}
-        }
-        return out
+    // v1.9.160: P403051 真机仍 0 字根因——原正则要求 /Type/XObject/Subtype/Image 必须在 /Length 之前，
+    //   但真实 PDF 图像字典键顺序为 /Length 在前、/Subtype/Image 在后，正则 0 匹配 -> 无切片 -> 回退6x -> 0字。
+    //   修复：先定位 /Subtype*/Image，再在其字典块(<<...>>)内回找 /Length；stream 后 EOL 偏移按 6+off 计算
+    //   （原 7+off 差一字节，JPEG SOI 首字节被吞 -> BitmapFactory 解码失败 -> 全跳过）。已用真实 P403051 字节流验证提取到 10 张 29195 宽切片。
+    val out = mutableListOf<ByteArray>()
+    val seen = mutableSetOf<Int>()
+    val limit = min(data.size, 32 * 1024 * 1024)
+    val str = String(data, 0, limit, Charsets.ISO_8859_1)
+    val subPat = Regex("""/Subtype\s*/\s*Image""")
+    val lenPat = Regex("""/Length\s+(\d+)""")
+    for (sm in subPat.findAll(str)) {
+        if (out.size >= 20) break
+        try {
+            val dictStart = str.lastIndexOf("<<", sm.range.first).let { if (it < 0) str.lastIndexOf("/Type", max(0, sm.range.first - 400)) else it }
+            val dictEnd = str.indexOf(">>", sm.range.first)
+            if (dictEnd < 0) continue
+            val lenM = lenPat.find(str.substring(dictStart, dictEnd)) ?: continue
+            val length = lenM.groupValues[1].trim().toIntOrNull() ?: continue
+            if (length < 100 || length > 50_000_000) continue
+            val streamStart = str.indexOf("stream", dictEnd)
+            if (streamStart < 0 || streamStart > dictEnd + 50) continue
+            // EOL after "stream": 6 = len("stream"); off = EOL 长度(0/1/2)
+            val a = data.getOrNull(streamStart + 6)?.toInt() ?: 0
+            val off = when {
+                a == 0x0D -> if (data.getOrNull(streamStart + 7)?.toInt() == 0x0A) 2 else 1
+                a == 0x0A -> 1
+                else -> 0
+            }.coerceAtMost(2)
+            val dataStart = streamStart + 6 + off
+            if (dataStart + length > data.size || seen.contains(dataStart)) continue
+            seen.add(dataStart)
+            val imgBytes = data.sliceArray(dataStart until dataStart + length)
+            val opts = android.graphics.BitmapFactory.Options()
+            opts.inJustDecodeBounds = true
+            android.graphics.BitmapFactory.decodeByteArray(imgBytes, 0, imgBytes.size, opts)
+            if (opts.outWidth < minWidth) continue
+            out.add(imgBytes)
+        } catch (_: Throwable) {}
     }
+    return out
+}
 
 private fun strategyA_XObjectImage(data: ByteArray, out: MutableList<Bitmap>, seen: MutableSet<Int>, maxDim: Int = 0) {
         val str = String(data, 0, min(data.size, 10 * 1024 * 1024), Charsets.ISO_8859_1)
