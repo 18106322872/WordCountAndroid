@@ -936,22 +936,39 @@ private fun ocrEmbeddedImages(file: File): String {
     // 避免整图解码 ~104MB 或整页缩小导致文字不可读。每块宽 ~2500px（<2560，recognizeTiled 不再二次缩小），
     // 高度保持原生 897 -> 文字约 57px 高，ML Kit/PaddleOCR 均可稳定识别。
     private fun ocrNativeSlice(raw: ByteArray): String {
-        // v1.9.162: BitmapRegionDecoder 在 29195x897 这类超宽 JPEG 上 Skia 区域解码不可靠
-        //   （v1.9.160 真机：10 张全 0 字——decodeRegion 返回空白位图 -> OCR 看到白纸）。
-        //   修复：弃用 BitmapRegionDecoder，改用 BitmapFactory.decodeByteArray + inSampleSize=4
-        //   整体下采样（29195->7299, 897->224; 193->48; 内存 <= 6.5MB 安全），
-        //   再交给 recognizeTiledGeneric 分块 OCR（axisStarts 现已修 len<=target 的负起点 bug）。
-        //   桌面 RapidOCR 验证：原生分块 1127 字 vs S=4 分块 1098 字（保留 97%）；193 高切片 S=4 仍 80 字。
-        return try {
+        // v1.9.163: v1.9.162 真机——10 张切片全部解码成功但 OCR +0 字，且只花 4.3s（说明 ML Kit 确实跑了却一无所获）。
+        //   根因：本 PDF 是 CAD 工程图，标注为 35/34/FILLET 这类孤立稀疏的工程标号，
+        //   ML Kit（面向自然场景/文档文本）会把孤立短 token 当噪声丢弃 -> 恒 0；
+        //   而 PP-OCR 家族可以识别（桌面 RapidOCR 在同样 S=4 分块上实测 1098 字）。
+        //   修复：原生切片主路径改 PaddleOCR（upscalePx=1280，不放大，与桌面验证条件一致），
+        //   PaddleOCR 仍 0 字时再回退 ML Kit（ML Kit 仅 ~0.4s/片，成本极低）。
+        //   另：6x PaddleOCR 实测 ~1.2s/块（5000x3537 约 12 块 = 14s），并不慢；真机 7 分钟卡顿来自其后继流程。
+        try {
             val opts = android.graphics.BitmapFactory.Options().apply {
                 inSampleSize = 4
                 inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
             }
-            val bmp = android.graphics.BitmapFactory.decodeByteArray(raw, 0, raw.size, opts) ?: return ""
-            try { recognizeTiled(bmp) } finally { bmp.recycle() }
+            val bmp = android.graphics.BitmapFactory.decodeByteArray(raw, 0, raw.size, opts)
+            if (bmp == null || bmp.width <= 0 || bmp.height <= 0) {
+                Diag.d("PdfOcr 原生切片: 解码失败(null/0尺寸)")
+                return ""
+            }
+            Diag.d("PdfOcr 原生切片: 解码 " + bmp.width + "x" + bmp.height)
+            try {
+                val t1 = recognizeTiledGeneric(bmp, upscalePx = 1280) { PaddleOcr.recognize(it) ?: "" }
+                if (t1.length >= 5) {
+                    Diag.d("PdfOcr 原生切片: PaddleOCR 识别 " + t1.length + " 字")
+                    return t1
+                }
+                val t2 = recognizeTiled(bmp)
+                Diag.d("PdfOcr 原生切片: PaddleOCR " + t1.length + " 字 -> MLKit 回退 " + t2.length + " 字")
+                return if (t2.length > t1.length) t2 else t1
+            } finally {
+                bmp.recycle()
+            }
         } catch (e: Throwable) {
-            Log.w("WordCount", "PdfOcr 原生切片OCR 异常: ${e.javaClass.simpleName}: ${e.message}")
-            ""
+            Log.w("WordCount", "PdfOcr 原生切片OCR 异常: " + e.javaClass.simpleName + ": " + e.message)
+            return ""
         }
     }
 
