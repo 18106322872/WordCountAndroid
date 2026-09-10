@@ -202,10 +202,11 @@ object FileProcessor {
                 // 的少量文本层补回 OCR（避免重复计数/污染）。
                 val finalText = PdfOcrEngine.stripNoiseFarEast(PdfOcrEngine.filterStrongCjkNoise(ocrRes.text))
                 val ocrStats = countTextKotlin(finalText)
+                // v1.9.186: pdf_scan_doc=竖向扫描件(非图纸,上层不出文/号)；pdf_ocr_used=整页OCR已跑(上层隐藏「图」行)
                 val resMap = mapOf(
                     "name" to dName, "ext" to ".pdf",
                     "stats" to mapOf("words" to ocrStats.first, "fe" to ocrStats.second, "nc" to ocrStats.third, "chars" to ocrStats.fourth),
-                    "meta" to emptyMap<String, Any?>(),
+                    "meta" to mapOf<String, Any?>("pdf_scan_doc" to ocrRes.portraitScan, "pdf_ocr_used" to true),
                     "pages" to ocrRes.pages,
                     "diag" to "$pdfDiag\n(OCR补充)",
                     "ocrNote" to PdfOcrEngine.buildOcrNote(ocrRes.pages, "")

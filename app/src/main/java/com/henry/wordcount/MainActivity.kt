@@ -435,6 +435,10 @@ data class FileResult(
     val cadParts: CadPartStats? = null,
     // v1.9.132: PDF 文字/纯编号拆分（与 DWG 风格一致；与 cadParts 独立）
     val pdfParts: PdfPartStats? = null,
+    // v1.9.186: 图片类 PDF 属性——pdfScanDoc=竖向扫描件(AH+ 类非图纸, 不展示文/号)；
+    //   pdfOcrUsed=整页 OCR 已跑(全部图片都已 OCR, 隐藏「文档中图片字数」行)
+    val pdfScanDoc: Boolean = false,
+    val pdfOcrUsed: Boolean = false,
     // v1.9.111: 文档内嵌图片可选统计（对齐桌面 v1.8.102/1.8.103「文档中图片字数」行）
     //   docImageCount —— 阶段二提取到的内嵌图片张数（此阶段只提取不 OCR，避免拖慢字数显示）
     //   docImgDir     —— 图片落盘的临时目录（cacheDir/wc_docimg_*），供 OCR 与清理使用
@@ -1390,7 +1394,9 @@ fun FileCard(
             val docImgN = entry.result?.docImageCount ?: 0
             val imgFallbackN = entry.result?.imageCount ?: 0
             // v1.9.112: .pdf 也显示该行（勾选时才按需提取计数，未提取时张数未知则不显示 N）
-            val isPdfDocImg = entry.result?.ext?.lowercase() == ".pdf"
+            // v1.9.186: 整页 OCR 过的图片类 PDF（pdf_ocr_used）全部图片都已识别，不存在"剩余的图"，
+            //   不再显示「文档中图片字数」行（用户判定为多余诊断）。
+            val isPdfDocImg = entry.result?.ext?.lowercase() == ".pdf" && entry.result?.pdfOcrUsed != true
             if (docImgN > 0 || imgFallbackN > 0 || isPdfDocImg) {
                 val r2 = entry.result
                 val shown = if (docImgN > 0) docImgN else imgFallbackN
@@ -1415,7 +1421,8 @@ fun FileCard(
             val pdfP2 = entry.result?.pdfParts
             // v1.9.185: 恢复 v1.9.165 显示口径——凡带 pdfParts 的 PDF 均展示文/号拆分
             //   （v1.9.169 起已放开门控，此处仅恢复 v1.9.165 的行文案与标签）
-            if (pdfP2 != null) {
+            // v1.9.186: 竖向整页扫描文档（AH+ 类，非图纸）不出文/号——只有图纸类 PDF 才需要
+            if (pdfP2 != null && entry.result?.pdfScanDoc != true) {
                 val pp = pdfP2
                 val textKey = "${entry.id}::pdf::text"
                 val numKey = "${entry.id}::pdf::num"
@@ -1433,16 +1440,6 @@ fun FileCard(
                     Text("纯编号部分（导线号 / 端子号 / 尺寸数字，通常不翻译）", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                     Text("字 ${pp.numWords} 中 ${pp.numFe} 非 ${pp.numNc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
-            }
-            // v1.9.58: PDF/DWG 完整诊断（含决策路径）放到展开明细末尾，便于复制发开发者定位。
-            val diagText = entry.result?.diag
-            if (!diagText.isNullOrBlank()) {
-                Text(
-                    diagText,
-                    Modifier.padding(start = 32.dp, top = 4.dp),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.Gray
-                )
             }
             } // end expanded
         }
@@ -4113,11 +4110,14 @@ internal suspend fun processBatchToEntries(
                                 if (ocrStats.fourth >= bestChars) {
                                     // v1.9.52: 对齐桌面版 extract_pdf 的 whole_poisoned 口径——OCR 字数不少于文本层，
                                     // 以整页 OCR 结果为准，不再把 Level1/Level2 的少量文本层补回（避免重复计数/污染）。
+                                    // v1.9.186: 竖向扫描文档(非图纸)不出文/号——不写 pdf_parts；meta 标记 pdf_scan_doc/pdf_ocr_used
                                     val pdfP = buildPdfPartStats(finalText, ocrStats.second, ocrStats.third, ocrStats.fourth)
+                                    val metaMap = mutableMapOf<String, Any?>("pdf_scan_doc" to ocrRes.portraitScan, "pdf_ocr_used" to true)
+                                    if (!ocrRes.portraitScan) metaMap["pdf_parts"] = pdfPartsToMap(pdfP)
                                     val resMap = mapOf(
                                         "name" to dName, "ext" to ".pdf",
                                         "stats" to mapOf("words" to ocrStats.first, "fe" to ocrStats.second, "nc" to ocrStats.third, "chars" to ocrStats.fourth, "num" to pdfP.numChars),
-                                        "meta" to mapOf<String, Any?>("pdf_parts" to pdfPartsToMap(pdfP)),
+                                        "meta" to metaMap,
                                         "pages" to ocrRes.pages,
                                         "diag" to "$pdfDiag\n(OCR补充)",
                                         "ocrNote" to PdfOcrEngine.buildOcrNote(ocrRes.pages, "")
@@ -4129,11 +4129,14 @@ internal suspend fun processBatchToEntries(
                                         // 扫描件/无真实文本层：即便 OCR 字数少于文本层（文本层是垃圾/结构字符），
                                         // 也以 OCR 结果为准——绝不用垃圾文本层虚增字数（P403051 类图片 PDF 的"文本层"来自嵌入碎片）。
                                         Diag.d( "PDF OCR取优 $dName: needOcr 场景 OCR=${ocrStats.fourth}ch 虽<文本层=${bestChars}ch，仍采用 OCR(文本层为垃圾)")
+                                        // v1.9.186: 同分支①——竖向扫描文档(非图纸)不出文/号
                                         val pdfP = buildPdfPartStats(finalText, ocrStats.second, ocrStats.third, ocrStats.fourth)
+                                        val metaMap2 = mutableMapOf<String, Any?>("pdf_scan_doc" to ocrRes.portraitScan, "pdf_ocr_used" to true)
+                                        if (!ocrRes.portraitScan) metaMap2["pdf_parts"] = pdfPartsToMap(pdfP)
                                         val resMap = mapOf(
                                             "name" to dName, "ext" to ".pdf",
                                             "stats" to mapOf("words" to ocrStats.first, "fe" to ocrStats.second, "nc" to ocrStats.third, "chars" to ocrStats.fourth, "num" to pdfP.numChars),
-                                            "meta" to mapOf<String, Any?>("pdf_parts" to pdfPartsToMap(pdfP)),
+                                            "meta" to metaMap2,
                                             "pages" to ocrRes.pages,
                                             "diag" to "$pdfDiag\n(OCR已采用，文本层为垃圾未采用)",
                                             "ocrNote" to PdfOcrEngine.buildOcrNote(ocrRes.pages, "")
@@ -4143,11 +4146,14 @@ internal suspend fun processBatchToEntries(
                                     } else {
                                         // OCR 字数少于文本层 → 保留更完整的文本层结果（仍标注 OCR 已触发跑过）
                                         Diag.d( "PDF OCR取优 $dName: OCR=${ocrStats.fourth}ch < 文本层=${bestChars}ch，保留文本层")
+                                        // v1.9.186: 同分支①——竖向扫描文档(非图纸)不出文/号（OCR 已跑但此处保留文本层）
                                         val pdfP = buildPdfPartStats(finalText, bestFe, bestNc, bestChars)
+                                        val metaMap3 = mutableMapOf<String, Any?>("pdf_scan_doc" to ocrRes.portraitScan, "pdf_ocr_used" to false)
+                                        if (!ocrRes.portraitScan) metaMap3["pdf_parts"] = pdfPartsToMap(pdfP)
                                         val resMap = mapOf(
                                             "name" to dName, "ext" to ".pdf",
                                             "stats" to mapOf("words" to bestWords, "fe" to bestFe, "nc" to bestNc, "chars" to bestChars, "num" to pdfP.numChars),
-                                            "meta" to mapOf<String, Any?>("pdf_parts" to pdfPartsToMap(pdfP)),
+                                            "meta" to metaMap3,
                                             "pages" to (if (realPages > 1) realPages else bestPages),
                                             "diag" to "$pdfDiag\n(OCR已触发但字数少于文本层，保留文本层)",
                                             "ocrNote" to "OCR已触发，结果并入文本层"
@@ -4483,12 +4489,16 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
             numChars = (it["num_chars"] as? Number)?.toInt() ?: 0,
         )
     }
+    // v1.9.186: 图片类 PDF 属性（来自 meta，供 UI 门控文/号与「图」行）
+    val pdfScanDoc = (meta["pdf_scan_doc"] as? Boolean) ?: false
+    val pdfOcrUsed = (meta["pdf_ocr_used"] as? Boolean) ?: false
     // v1.9.181: 兜底——跨进程 pdf_parts 偶发丢失时，用 stats 反推一份，保证 PDF 文/号拆分始终可展开。
+    // v1.9.186: 竖向扫描文档(非图纸)不兜底——本来就不该出文/号。
     val pdfPartsFinal = pdfParts ?: run {
         val sChars = (stats["chars"] as? Number)?.toInt() ?: 0
         val sFe = (stats["fe"] as? Number)?.toInt() ?: 0
         val sNum = (stats["num"] as? Number)?.toInt() ?: 0
-        if (ext == ".pdf" && sChars > 0) {
+        if (ext == ".pdf" && sChars > 0 && !pdfScanDoc) {
             val tChars = maxOf(0, sChars - sNum)
             val tNc = maxOf(0, tChars - sFe)
             PdfPartStats(
@@ -4530,6 +4540,9 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
         cadParts = cadParts,
         // v1.9.132: PDF 文字/纯编号拆分（与 DWG cadParts 同级，独立字段）
         pdfParts = pdfPartsFinal,
+        // v1.9.186: 图片类 PDF 属性（竖向扫描件不展示文/号；整页 OCR 过的隐藏「图」行）
+        pdfScanDoc = pdfScanDoc,
+        pdfOcrUsed = pdfOcrUsed,
     )
 }
 

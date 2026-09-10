@@ -236,7 +236,9 @@ object PdfOcrEngine {
 
 
 
-    data class PdfOcrResult(val text: String, val pages: Int)
+    // v1.9.186: portraitScan=true 表示该 PDF 是 AH+ 类「竖向整页扫描文档」（非图纸），
+    //   供上层跳过 文/号 拆分展示（只有图纸类 PDF 才需要文/号）。
+    data class PdfOcrResult(val text: String, val pages: Int, val portraitScan: Boolean = false)
 
 
 
@@ -956,8 +958,10 @@ object PdfOcrEngine {
             // 图纸类（P403051 横向超宽切片）与纯矢量页（头盔/成绩单 CAD 导出）不命中，原路径零改动。
             var portraitScanFile = false
             try {
-                val probeAspects = mutableListOf<Pair<Int, Int>>()
-                collectEmbeddedImageBytes(file.readBytes(), Int.MAX_VALUE, probeAspects)
+                // v1.9.186: 改用 Width/Height 直排字典探针——AH+(1) 的 17 张内嵌图全部用间接 /Length N 0 R，
+                //   旧探针经 collectEmbeddedImageBytes（靠 /Length 定位 stream）必然返回空 → det736 从未触发（v1.9.185 教训）。
+                //   实测 AH+ 17/17 图、P403051 10/10 图均直排 /Width /Height，无需解流即可判定。
+                val probeAspects = probeEmbeddedImageAspects(file.readBytes())
                 portraitScanFile = probeAspects.any { (w, h) -> h > w && w.toDouble() / h < EMBEDDED_SLICE_MIN_ASPECT }
             } catch (_: Throwable) {}
             if (portraitScanFile) Diag.d("PdfOcr: [扫描件] 检测到竖向整页扫描图 → 2x 基准整页单次识别 + det 736（对齐桌面 RapidOCR）")
@@ -1560,7 +1564,7 @@ object PdfOcrEngine {
 
         var result: PdfOcrResult? = null
 
-        if (text.isNotBlank()) result = PdfOcrResult(text, pageCount)
+        if (text.isNotBlank()) result = PdfOcrResult(text, pageCount, portraitScanFile)
 
         else if (anyRenderedContent) lastFailReason = FailReason.OCR_EMPTY
 
@@ -2090,11 +2094,36 @@ private fun ocrNativeSlice(raw: ByteArray): String {
 
 
 
+    // v1.9.186: 内嵌图宽高探针（bounds-only，零解码开销）——直接读 /Subtype/Image 字典里的直排
+    //   /Width /Height（实测 AH+(1) 17/17 图、P403051 10/10 图均直排），不解析 stream、不看 /Length
+    //   （AH+ 用间接 /Length N 0 R，collectEmbeddedImageBytes 对它必然 0 提取）。返回 (宽,高) 列表。
+    private fun probeEmbeddedImageAspects(data: ByteArray): List<Pair<Int, Int>> {
+        val out = mutableListOf<Pair<Int, Int>>()
+        val limit = min(data.size, 32 * 1024 * 1024)
+        val str = String(data, 0, limit, Charsets.ISO_8859_1)
+        val subPat = Regex("""/Subtype\s*/\s*Image""")
+        val wPat = Regex("""/Width\s+(\d+)""")
+        val hPat = Regex("""/Height\s+(\d+)""")
+        for (sm in subPat.findAll(str)) {
+            if (out.size >= 32) break
+            try {
+                val dictStart = str.lastIndexOf("<<", sm.range.first).let { if (it < 0) str.lastIndexOf("/Type", max(0, sm.range.first - 400)) else it }
+                val dictEnd = str.indexOf(">>", sm.range.first)
+                if (dictStart < 0 || dictEnd < 0 || dictEnd <= dictStart) continue
+                val dict = str.substring(dictStart, dictEnd)
+                val w = wPat.find(dict)?.groupValues?.get(1)?.toIntOrNull() ?: continue
+                val h = hPat.find(dict)?.groupValues?.get(1)?.toIntOrNull() ?: continue
+                if (w > 0 && h > 0) out.add(Pair(w, h))
+            } catch (_: Throwable) {}
+        }
+        return out
+    }
+
     // 扫描 PDF 字节流，收集宽 >= minWidth 的内嵌图像原始字节（即 P403051 类原生扫描切片，排除 tiny logo/图标）。
 
     // 基于 XObject /Subtype/Image 字典 + /Length 定位 stream；仅用边界解码判断宽度，不解码整图。
 
-    private fun collectEmbeddedImageBytes(data: ByteArray, minWidth: Int, allAspects: MutableList<Pair<Int, Int>>? = null): List<ByteArray> {
+    private fun collectEmbeddedImageBytes(data: ByteArray, minWidth: Int): List<ByteArray> {
 
     // v1.9.160: P403051 真机仍 0 字根因——原正则要求 /Type/XObject/Subtype/Image 必须在 /Length 之前，
 
@@ -2165,11 +2194,6 @@ private fun ocrNativeSlice(raw: ByteArray): String {
             opts.inJustDecodeBounds = true
 
             android.graphics.BitmapFactory.decodeByteArray(imgBytes, 0, imgBytes.size, opts)
-
-            // v1.9.185: 外部探针模式——先记录全部内嵌图宽高（bounds-only，零解码开销），供竖向扫描件判定
-            if (allAspects != null && opts.outWidth > 0 && opts.outHeight > 0) {
-                allAspects.add(Pair(opts.outWidth, opts.outHeight))
-            }
 
             if (opts.outWidth < minWidth) continue
 
