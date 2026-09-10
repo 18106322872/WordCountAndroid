@@ -1232,6 +1232,10 @@ fun FileCard(
                             (r.hiddenSheets?.size ?: 0) +
                             (if (r.notesSlides?.isNotEmpty() == true) 1 else 0) +
                             (if (r.cadParts != null) 2 else 0) +
+                            // v1.9.185: 恢复 v1.9.165 口径——PDF 文字/纯编号拆分计入明细数
+                            //   （v1.9.166 删"纯数字N"后缀时误删此行，导致 P403051 只剩文/号两项明细时
+                            //    detailCount=0、"▶ 展开明细"入口永不出现、文/号无法展开）
+                            (if (r.pdfParts != null) 2 else 0) +
                             // v1.9.111: 内嵌图片行（docImageCount 为提取阶段真实张数，老路径退回 imageCount）
                             if (r.docImageCount > 0 || r.imageCount > 0) 1 else 0
                         if (detailCount > 0) {
@@ -1409,24 +1413,24 @@ fun FileCard(
                 }
             }
             val pdfP2 = entry.result?.pdfParts
-            // v1.9.169: 放开 PDF 文/号拆分——凡带 pdfParts 的 PDF 均展示文/号拆分
-            //   (数字图纸 PDF 即使走文本层、ocrNote 不含「扫描」，也应区分文、号；与 DWG cadParts 同级)
+            // v1.9.185: 恢复 v1.9.165 显示口径——凡带 pdfParts 的 PDF 均展示文/号拆分
+            //   （v1.9.169 起已放开门控，此处仅恢复 v1.9.165 的行文案与标签）
             if (pdfP2 != null) {
                 val pp = pdfP2
                 val textKey = "${entry.id}::pdf::text"
-                val codeKey = "${entry.id}::pdf::code"
+                val numKey = "${entry.id}::pdf::num"
                 val textChecked = hiddenSelected[textKey] ?: true
-                val codeChecked = hiddenSelected[codeKey] ?: true
+                val numChecked = hiddenSelected[numKey] ?: true
                 Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("文", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2B579A))
                     Checkbox(checked = textChecked, onCheckedChange = { hiddenSelected[textKey] = !(hiddenSelected[textKey] ?: true) }, modifier = Modifier.size(24.dp))
-                    Text("文字部分", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    Text("文字部分（中文 / 英文）", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                     Text("字 ${pp.textWords} 中 ${pp.textFe} 非 ${pp.textNc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
                 Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("编", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2B579A))
-                    Checkbox(checked = codeChecked, onCheckedChange = { hiddenSelected[codeKey] = !(hiddenSelected[codeKey] ?: true) }, modifier = Modifier.size(24.dp))
-                    Text("纯编号部分", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    Text("号", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2B579A))
+                    Checkbox(checked = numChecked, onCheckedChange = { hiddenSelected[numKey] = !(hiddenSelected[numKey] ?: true) }, modifier = Modifier.size(24.dp))
+                    Text("纯编号部分（导线号 / 端子号 / 尺寸数字，通常不翻译）", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                     Text("字 ${pp.numWords} 中 ${pp.numFe} 非 ${pp.numNc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
             }

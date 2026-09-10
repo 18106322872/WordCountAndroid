@@ -42,57 +42,106 @@ object PaddleOcr : StrongOcr {
     private var ocr: OCR? = null
     private val lock = Any()
 
-    /** 首次调用时初始化 PaddleOCR（加载 PP-OCRv4 .nb 模型）。模型缺失/失败则 available=false，不抛异常。 */
-    fun ensureInit(context: Context) {
-        if (initTried) return
-        synchronized(lock) {
-            if (initTried) return
-            initTried = true
-            try {
-                val appCtx = context.applicationContext
-                val engine = OCR(appCtx)
-                val config = OcrConfig()
-                // 相对路径：assets/models/ch_PP-OCRv4/{cls,det,rec}.nb
-                config.modelPath = "models/ch_PP-OCRv4"
-                config.clsModelFilename = "cls.nb"
-                config.detModelFilename = "det.nb"
-                config.recModelFilename = "rec.nb"
-                config.labelPath = "labels/ppocr_keys_v1.txt"
-                // v1.7.0: 进一步提高检测输入分辨率到 1920，配合 1200px 分块与 3x 渲染，
-                // 提升工程图小字标注召回。
-                config.detLongSize = 1920
-                // v1.7.0: 阈值从 0.2 降到 0.15。v1.6.9 字数 478 距离桌面 706 仍差 228，
-                // 说明 0.2 对弱对比度小字过滤偏严；0.15 可在噪声可控前提下再提召回。
-                config.scoreThreshold = 0.15f
-                config.isRunDet = true
-                config.isRunCls = true
-                config.isRunRec = true
-                config.cpuPowerMode = CpuPowerMode.LITE_POWER_FULL
-                config.isDrwwTextPositionBox = false
+    // v1.9.185: 检测边长双档。1920=图纸类原值（v1.7.0，保 CAD 小字召回，P403051 切片路径不变）；
+    // 736=桌面 RapidOCR 同款（limit_side_len≈736）——AH+(1) 类竖向扫描件整页单次识别用：
+    // det 1920 会把整行文字切碎成单词碎片逐词计数（每个碎片单独成词）→ 字数虚增约 10× 且识别量暴增变慢；
+    // 桌面实证：RapidOCR 2x + 词数口径 = 5495 ≈ 真值 5532（ah_probe2.py）。
+    const val DET_LONG_DRAWING = 1920
+    const val DET_LONG_SCAN = 736
 
-                val ok = AtomicBoolean(false)
-                val latch = CountDownLatch(1)
-                var err: Throwable? = null
-                engine.initModel(config, object : OcrInitCallback {
-                    override fun onSuccess() { ok.set(true); latch.countDown() }
-                    override fun onFail(e: Throwable) { err = e; latch.countDown() }
-                })
-                latch.await(180, TimeUnit.SECONDS)
-                if (ok.get() && err == null) {
-                    ocr = engine
-                    available = true
-                    lastError = null
-                } else {
-                    available = false
-                    lastError = err?.message ?: err?.javaClass?.simpleName ?: "未知初始化失败"
-                    try { engine.releaseModel() } catch (_: Throwable) {}
-                }
-            } catch (t: Throwable) {
-                available = false
+    /** 当前引擎实际使用的检测边长档位；0=无就绪引擎。 */
+    @Volatile private var currentDetLong = 0
+
+    /** 曾初始化失败的档位（避免每次识别反复重试拖慢统计）。 */
+    private val failedDetLongs = java.util.Collections.synchronizedSet(mutableSetOf<Int>())
+
+    /**
+     * 初始化 PaddleOCR（加载 PP-OCRv4 .nb 模型）。模型缺失/失败则 available=false，不抛异常。
+     * v1.9.185: 支持按检测边长档位初始化——detLongSize 仅初始化时可设，档位不同需重建引擎；
+     * 切档失败自动回退图纸档 1920，保证原有路径始终有引擎可用；同一文件所有页传同一档位，最多重建一次。
+     */
+    fun ensureInit(context: Context, detLong: Int = DET_LONG_DRAWING) {
+        if (available && currentDetLong == detLong) return
+        if (detLong in failedDetLongs && !available) return
+        synchronized(lock) {
+            if (available && currentDetLong == detLong) return
+            if (detLong in failedDetLongs && !available) return
+            initTried = true
+            if (ocr != null) {
+                try { ocr?.releaseModel() } catch (_: Throwable) {}
                 ocr = null
-                lastError = t.message ?: t.javaClass.simpleName
+                available = false
+                currentDetLong = 0
+            }
+            if (!initEngine(context.applicationContext, detLong) && detLong != DET_LONG_DRAWING
+                && DET_LONG_DRAWING !in failedDetLongs) {
+                // 扫描件档初始化失败 → 回退图纸档 1920，保证图纸/切片路径仍有引擎
+                initEngine(context.applicationContext, DET_LONG_DRAWING)
             }
         }
+    }
+
+    /** 用指定检测边长初始化引擎；成功置 available/currentDetLong 并返回 true。 */
+    private fun initEngine(appCtx: Context, detLong: Int): Boolean {
+        return try {
+            val engine = OCR(appCtx)
+            val config = OcrConfig()
+            // 相对路径：assets/models/ch_PP-OCRv4/{cls,det,rec}.nb
+            config.modelPath = "models/ch_PP-OCRv4"
+            config.clsModelFilename = "cls.nb"
+            config.detModelFilename = "det.nb"
+            config.recModelFilename = "rec.nb"
+            config.labelPath = "labels/ppocr_keys_v1.txt"
+            // v1.7.0: 检测输入分辨率 1920 提升工程图小字召回（图纸档）；
+            // v1.9.185: 扫描件档传 736 对齐桌面 RapidOCR，整行成框不切碎。
+            config.detLongSize = detLong
+            // v1.7.0: 阈值从 0.2 降到 0.15。v1.6.9 字数 478 距离桌面 706 仍差 228，
+            // 说明 0.2 对弱对比度小字过滤偏严；0.15 可在噪声可控前提下再提召回。
+            config.scoreThreshold = 0.15f
+            config.isRunDet = true
+            config.isRunCls = true
+            config.isRunRec = true
+            config.cpuPowerMode = CpuPowerMode.LITE_POWER_FULL
+            config.isDrwwTextPositionBox = false
+
+            val ok = AtomicBoolean(false)
+            val latch = CountDownLatch(1)
+            var err: Throwable? = null
+            engine.initModel(config, object : OcrInitCallback {
+                override fun onSuccess() { ok.set(true); latch.countDown() }
+                override fun onFail(e: Throwable) { err = e; latch.countDown() }
+            })
+            latch.await(180, TimeUnit.SECONDS)
+            if (ok.get() && err == null) {
+                ocr = engine
+                available = true
+                currentDetLong = detLong
+                lastError = null
+                true
+            } else {
+                available = false
+                currentDetLong = 0
+                lastError = err?.message ?: err?.javaClass?.simpleName ?: "未知初始化失败"
+                try { engine.releaseModel() } catch (_: Throwable) {}
+                false
+            }
+        } catch (t: Throwable) {
+            available = false
+            currentDetLong = 0
+            ocr = null
+            lastError = t.message ?: t.javaClass.simpleName
+            false
+        }
+    }
+
+    /**
+     * v1.9.185: 带检测边长档位的识别入口——先 ensureInit(档位) 再走统一 recognize。
+     * 同一文件所有页传同一档位，通常最多触发一次引擎重建（秒级）。
+     */
+    fun recognize(context: Context, bitmap: Bitmap, detLong: Int): String? {
+        ensureInit(context, detLong)
+        if (!available) return null
+        return recognize(bitmap)
     }
 
     /**

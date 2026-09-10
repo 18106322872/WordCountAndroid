@@ -894,9 +894,15 @@ object PdfOcrEngine {
 
          * rawLen 用于自适应升采样决策（过滤前比较，避免噪声过滤误杀小字）。
 
+         * v1.9.185: detLong 检测边长档位（1920 图纸 / 736 扫描件对齐桌面 RapidOCR）；
+
+         *   wholePage=true 时整页单次识别（竖向扫描件 2x 页仅 1190×1684，切块会产生 90% 重叠
+
+         *   且块间无去重导致整页翻倍计数——桌面同尺寸由 NMS 去重兜底，移动端无坐标只能免切块）。
+
          */
 
-        fun recognizePageStrong(bmp: Bitmap): Pair<Int, String> {
+        fun recognizePageStrong(bmp: Bitmap, detLong: Int = PaddleOcr.DET_LONG_DRAWING, wholePage: Boolean = false): Pair<Int, String> {
 
             val dark = darkPixelRatio(bmp)
 
@@ -908,7 +914,9 @@ object PdfOcrEngine {
 
             val raw = try {
 
-                recognizeTiledGeneric(enhanced, upscalePx = 1280) { PaddleOcr.recognize(it) ?: "" }
+                if (wholePage) PaddleOcr.recognize(context, enhanced, detLong) ?: ""
+
+                else recognizeTiledGeneric(enhanced, upscalePx = 1280) { PaddleOcr.recognize(context, it, detLong) ?: "" }
 
             } catch (_: Throwable) { "" }
 
@@ -940,6 +948,20 @@ object PdfOcrEngine {
 
             diag.append("Strong(Paddle): ${pageCount}页 print=$forPrintMode")
 
+            // v1.9.185: AH+(1) 类竖向扫描件判定——内嵌图中存在竖向图（h>w 且 宽/高<EMBEDDED_SLICE_MIN_ASPECT）。
+            // 命中文件的 2x 基准改为「整页单次识别 + 桌面同款检测边长 736」：
+            //   ① det 1920 把整行文字切碎成单词碎片逐词计数（桌面 RapidOCR≈736 整行成框）→ 虚增约 10×；
+            //   ② 2x 页 1190×1684 被 1600px 切块切成 2 块 90% 重叠且块间无去重 → 整页再翻倍。
+            //   桌面实证：RapidOCR 2x + 词数口径 = 5495 ≈ 真值 5532（_tmp_hist/ah_probe2.py）。
+            // 图纸类（P403051 横向超宽切片）与纯矢量页（头盔/成绩单 CAD 导出）不命中，原路径零改动。
+            var portraitScanFile = false
+            try {
+                val probeAspects = mutableListOf<Pair<Int, Int>>()
+                collectEmbeddedImageBytes(file.readBytes(), Int.MAX_VALUE, probeAspects)
+                portraitScanFile = probeAspects.any { (w, h) -> h > w && w.toDouble() / h < EMBEDDED_SLICE_MIN_ASPECT }
+            } catch (_: Throwable) {}
+            if (portraitScanFile) Diag.d("PdfOcr: [扫描件] 检测到竖向整页扫描图 → 2x 基准整页单次识别 + det 736（对齐桌面 RapidOCR）")
+
             if (limit > 0) {
 
                 val futures = (0 until limit).map { i ->
@@ -970,7 +992,9 @@ object PdfOcrEngine {
                                 //   桌面 AH+(1).pdf 17 页纯 2x RapidOCR ≈179s/10.5s每页/5000+字；移动端同口径 2x PaddleOCR。
                                 //   回退 v1.9.169 的扫描件跳过 2x 错误路径（原生 6x 切片暴涨变慢），isScanPdf 也走 2x 基准。
                                 //   （扫描件与数字 PDF 统一 2x 基准，不再各自升采样，与桌面口径一致）
-                                val (_, baseText) = recognizePageStrong(bmp)
+                                // v1.9.185: 竖向扫描件（AH+ 类）→ 整页单次识别 + 检测边长 736 对齐桌面；其余路径不变。
+                                val (_, baseText) = if (portraitScanFile) recognizePageStrong(bmp, PaddleOcr.DET_LONG_SCAN, true)
+                                                    else recognizePageStrong(bmp)
 
                                 pageBase[i] = baseText   // v1.9.133: 发布 2x 基准，供超时兜底
 
@@ -2070,7 +2094,7 @@ private fun ocrNativeSlice(raw: ByteArray): String {
 
     // 基于 XObject /Subtype/Image 字典 + /Length 定位 stream；仅用边界解码判断宽度，不解码整图。
 
-    private fun collectEmbeddedImageBytes(data: ByteArray, minWidth: Int): List<ByteArray> {
+    private fun collectEmbeddedImageBytes(data: ByteArray, minWidth: Int, allAspects: MutableList<Pair<Int, Int>>? = null): List<ByteArray> {
 
     // v1.9.160: P403051 真机仍 0 字根因——原正则要求 /Type/XObject/Subtype/Image 必须在 /Length 之前，
 
@@ -2141,6 +2165,11 @@ private fun ocrNativeSlice(raw: ByteArray): String {
             opts.inJustDecodeBounds = true
 
             android.graphics.BitmapFactory.decodeByteArray(imgBytes, 0, imgBytes.size, opts)
+
+            // v1.9.185: 外部探针模式——先记录全部内嵌图宽高（bounds-only，零解码开销），供竖向扫描件判定
+            if (allAspects != null && opts.outWidth > 0 && opts.outHeight > 0) {
+                allAspects.add(Pair(opts.outWidth, opts.outHeight))
+            }
 
             if (opts.outWidth < minWidth) continue
 
