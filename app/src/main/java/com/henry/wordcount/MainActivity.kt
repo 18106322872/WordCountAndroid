@@ -1408,13 +1408,10 @@ fun FileCard(
                     }
                 }
             }
-            // v1.9.168: 恢复 PDF「文字部分 / 纯编号部分」拆分展开，但仅限图纸/扫描类 PDF
-            //   （ocrNote 含「扫描」或 DWG 派生 needsPdf=true）；普通文字 PDF 不展开（v1.9.166 用户要求）。
             val pdfP2 = entry.result?.pdfParts
-            val isScanDrawingPdf = pdfP2 != null && (
-                (entry.result?.ocrNote?.contains("扫描") == true) || (entry.result?.needsPdf == true)
-            )
-            if (isScanDrawingPdf && pdfP2 != null) {
+            // v1.9.169: 放开 PDF 文/号拆分——凡带 pdfParts 的 PDF 均展示文/号拆分
+            //   (数字图纸 PDF 即使走文本层、ocrNote 不含「扫描」，也应区分文、号；与 DWG cadParts 同级)
+            if (pdfP2 != null) {
                 val pp = pdfP2
                 val textKey = "${entry.id}::pdf::text"
                 val codeKey = "${entry.id}::pdf::code"

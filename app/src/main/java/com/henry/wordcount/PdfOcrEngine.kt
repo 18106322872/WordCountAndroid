@@ -966,9 +966,13 @@ object PdfOcrEngine {
 
                                 else {
 
-                                    val (_, baseText) = recognizePageStrong(bmp)
+                                                                    // v1.9.169: 扫描件(图纸/纯扫描PDF)跳过 2x 基准 PaddleOCR——
+                                //   移动端 PP-OCRv4(.nb) 在 2x 分辨率下对扫描件噪点/粘连笔画过度切分，字数严重虚高
+                                //   (AH+(1).pdf 实测 10000+ 字 vs 桌面 RapidOCR 5532)。扫描件统一交给原生切片 OCR
+                                //   或 6x PaddleOCR(原生分辨率) 处理，不再用易虚高的 2x 基准计字数。
+                                val (_, baseText) = if (isScanPdf) (0 to "") else recognizePageStrong(bmp)
 
-                                    pageBase[i] = baseText   // v1.9.133: 发布 2× 基准，供超时兜底
+                                pageBase[i] = baseText   // v1.9.133: 发布 2x 基准，供超时兜底
 
                                     // v1.9.129: 基准倍率 + 6× 升采样双遍并集（不再只取字数更多者）。
 
@@ -1030,12 +1034,17 @@ object PdfOcrEngine {
 
                                                 if (isScanPdf) {
                                                     if (embUsed) {
-                                                        Diag.d("PdfOcr p${i+1}: [扫描件] 原生切片已采用 ${bestText.length}字，跳过 ML Kit 6×")
-                                                    } else {
-                                                        val upText = recognizeBitmapMlKit(upBmp)
-                                                        bestText = mergeOcrTexts(bestText, upText)
-                                                        Diag.d("PdfOcr p${i+1}: [扫描件] 强制 6× ML Kit 合并 +${upText.length}字")
-                                                    }
+                                                    Diag.d("PdfOcr p${i+1}: [扫描件] 原生切片已采用 ${bestText.length}字，跳过 6× PaddleOCR")
+                                                } else {
+                                                    // v1.9.169: 扫描件(竖向 AH+(1) 类)必须由 PaddleOCR 识别——
+                                                    //   ML Kit 对扫描件恒返回 0 字(v1.9.163 P403051 已证：扫描件只有 PaddleOCR 出字)。
+                                                    //   以 6x PaddleOCR(原生分辨率, 对齐桌面 RapidOCR) 结果为准，不再合并易虚高的 2x 基准；
+                                                    //   pageLongRun 放宽预算，避免 6x PaddleOCR 被 240s 腰斩。
+                                                    pageLongRun[i] = true
+                                                    val upText = recognizePageStrong(upBmp).second
+                                                    bestText = upText
+                                                    Diag.d("PdfOcr p${i+1}: [扫描件] 6× PaddleOCR 合并 +${upText.length}字")
+                                                }
                                                 } else if (bestText.length >= ADAPT_MIN_CHARS) {
 
                                                     Diag.d("PdfOcr p${i+1}: 内嵌图片OCR 已抓到 ${bestText.length}字 ≥ ${ADAPT_MIN_CHARS}，跳过 6× 升采样")
