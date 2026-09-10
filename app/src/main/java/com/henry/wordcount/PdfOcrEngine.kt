@@ -970,16 +970,31 @@ object PdfOcrEngine {
                                 //   桌面 AH+(1).pdf 17 页纯 2x RapidOCR ≈179s/10.5s每页/5000+字；移动端同口径 2x PaddleOCR。
                                 //   回退 v1.9.169 的扫描件跳过 2x 错误路径（原生 6x 切片暴涨变慢），isScanPdf 也走 2x 基准。
                                     //   （扫描件与数字 PDF 统一 2x 基准，不再各自升采样，与桌面口径一致）
-                                    // v1.9.181: 扫描件优先 ML Kit（GPU 快·中文准）——仅当 ML Kit 抓到足量文字时直接采用，
-                                    //   跳过慢且低分辨率虚增字符的 2× PaddleOCR .nb（AH+(1).pdf 实测单页 200–6279 字、整本≈70000，桌面 RapidOCR≈5532）。
-                                    val mlTextForScan = if (isScanPdf) recognizeBitmapMlKit(bmp) else ""
-                                    if (isScanPdf && mlTextForScan.length >= ADAPT_MIN_CHARS) {
-                                        pageBase[i] = mlTextForScan
-                                        Diag.d("PdfOcr p${i+1}: [扫描件] 采用 ML Kit ${mlTextForScan.length}字（GPU 快·中文准，跳过 2× PaddleOCR）")
-                                        try { onProgress?.invoke(i + 1, pageCount) } catch (_: Throwable) {}
-                                        Triple(i, mlTextForScan, false)
+                                    // v1.9.182: 扫描件识别策略修正——v1.9.181 在 AH+(1) 仍失败根因：ML Kit 在 2× 位图(1190×1684)
+                                    //   对低清扫描件(AH+ native 仅 595×842)返回 0(文字过小)，导致回退 2× PaddleOCR .nb 严重虚增
+                                    //   (整本≈57000，桌面 RapidOCR≈5532 的 10×) 且极慢(27分)。修正：扫描件改走 6× upBmp + ML Kit
+                                    //   （GPU 快·中文准，与普通 PDF 同路径）；工程图(P403051)优先内嵌横向切片 PaddleOCR（ML Kit 读不了稀疏标注）。
+                                    if (isScanPdf) {
+                                        // 工程图(P403051)：内嵌横向切片 PaddleOCR 直接采用（保留 +9164 字真值）
+                                        val embTextForScan = ocrEmbeddedImages(file, i, embPartial)
+                                        if (embTextForScan.length >= ADAPT_MIN_CHARS) {
+                                            pageBase[i] = embTextForScan
+                                            Diag.d("PdfOcr p${i+1}: [扫描件] 内嵌切片OCR +${embTextForScan.length}字（工程图优先，跳过 6× ML Kit）")
+                                            try { onProgress?.invoke(i + 1, pageCount) } catch (_: Throwable) {}
+                                            Triple(i, embTextForScan, false)
+                                        }
+                                        // 密集中文扫描件(AH+)：2× ML Kit 读不到低清小字 → 渲染 6× upBmp 跑 ML Kit
+                                        val upBmpScan = renderPageSysBitmap(file, i, forPrintMode, ADAPT_SCALE, UPSCALE_MAX_LONG_PX)
+                                        val mlScan = if (upBmpScan != null) recognizeBitmapMlKit(upBmpScan) else ""
+                                        if (upBmpScan != null) { try { upBmpScan.recycle() } catch (_: Throwable) {} }
+                                        if (mlScan.length >= ADAPT_MIN_CHARS) {
+                                            pageBase[i] = mlScan
+                                            Diag.d("PdfOcr p${i+1}: [扫描件] 6× ML Kit ${mlScan.length}字（GPU 快·中文准，替换 2× PaddleOCR 虚增）")
+                                            try { onProgress?.invoke(i + 1, pageCount) } catch (_: Throwable) {}
+                                            Triple(i, mlScan, false)
+                                        }
+                                        Diag.d("PdfOcr p${i+1}: [扫描件] 6× ML Kit ${mlScan.length}字 偏少，回退 2× PaddleOCR")
                                     }
-                                    if (isScanPdf) Diag.d("PdfOcr p${i+1}: [扫描件] ML Kit ${mlTextForScan.length}字偏少，回退 2× PaddleOCR/内嵌切片")
                                     val (_, baseText) = recognizePageStrong(bmp)
 
                                 pageBase[i] = baseText   // v1.9.133: 发布 2x 基准，供超时兜底
@@ -993,7 +1008,6 @@ object PdfOcrEngine {
                                     // v1.9.136(修正2): 6× 升采样由 MAX_DIM(6000) 钳制尺寸；重复计数靠 mergeOcrTexts 模糊去重。
 
                                     var bestText = baseText
-                                    var embUsed = false
 
                                     // v1.9.152: 2× 基准很差时，先尝试 OCR 内嵌图片（拼接后一次识别）。
 
@@ -1012,7 +1026,6 @@ object PdfOcrEngine {
                                         if (embText.length >= ADAPT_MIN_CHARS) {
 
                                             bestText = mergeOcrTexts(bestText, embText)
-                                            embUsed = true
 
                                             Diag.d("PdfOcr p${i+1}: 内嵌图片OCR +${embText.length}字(≥${ADAPT_MIN_CHARS})，合并后 ${bestText.length}字")
 
@@ -1076,11 +1089,7 @@ object PdfOcrEngine {
 
                                     // 之前用 i+1+pageCount 会让计数器超过 total，导致 6/4 这种"超总数"显示。
 
-                                    // v1.9.181: 扫描件 ML Kit 偏少但非空时，并入基准以免完全丢弃（密集页回退场景）
-                                    if (isScanPdf && mlTextForScan.isNotBlank() && !embUsed) {
-                                        bestText = mergeOcrTexts(bestText, mlTextForScan)
-                                        Diag.d("PdfOcr p${i+1}: [扫描件] 合并 ML Kit 残差 ${mlTextForScan.length}字 → ${bestText.length}字")
-                                    }
+                                    // v1.9.182: 删除旧 Edit2（ML Kit 2× 残差替换逻辑）——扫描件已改走 6× ML Kit 路径，不再需要 2× PaddleOCR 残差合并。
 
                                     try { onProgress?.invoke(i + 1, pageCount) } catch (_: Throwable) {}
 
