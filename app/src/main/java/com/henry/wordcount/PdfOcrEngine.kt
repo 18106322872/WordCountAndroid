@@ -969,8 +969,18 @@ object PdfOcrEngine {
                                                                     // v1.9.171: 对齐桌面——普通/扫描类 PDF 走 2x 基准 PaddleOCR（桌面 force_all=False 仅 2x）。
                                 //   桌面 AH+(1).pdf 17 页纯 2x RapidOCR ≈179s/10.5s每页/5000+字；移动端同口径 2x PaddleOCR。
                                 //   回退 v1.9.169 的扫描件跳过 2x 错误路径（原生 6x 切片暴涨变慢），isScanPdf 也走 2x 基准。
-                                //   （扫描件与数字 PDF 统一 2x 基准，不再各自升采样，与桌面口径一致）
-                                val (_, baseText) = recognizePageStrong(bmp)
+                                    //   （扫描件与数字 PDF 统一 2x 基准，不再各自升采样，与桌面口径一致）
+                                    // v1.9.181: 扫描件优先 ML Kit（GPU 快·中文准）——仅当 ML Kit 抓到足量文字时直接采用，
+                                    //   跳过慢且低分辨率虚增字符的 2× PaddleOCR .nb（AH+(1).pdf 实测单页 200–6279 字、整本≈70000，桌面 RapidOCR≈5532）。
+                                    val mlTextForScan = if (isScanPdf) recognizeBitmapMlKit(bmp) else ""
+                                    if (isScanPdf && mlTextForScan.length >= ADAPT_MIN_CHARS) {
+                                        pageBase[i] = mlTextForScan
+                                        Diag.d("PdfOcr p${i+1}: [扫描件] 采用 ML Kit ${mlTextForScan.length}字（GPU 快·中文准，跳过 2× PaddleOCR）")
+                                        try { onProgress?.invoke(i + 1, pageCount) } catch (_: Throwable) {}
+                                        Triple(i, mlTextForScan, false)
+                                    }
+                                    if (isScanPdf) Diag.d("PdfOcr p${i+1}: [扫描件] ML Kit ${mlTextForScan.length}字偏少，回退 2× PaddleOCR/内嵌切片")
+                                    val (_, baseText) = recognizePageStrong(bmp)
 
                                 pageBase[i] = baseText   // v1.9.133: 发布 2x 基准，供超时兜底
 
@@ -1065,6 +1075,12 @@ object PdfOcrEngine {
                                     // v1.9.131: 6× 升采样完成后只发一次进度（与基准同号 i+1），
 
                                     // 之前用 i+1+pageCount 会让计数器超过 total，导致 6/4 这种"超总数"显示。
+
+                                    // v1.9.181: 扫描件 ML Kit 偏少但非空时，并入基准以免完全丢弃（密集页回退场景）
+                                    if (isScanPdf && mlTextForScan.isNotBlank() && !embUsed) {
+                                        bestText = mergeOcrTexts(bestText, mlTextForScan)
+                                        Diag.d("PdfOcr p${i+1}: [扫描件] 合并 ML Kit 残差 ${mlTextForScan.length}字 → ${bestText.length}字")
+                                    }
 
                                     try { onProgress?.invoke(i + 1, pageCount) } catch (_: Throwable) {}
 

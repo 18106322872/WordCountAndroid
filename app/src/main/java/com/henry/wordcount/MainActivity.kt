@@ -3394,6 +3394,12 @@ private fun recoverResults(
                                 val s = o.getString("rawResultJson")
                                 if (s == "null") null else jsonToMap(org.json.JSONObject(s))
                             } else null
+                            // v1.9.181 诊断：PDF 跨进程 pdf_parts 是否到达主进程（定位 P403051 文/号偶发丢失）
+                            if (rr != null && (rr["ext"] as? String) == ".pdf") {
+                                val m = rr["meta"] as? Map<*, *>
+                                val hasParts = m?.containsKey("pdf_parts") == true
+                                Diag.d("跨进程PDF pdf_parts: hasParts=$hasParts chars=${(rr["stats"] as? Map<*, *>)?.get("chars")} name=$displayName")
+                            }
                             FileEntry(id = id, displayName = displayName, cachePath = cachePath,
                                 result = toFileResult(rr, cachePath), rawResult = rr)
                         }
@@ -4473,6 +4479,20 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
             numChars = (it["num_chars"] as? Number)?.toInt() ?: 0,
         )
     }
+    // v1.9.181: 兜底——跨进程 pdf_parts 偶发丢失时，用 stats 反推一份，保证 PDF 文/号拆分始终可展开。
+    val pdfPartsFinal = pdfParts ?: run {
+        val sChars = (stats["chars"] as? Number)?.toInt() ?: 0
+        val sFe = (stats["fe"] as? Number)?.toInt() ?: 0
+        val sNum = (stats["num"] as? Number)?.toInt() ?: 0
+        if (ext == ".pdf" && sChars > 0) {
+            val tChars = maxOf(0, sChars - sNum)
+            val tNc = maxOf(0, tChars - sFe)
+            PdfPartStats(
+                textWords = sFe + tNc, textFe = sFe, textNc = tNc, textChars = tChars,
+                numWords = 0, numFe = 0, numNc = sNum, numChars = sNum
+            )
+        } else pdfParts
+    }
     return FileResult(
         name = (m?.get("name") as? String) ?: "",
         ext = ext,
@@ -4505,7 +4525,7 @@ private fun toFileResult(m: Map<*, *>?, srcPath: String): FileResult {
         // v1.5.61: CAD 文字/纯编号拆分
         cadParts = cadParts,
         // v1.9.132: PDF 文字/纯编号拆分（与 DWG cadParts 同级，独立字段）
-        pdfParts = pdfParts,
+        pdfParts = pdfPartsFinal,
     )
 }
 
