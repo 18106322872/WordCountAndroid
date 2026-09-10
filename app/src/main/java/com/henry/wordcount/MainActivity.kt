@@ -750,19 +750,31 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
                     pg += result.pages ?: estimatePages(result.chars)
                     pendingPdf += 1
                 } else {
-                    // v1.5.61/62: DWG 有文字/纯编号拆分时，按展开勾选状态计入合计
-                    val cp = result.cadParts
-                    if (cp != null) {
-                        val textChecked = hiddenSelected["${r.id}::cad::text"] != false
-                        val codeChecked = hiddenSelected["${r.id}::cad::code"] != false
-                        when {
-                            textChecked && codeChecked -> { w += result.words; fe += result.fe; nc += result.nc; ch += result.chars }
-                            textChecked -> { w += cp.textWords; fe += cp.textFe; nc += cp.textNc; ch += cp.textChars }
-                            codeChecked -> { w += cp.codeWords; fe += cp.codeFe; nc += cp.codeNc; ch += cp.codeChars }
-                        }
-                    } else {
-                        w += result.words; fe += result.fe; nc += result.nc; ch += result.chars
+                // v1.5.61/62: DWG 有文字/纯编号拆分时，按展开勾选状态计入合计
+                val cp = result.cadParts
+                val pp = result.pdfParts
+                if (cp != null) {
+                    val textChecked = hiddenSelected["${r.id}::cad::text"] != false
+                    val codeChecked = hiddenSelected["${r.id}::cad::code"] != false
+                    when {
+                        textChecked && codeChecked -> { w += result.words; fe += result.fe; nc += result.nc; ch += result.chars }
+                        textChecked -> { w += cp.textWords; fe += cp.textFe; nc += cp.textNc; ch += cp.textChars }
+                        codeChecked -> { w += cp.codeWords; fe += cp.codeFe; nc += cp.codeNc; ch += cp.codeChars }
                     }
+                } else if (pp != null) {
+                    // v2.0.0: PDF 文/号拆分按勾选计入合计（与 DWG cadParts 同语义）——
+                    //   取消勾选同步扣减，否则选择框无意义（用户实测 P403051 取消「号」合计不变判为错误交互）。
+                    //   口径：textWords+numWords=words、textChars+numChars=chars（buildPdfPartStats 保证）。
+                    val textChecked = hiddenSelected["${r.id}::pdf::text"] != false
+                    val numChecked = hiddenSelected["${r.id}::pdf::num"] != false
+                    when {
+                        textChecked && numChecked -> { w += result.words; fe += result.fe; nc += result.nc; ch += result.chars }
+                        textChecked -> { w += pp.textWords; fe += pp.textFe; nc += pp.textNc; ch += pp.textChars }
+                        numChecked -> { w += pp.numWords; fe += pp.numFe; nc += pp.numNc; ch += pp.numChars }
+                    }
+                } else {
+                    w += result.words; fe += result.fe; nc += result.nc; ch += result.chars
+                }
                     pg += result.pages ?: estimatePages(result.chars)
                 }
             }
