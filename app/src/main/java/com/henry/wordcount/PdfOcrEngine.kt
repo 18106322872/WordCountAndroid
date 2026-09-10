@@ -834,6 +834,8 @@ object PdfOcrEngine {
 
         val embPartial = java.util.concurrent.ConcurrentHashMap<Int, String>()
 
+        // v1.9.186: AH+ 类竖向扫描件（非图纸）判定结果——函数级声明（Stage-1 try 内赋值、尾部 return 引用）
+        var portraitScanFile = false
 
 
         fun processBitmap(bmp: Bitmap, source: String, pageIdx: Int) {
@@ -956,14 +958,15 @@ object PdfOcrEngine {
             //   ② 2x 页 1190×1684 被 1600px 切块切成 2 块 90% 重叠且块间无去重 → 整页再翻倍。
             //   桌面实证：RapidOCR 2x + 词数口径 = 5495 ≈ 真值 5532（_tmp_hist/ah_probe2.py）。
             // 图纸类（P403051 横向超宽切片）与纯矢量页（头盔/成绩单 CAD 导出）不命中，原路径零改动。
-            var portraitScanFile = false
-            try {
-                // v1.9.186: 改用 Width/Height 直排字典探针——AH+(1) 的 17 张内嵌图全部用间接 /Length N 0 R，
+            // v1.9.186: portraitScanFile 声明在函数级（Stage-1 try 于 1219 关闭，尾部 return 仍需引用）。
+            portraitScanFile = run {
+                // v1.9.186: Width/Height 直排字典探针——AH+(1) 的 17 张内嵌图全部用间接 /Length N 0 R，
                 //   旧探针经 collectEmbeddedImageBytes（靠 /Length 定位 stream）必然返回空 → det736 从未触发（v1.9.185 教训）。
                 //   实测 AH+ 17/17 图、P403051 10/10 图均直排 /Width /Height，无需解流即可判定。
-                val probeAspects = probeEmbeddedImageAspects(file.readBytes())
-                portraitScanFile = probeAspects.any { (w, h) -> h > w && w.toDouble() / h < EMBEDDED_SLICE_MIN_ASPECT }
-            } catch (_: Throwable) {}
+                try {
+                    probeEmbeddedImageAspects(file.readBytes()).any { (w, h) -> h > w && w.toDouble() / h < EMBEDDED_SLICE_MIN_ASPECT }
+                } catch (_: Throwable) { false }
+            }
             if (portraitScanFile) Diag.d("PdfOcr: [扫描件] 检测到竖向整页扫描图 → 2x 基准整页单次识别 + det 736（对齐桌面 RapidOCR）")
 
             if (limit > 0) {
@@ -1288,7 +1291,7 @@ object PdfOcrEngine {
 
         val text = sb.toString().trim()
 
-        return if (text.isNotBlank()) PdfOcrResult(text, pageCount) else null
+        return if (text.isNotBlank()) PdfOcrResult(text, pageCount, portraitScanFile) else null
 
     }
 
@@ -1564,7 +1567,7 @@ object PdfOcrEngine {
 
         var result: PdfOcrResult? = null
 
-        if (text.isNotBlank()) result = PdfOcrResult(text, pageCount, portraitScanFile)
+        if (text.isNotBlank()) result = PdfOcrResult(text, pageCount)
 
         else if (anyRenderedContent) lastFailReason = FailReason.OCR_EMPTY
 
