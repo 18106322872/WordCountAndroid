@@ -4046,7 +4046,20 @@ internal suspend fun processBatchToEntries(
                         // 判定是否还需要尝试 OCR
                         val bestCjkRatio = if (bestChars > 0) bestFe.toDouble() / bestChars else 0.0
                         val hasControlChars = false // 已由 Python/Kotlin 内部处理
-                        val looksLikeGarbage = bestChars > 200 && bestFe < 30 && bestCjkRatio < 0.15
+                        // v1.5.68 密度判定（v2.0.1 提前到此，供 looksLikeGarbage / silentChineseLoss 共用）
+                        //   注意：PdfExtractor/pdfminer 可能抽出大量结构/CID 垃圾字符导致 bestChars 虚高，
+                        //   密度必须同时看有效字数，并使用可靠页数 realPages。
+                        //   例：AH+.pdf 纯图片型 avg≈29 < 800。
+                        val avgCharsPerPage = bestChars.toDouble() / maxOf(1, realPages)
+                        val avgWordsPerPage = bestWords.toDouble() / maxOf(1, realPages)
+                        val lowDensity = avgCharsPerPage < 800.0 || avgWordsPerPage < 200.0
+                        val denseNormalText = avgCharsPerPage >= 800.0 && avgWordsPerPage >= 200.0
+                        // v2.0.1: 高密度正常文字层豁免 garbage——RHC_4000 英文说明书（pdfminer 33137ch/6728词/24页，fe=0）
+                        //   被 looksLikeGarbage(fe<30 且 CJK占比<0.15) 误判为垃圾强制 OCR，OCR 仅 17707ch 反被采用
+                        //   （needOcr「文本层为垃圾」分支），字数远低于桌面 Word 读取的 6476。
+                        //   纯英文正常文档与 CID 垃圾在 fe=0 上不可区分，密度是唯一可靠判据——
+                        //   与 silentChineseLoss 的豁免判据完全一致；CID 垃圾字符多但有效词极少，不会被误豁免。
+                        val looksLikeGarbage = bestChars > 200 && bestFe < 30 && bestCjkRatio < 0.15 && !denseNormalText
                         // v1.3.92: 有字符但零中文 → CID/ToUnicode 解码失败的中文 PDF（如 Word 导出 PDF）
                         // 此类 PDF 的中文以 CID 编码存储，Kotlin 无法解码成 PUA/乱码被过滤后只剩英文碎片
                         val isFailedChinesePdf = bestChars > 20 && bestFe == 0 && bestChars < 500
@@ -4055,15 +4068,8 @@ internal suspend fun processBatchToEntries(
                         val commonCjkCount = ktRes.text.count { it.code in DwgRawCjkScanner.COMMON_CJK_CHARS }
                         val cjkCommonRatio = if (bestFe > 0) commonCjkCount.toDouble() / bestFe else 1.0
                         val cjkLooksLikeCidGarbage = !usePython && bestFe > 50 && cjkCommonRatio < 0.10
-                        // v1.5.68: 对齐桌面 extract_pdf 的 whole_poisoned 逻辑 —— 低字数密度（图片型/扫描件 PDF）
-                        //   即使 pdfminer/PdfExtractor 已抽到少量文字，也必须强制全页 OCR。
-                        //   桌面判定 avg_chars < 800 即 whole_poisoned。
-                        //   注意：PdfExtractor 可能抽出大量 PDF 结构/CID 垃圾字符，导致 bestChars 虚高而
-                        //   有效字数(bestWords) 极少，因此密度判断必须同时看有效字数，并使用可靠页数 realPages。
-                        //   例：AH+.pdf 纯图片型 avg≈29 < 800；正确 27 页文件有效字数 315/27≈12 < 200。
-                        val avgCharsPerPage = bestChars.toDouble() / maxOf(1, realPages)
-                        val avgWordsPerPage = bestWords.toDouble() / maxOf(1, realPages)
-                        val lowDensity = avgCharsPerPage < 800.0 || avgWordsPerPage < 200.0
+                        // v1.5.68: 对齐桌面 extract_pdf 的 whole_poisoned 逻辑（低字数密度强制全页 OCR）
+                        //   v2.0.1: 密度判定已提前到 looksLikeGarbage 处（供 garbage 豁免共用），此处不再重复定义。
                         // v1.9.121: 专治 L1 静默丢失中文（返回干净 ASCII、fe=0、pdfTextIsPoisoned 判 false）——
                         // 既有 isFailedChinesePdf(仅捕 bestChars<500) / lowDensity / looksLikeGarbage 在个别样本上未生效，
                         // 此处直接以「有字符但零中文」强制 OCR，与桌面 _pdf_text_is_poisoned 口径对齐。
