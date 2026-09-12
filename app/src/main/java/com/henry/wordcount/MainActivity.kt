@@ -4053,12 +4053,17 @@ internal suspend fun processBatchToEntries(
                         val avgCharsPerPage = bestChars.toDouble() / maxOf(1, realPages)
                         val avgWordsPerPage = bestWords.toDouble() / maxOf(1, realPages)
                         val lowDensity = avgCharsPerPage < 800.0 || avgWordsPerPage < 200.0
-                        val denseNormalText = avgCharsPerPage >= 800.0 && avgWordsPerPage >= 200.0
+                        // v2.0.2: 对齐桌面 extract_pdf 判据——桌面只要求 avg_chars>=800（且文字层未被
+                        //   (cid:/PUA 污染），没有「词数/页」条件；符号密集的英文文档（字符多、词数少）
+                        //   在桌面走文字层，此前 words>=200 的额外条件会让它仍被误判 garbage。
+                        //   用 bestTextReliable 替代词数条件防结构垃圾漏网（usePython=内核已逐段过滤
+                        //   污染段落；KT 路径要求抽取器自报 reliable）。
+                        val denseNormalText = avgCharsPerPage >= 800.0 && bestTextReliable
                         // v2.0.1: 高密度正常文字层豁免 garbage——RHC_4000 英文说明书（pdfminer 33137ch/6728词/24页，fe=0）
                         //   被 looksLikeGarbage(fe<30 且 CJK占比<0.15) 误判为垃圾强制 OCR，OCR 仅 17707ch 反被采用
                         //   （needOcr「文本层为垃圾」分支），字数远低于桌面 Word 读取的 6476。
-                        //   纯英文正常文档与 CID 垃圾在 fe=0 上不可区分，密度是唯一可靠判据——
-                        //   与 silentChineseLoss 的豁免判据完全一致；CID 垃圾字符多但有效词极少，不会被误豁免。
+                        //   纯英文正常文档与 CID 垃圾在 fe=0 上不可区分，密度+可靠性是主要判据——
+                        //   CID 垃圾字符多但有效词极少且 reliable=false，不会被误豁免。
                         val looksLikeGarbage = bestChars > 200 && bestFe < 30 && bestCjkRatio < 0.15 && !denseNormalText
                         // v1.3.92: 有字符但零中文 → CID/ToUnicode 解码失败的中文 PDF（如 Word 导出 PDF）
                         // 此类 PDF 的中文以 CID 编码存储，Kotlin 无法解码成 PUA/乱码被过滤后只剩英文碎片
