@@ -3715,9 +3715,9 @@ private suspend fun promptPdfPassword(activity: android.app.Activity, fileName: 
                 .setTitle("PDF 需要密码")
                 .setMessage(msg)
                 .setView(input)
-                .setPositiveButton("确定") { _, _ -> if (cont.isActive) cont.resume(input.text.toString()) }
-                .setNegativeButton("取消") { _, _ -> if (cont.isActive) cont.resume(null) }
-                .setOnCancelListener { if (cont.isActive) cont.resume(null) }
+                .setPositiveButton("确定") { _, _ -> if (cont.isActive) cont.resumeWith(Result.success(input.text.toString())) }
+                .setNegativeButton("取消") { _, _ -> if (cont.isActive) cont.resumeWith(Result.success<String?>(null)) }
+                .setOnCancelListener { if (cont.isActive) cont.resumeWith(Result.success<String?>(null)) }
                 .create()
             cont.invokeOnCancellation { runCatching { dialog.dismiss() } }
             dialog.show()
