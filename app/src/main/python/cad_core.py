@@ -1058,6 +1058,95 @@ def _sheet_like_ratio(w, h, lo=1.30, hi=1.55):
     ar = max(w, h) / min(w, h)
     return lo <= ar <= hi
 
+def _insert_frame_rects(doc, inserts, max_depth=4):
+    """对给定的一组 INSERT 实体提取符合 √2 图纸比例的图框块矩形。
+
+    v2.1.0 从 `_block_frame_rects` 抽出的核心，供模型空间与图纸空间布局
+    （布局内拼几十张标准图框块的场景）复用。只取每个块内最大的闭合矩形、
+    且须符合 √2 图纸比例；旋转非 0 的 INSERT 保守跳过。
+    """
+    cache = {}
+
+    def rect_of(e):
+        if e.dxftype() != "LWPOLYLINE":
+            return None
+        try:
+            if not e.closed:
+                return None
+            pts = list(e.get_points())
+            if len(pts) < 4:
+                return None
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            return (min(xs), min(ys), max(xs), max(ys))
+        except Exception:
+            return None
+
+    def xform(r, ins):
+        """把块坐标矩形按 INSERT 的插入点/缩放变换到父坐标系。"""
+        try:
+            sx = float(ins.dxf.xscale or 1)
+            sy = float(ins.dxf.yscale or 1)
+            ix = float(ins.dxf.insert.x)
+            iy = float(ins.dxf.insert.y)
+        except Exception:
+            return None
+        x1, x2 = r[0] * sx + ix, r[2] * sx + ix
+        y1, y2 = r[1] * sy + iy, r[3] * sy + iy
+        return (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+
+    def block_max_rect(name, depth=0):
+        """递归求块内面积最大的闭合矩形（块自身坐标系）。"""
+        if depth > max_depth:
+            return None
+        if name in cache:
+            return cache[name]
+        cache[name] = None            # 先占位，防止块循环引用死递归
+        try:
+            blk = doc.blocks.get(name)
+        except Exception:
+            return None
+        if blk is None:
+            return None
+        best, best_area = None, 0.0
+        for e in blk:
+            r = rect_of(e)
+            if r is None and e.dxftype() == "INSERT":
+                try:
+                    sub = block_max_rect(e.dxf.name, depth + 1)
+                except Exception:
+                    sub = None
+                r = xform(sub, e) if sub else None
+            if r:
+                a = (r[2] - r[0]) * (r[3] - r[1])
+                if a > best_area:
+                    best_area, best = a, r
+        cache[name] = best
+        return best
+
+    out = []
+    for ins in inserts:
+        try:
+            rot = float(ins.dxf.rotation or 0)
+        except Exception:
+            rot = 0.0
+        if abs(rot) > 1e-6 and abs(abs(rot) - 360) > 1e-6:
+            continue                  # 旋转块保守跳过
+        try:
+            base_r = block_max_rect(ins.dxf.name)
+        except Exception:
+            base_r = None
+        if not base_r:
+            continue
+        r = xform(base_r, ins)
+        if not r:
+            continue
+        if not _sheet_like_ratio(r[2] - r[0], r[3] - r[1]):
+            continue
+        out.append(r)
+    return out
+
+
 def _block_frame_rects(doc, max_depth=4):
     """把『图框块引用』还原成世界坐标矩形，供几何图框检测补充候选。
 
@@ -1137,31 +1226,11 @@ def _block_frame_rects(doc, max_depth=4):
         cache[name] = best
         return best
 
-    out = []
     try:
         inserts = list(doc.modelspace().query("INSERT"))
     except Exception:
-        return out
-    for ins in inserts:
-        try:
-            rot = float(ins.dxf.rotation or 0)
-        except Exception:
-            rot = 0.0
-        if abs(rot) > 1e-6 and abs(abs(rot) - 360) > 1e-6:
-            continue                  # 旋转块保守跳过
-        try:
-            base_r = block_max_rect(ins.dxf.name)
-        except Exception:
-            base_r = None
-        if not base_r:
-            continue
-        r = xform(base_r, ins)
-        if not r:
-            continue
-        if not _sheet_like_ratio(r[2] - r[0], r[3] - r[1]):
-            continue
-        out.append(r)
-    return out
+        return []
+    return _insert_frame_rects(doc, inserts, max_depth=max_depth)
 
 def _detect_lwpolyline_sheets(doc):
     """统计模型空间中类似图纸的闭合 LWPOLYLINE 矩形数量。
@@ -1278,6 +1347,57 @@ def _raw_layout_count(dxf_path):
         return len(unique)
     except Exception:
         return 0
+
+def _paper_layout_frame_count(doc):
+    """统计各图纸空间布局内部的『标准图框』数量之和（v2.1.0）。
+
+    背景：不少 DWG 把几十张标准图框以『块引用 + 闭合多段线』的形式拼在同一个
+    图纸布局里（如新加坡来福士项目：『平面图』布局内 47 张 A2 图框块 594x420），
+    旧逻辑『1 布局 = 1 页』会把 48 张报成 2 张。
+
+    本函数对每个非 Model 布局收集两类候选矩形：
+      * 布局内直接绘制的闭合 LWPOLYLINE 矩形；
+      * 布局内 INSERT 引用的 √2 比例图框块矩形（_insert_frame_rects）；
+    再用与模型空间完全一致的 _count_geom_frames（去重/过滤标题栏小框/拼板展开/
+    主导大框合并）逐布局清点，求和返回。是否采用由 count_cad_frames 的 guard 决定
+    （仅当结果显著大于布局数时才以图框数为准，避免影响『1 布局 = 1 页』的正常图）。
+    """
+    total = 0
+    try:
+        for layout in doc.layouts:
+            if layout.name.upper() == "MODEL":
+                continue
+            try:
+                ents = list(layout)
+            except Exception:
+                continue
+            rects = []
+            for e in ents:
+                try:
+                    if e.dxftype() == "LWPOLYLINE" and e.closed:
+                        pts = list(e.get_points())
+                        if len(pts) >= 4:
+                            xs = [p[0] for p in pts]
+                            ys = [p[1] for p in pts]
+                            rects.append((min(xs), min(ys), max(xs), max(ys)))
+                except Exception:
+                    pass
+            try:
+                ins = [e for e in ents if e.dxftype() == "INSERT"]
+                if ins:
+                    rects.extend(_insert_frame_rects(doc, ins))
+            except Exception:
+                pass
+            if not rects:
+                continue
+            try:
+                total += _count_geom_frames(rects)
+            except Exception:
+                pass
+    except Exception:
+        return 0
+    return total
+
 
 def count_cad_frames(dxf_path):
     """统计 CAD 图框数（页数）。返回 (frames:int|None, reason:str|None)。
@@ -1434,6 +1554,21 @@ def count_cad_frames(dxf_path):
                     pass
         if use_geo:
             return geo, "布局稀疏·改用几何图框估算", paper
+
+        # v2.1.0：布局内标准图框计数（交叉校验布局数是否被低估）。
+        # 不少 DWG 把几十张标准图框（块引用/闭合多段线）拼在同一个图纸布局里，
+        # 『1 布局 = 1 页』会把 48 张报成 2 张（新加坡来福士两份 DWG 实测：
+        # 平面图布局内 47/13 张 A2 图框块 594x420 + 布局2 各 1 张 A3）。
+        # 当布局内按几何+图框块清点出的张数显著大于布局数时，以图框数为准。
+        # guard 偏保守：>=3 且 > 布局数+1 才启用，避免影响『1 布局 = 1 页』
+        # 的正常图（单布局含 1 图框+1 个相近附属框的情形不会被误判）。
+        if paper >= 1:
+            try:
+                _paper_frames = _paper_layout_frame_count(doc)
+            except Exception:
+                _paper_frames = 0
+            if _paper_frames >= 3 and _paper_frames > paper + 1:
+                return _paper_frames, "布局内图框计数", paper
 
         # 含真实出图视口且几何未强烈反驳 → 信任布局计数
         # （避免单张大样图被几何检测误判成多页；FA-31003 即因此类保持 1 页）。

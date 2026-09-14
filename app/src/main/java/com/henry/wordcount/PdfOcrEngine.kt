@@ -14,6 +14,8 @@ import android.util.Log
 
 import com.shockwave.pdfium.PdfiumCore
 
+import com.shockwave.pdfium.PdfPasswordException
+
 import com.shockwave.pdfium.util.Size
 
 import java.io.File
@@ -262,7 +264,10 @@ object PdfOcrEngine {
 
         OCR_EMPTY,
 
-        NO_EMBEDDED_IMAGES
+        NO_EMBEDDED_IMAGES,
+
+        /** v2.1.0: 打开 PDF 需要密码 / 密码错误（PdfiumCore.newDocument 抛 PdfPasswordException）。 */
+        PASSWORD_WRONG
 
     }
 
@@ -330,7 +335,30 @@ object PdfOcrEngine {
 
      */
 
-    fun extractText(context: Context, file: File, forPrintMode: Boolean = false, isScanPdf: Boolean = false, onProgress: ((Int, Int) -> Unit)? = null): PdfOcrResult? {
+    /**
+     * v2.1.0: 检测 PDF 是否设有「打开密码」（需要密码才能读取内容）。
+     * 端口桌面 wordcount.py 的 pdf_needs_password：用空密码尝试打开，
+     * 若抛 PdfPasswordException 说明需要密码（对齐桌面 bool(needs_pass) and not authenticate("")）——
+     * 仅设权限密码(owner)、空用户密码可自由打开的 PDF 视为无需密码。
+     * 任何非密码异常（文件损坏/非PDF）返回 false，交由原统计路径报错，不误报为加密。
+     */
+    fun pdfNeedsPassword(context: Context, file: File): Boolean {
+        val core = try { PdfiumCore(context) } catch (_: Throwable) { return false }
+        val pfd = try { ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY) } catch (_: Throwable) { return false }
+        return try {
+            val doc = core.newDocument(pfd)   // 用空密码尝试打开
+            runCatching { core.closeDocument(doc) }
+            false                              // 成功打开 → 无需密码
+        } catch (_: PdfPasswordException) {
+            true                              // 需要密码 / 空密码打不开
+        } catch (_: Throwable) {
+            false                            // 其它异常（损坏/非PDF）→ 不误报
+        } finally {
+            runCatching { pfd.close() }
+        }
+    }
+
+    fun extractText(context: Context, file: File, forPrintMode: Boolean = false, isScanPdf: Boolean = false, onProgress: ((Int, Int) -> Unit)? = null, password: String? = null): PdfOcrResult? {
 
         lastFailReason = FailReason.OK
 
@@ -386,19 +414,26 @@ object PdfOcrEngine {
 
         // 仅当三者全部失败才返回 null，界面才会显示「OCR未成功」。
 
-        val result = if (PaddleOcr.available) {
+        // v2.1.0: 加密 PDF——系统 PdfRenderer 无法用密码打开，只有 Pdfium 后端能用 password 调
+        //   core.newDocument(pfd, password) 打开，故直接走 Pdfium 单一路径（其余系统渲染路径对加密
+        //   PDF 必抛异常、拿不到任何字）。password==null 时仍是原来的三级回退链。
+        val result = if (password != null) {
+
+            renderWithPdfium(context, file, forPrintMode, password)
+
+        } else if (PaddleOcr.available) {
 
             renderAndRecognizeStrong(context, file, forPrintMode, isScanPdf, onProgress)
 
                 ?: renderWithSystemMlKit(context, file, forPrintMode, onProgress)
 
-                ?: renderWithPdfium(context, file, forPrintMode)
+                ?: renderWithPdfium(context, file, forPrintMode, password)
 
         } else {
 
             renderWithSystemMlKit(context, file, forPrintMode, onProgress)
 
-                ?: renderWithPdfium(context, file, forPrintMode)
+                ?: renderWithPdfium(context, file, forPrintMode, password)
 
         }
 
@@ -810,7 +845,7 @@ object PdfOcrEngine {
 
      */
 
-    private fun renderAndRecognizeStrong(context: Context, file: File, forPrintMode: Boolean, isScanPdf: Boolean = false, onProgress: ((Int, Int) -> Unit)?): PdfOcrResult? {
+    private fun renderAndRecognizeStrong(context: Context, file: File, forPrintMode: Boolean, isScanPdf: Boolean = false, onProgress: ((Int, Int) -> Unit)?, password: String? = null): PdfOcrResult? {
 
         val diag = StringBuilder()
 
@@ -1587,7 +1622,7 @@ object PdfOcrEngine {
 
 
 
-    private fun renderWithPdfium(context: Context, file: File, forPrintMode: Boolean = false): PdfOcrResult? {
+    private fun renderWithPdfium(context: Context, file: File, forPrintMode: Boolean = false, password: String? = null): PdfOcrResult? {
 
         val core = try { PdfiumCore(context) } catch (e: Throwable) {
 
@@ -1607,7 +1642,7 @@ object PdfOcrEngine {
 
         // 模式A：PFD
 
-        val pfdResult = tryRenderWithPfd(core, file, forPrintMode)
+        val pfdResult = tryRenderWithPfd(core, file, forPrintMode, password)
 
         if (pfdResult != null) return pfdResult
 
@@ -1619,7 +1654,7 @@ object PdfOcrEngine {
 
             Log.d("WordCount", "PdfOcr(pdfium) PFD失败(${lastFailReason})，尝试ByteArray模式...")
 
-            val bytesResult = tryRenderWithBytes(core, file, forPrintMode)
+            val bytesResult = tryRenderWithBytes(core, file, forPrintMode, password)
 
             if (bytesResult != null) return bytesResult
 
@@ -1635,7 +1670,7 @@ object PdfOcrEngine {
 
 
 
-    private fun tryRenderWithPfd(core: PdfiumCore, file: File, forPrintMode: Boolean = false): PdfOcrResult? {
+    private fun tryRenderWithPfd(core: PdfiumCore, file: File, forPrintMode: Boolean = false, password: String? = null): PdfOcrResult? {
 
         val pfd = try { ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY) } catch (_: Throwable) {
 
@@ -1645,7 +1680,7 @@ object PdfOcrEngine {
 
         return try {
 
-            val doc = core.newDocument(pfd)
+            val doc = core.newDocument(pfd, password)
 
             val pageCount = core.getPageCount(doc)
 
@@ -1701,6 +1736,17 @@ object PdfOcrEngine {
 
             else { lastFailReason = if (anyContent) FailReason.OCR_EMPTY else FailReason.PDFIUM_BLANK; null }
 
+        } catch (_: PdfPasswordException) {
+
+            // v2.1.0: 密码错误/仍需密码——标记 PASSWORD_WRONG，供上层重新弹密码框。
+            runCatching { pfd.close() }
+
+            lastFailReason = FailReason.PASSWORD_WRONG
+
+            lastFailDetail = "PFD: 密码错误或未提供密码"
+
+            null
+
         } catch (e: Throwable) {
 
             Log.w("WordCount", "PdfOcr(PFD) 失败: ${e.javaClass.simpleName}: ${e.message}")
@@ -1719,13 +1765,13 @@ object PdfOcrEngine {
 
 
 
-    private fun tryRenderWithBytes(core: PdfiumCore, file: File, forPrintMode: Boolean = false): PdfOcrResult? {
+    private fun tryRenderWithBytes(core: PdfiumCore, file: File, forPrintMode: Boolean = false, password: String? = null): PdfOcrResult? {
 
         return try {
 
             val bytes = file.readBytes()
 
-            val doc = core.newDocument(bytes)
+            val doc = core.newDocument(bytes, password)
 
             val pageCount = core.getPageCount(doc)
 
@@ -1780,6 +1826,15 @@ object PdfOcrEngine {
             if (text.isNotBlank()) PdfOcrResult(text, pageCount)
 
             else { lastFailReason = if (anyContent) FailReason.OCR_EMPTY else FailReason.PDFIUM_BLANK; null }
+
+        } catch (_: PdfPasswordException) {
+
+            // v2.1.0: 密码错误/仍需密码
+            lastFailReason = FailReason.PASSWORD_WRONG
+
+            lastFailDetail = "Bytes: 密码错误或未提供密码"
+
+            null
 
         } catch (e: Throwable) {
 

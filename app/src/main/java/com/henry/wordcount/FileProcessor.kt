@@ -30,7 +30,8 @@ object FileProcessor {
 
     data class ProcessOutput(
         val resMap: Map<String, Any?>?,   // 成功时非 null
-        val error: String?                 // 失败时非 null（与单独打开该文件得到的错误/空结果一致）
+        val error: String?,                // 失败时非 null（与单独打开该文件得到的错误/空结果一致）
+        val needsPassword: Boolean = false // v2.1.0: PDF 需要打开密码（上层应弹密码框后带密码重试）
     )
 
     private val IMAGE_EXTS = setOf("png", "jpg", "jpeg", "bmp", "tif", "tiff", "gif", "webp")
@@ -40,14 +41,15 @@ object FileProcessor {
     private val DWG_EXTS = setOf("dwg")
     private val TXT_EXTS = setOf("txt")
 
-    /** 路由到对应格式的处理器。displayName 用于 resMap["name"]（单独打开用原名，压缩包内层用短名）。 */
-    suspend fun process(context: Context, file: File, displayName: String): ProcessOutput {
+    /** 路由到对应格式的处理器。displayName 用于 resMap["name"]（单独打开用原名，压缩包内层用短名）。
+     *  pdfPassword 仅在 PDF 加密时由上层弹框收集后传入；为 null 表示未提供密码。 */
+    suspend fun process(context: Context, file: File, displayName: String, pdfPassword: String? = null): ProcessOutput {
         val ext = file.extension.lowercase().removePrefix(".")
         return when {
             ext in IMAGE_EXTS -> processImage(context, file, displayName)
             ext in OLD_OFFICE_EXTS -> processOldOffice(file, displayName)
             ext in OOXML_EXTS -> processOoXml(file, displayName)
-            ext in PDF_EXTS -> processPdf(context, file, displayName)
+            ext in PDF_EXTS -> processPdf(context, file, displayName, pdfPassword)
             ext in DWG_EXTS -> processDwg(context, file, displayName)
             ext in TXT_EXTS || ext.isBlank() -> processText(file, displayName)
             else -> processText(file, displayName) // 单独打开时未知扩展名统一按文本处理
@@ -55,7 +57,12 @@ object FileProcessor {
     }
 
     // ───────────────────────── PDF ─────────────────────────
-    private suspend fun processPdf(context: Context, f: File, dName: String): ProcessOutput {
+    private suspend fun processPdf(context: Context, f: File, dName: String, pdfPassword: String? = null): ProcessOutput {
+        // v2.1.0: 加密 PDF 需要密码——未提供密码且探测到需要密码时，提前返回 needsPassword 标记，
+        // 由上层（MainActivity）弹密码框后带密码重试；已提供密码则跳过此检查、走正常解密路径。
+        if (pdfPassword == null && PdfOcrEngine.pdfNeedsPassword(context, f)) {
+            return ProcessOutput(null, null, needsPassword = true)
+        }
         // ── Level 1: Kotlin PdfExtractor（快速预筛）──
         val ktRes = PdfExtractor.extract(f)
         // v1.9.103：L1 文字层同样去噪（与桌面 extract_pdf / L2 pdfminer 口径一致），
@@ -195,7 +202,7 @@ object FileProcessor {
             ProcessOutput(resMap, null)
         } else {
             val ocrForPrintMode = looksLikeGarbage || isFailedChinesePdf
-            val ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = ocrForPrintMode, isScanPdf = needOcr)
+            val ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = ocrForPrintMode, isScanPdf = needOcr, password = pdfPassword)
             if (ocrRes != null) {
                 // v1.9.52: 对齐桌面版 extract_pdf 的 whole_poisoned 口径——触发 OCR 分支说明
                 // 该 PDF 是图纸类/图片型/文字层污染，应以整页 OCR 结果为准，不再把 Level1/Level2
@@ -229,6 +236,8 @@ object FileProcessor {
                     val errMsg = when (reason) {
                         PdfOcrEngine.FailReason.OCR_DISABLED ->
                             "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），OCR 引擎未就绪。"
+                        PdfOcrEngine.FailReason.PASSWORD_WRONG ->
+                            "此 PDF 已加密，提供的密码不正确，请重新输入密码。"
                         PdfOcrEngine.FailReason.RENDER_FAILED,
                         PdfOcrEngine.FailReason.PDFIUM_FAILED,
                         PdfOcrEngine.FailReason.PDFIUM_UNAVAILABLE,

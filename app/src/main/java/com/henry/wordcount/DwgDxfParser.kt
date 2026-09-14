@@ -689,7 +689,10 @@ object DwgDxfParser {
         val geo = countGeomFrames(rects)
         val sheets = distinctSheetNumbers(entities)
         val det = countDetailSheets(entities, msLines)
-        val (frames, reason) = pickFrames(geoLw, geo, paper, sheets, det, entities.isNotEmpty(), msEnts, paperTotalEnts, bareViewport)
+        // v2.1.0：布局内标准图框计数（端口桌面 _paper_layout_frame_count），
+        // 交叉校验布局数是否被低估（新加坡来福士两份 DWG：平面图布局内拼几十张 A2 图框）。
+        val paperFrames = paperLayoutFrameCount(scopes.blocks)
+        val (frames, reason) = pickFrames(geoLw, geo, paper, sheets, det, entities.isNotEmpty(), msEnts, paperTotalEnts, bareViewport, paperFrames)
 
         // ── v1.5.40: 整文件 CJK 兜底恢复 ─────────────────────────────────────
         // 真机上交叉编译的 libdwg2dxf.so 可能把中文写成 GBK 字节 / \U+XXXX 转义 /
@@ -821,12 +824,19 @@ object DwgDxfParser {
 
     /** 端口桌面 count_cad_frames 的判定优先级 */
     private fun pickFrames(geoLw: Int, geo: Int, paper: Int, sheets: Int, det: Int,
-                          hasEntities: Boolean, msEnts: Int, paperTotalEnts: Int, bareViewport: Int): Pair<Int?, String?> {
+                          hasEntities: Boolean, msEnts: Int, paperTotalEnts: Int, bareViewport: Int,
+                          paperFrames: Int = 0): Pair<Int?, String?> {
         // 布局稀疏 → 改用几何图框（dwg2dxf 常把所有图挤进 Model 空间）
         val geoBest = if (geoLw >= 1) geoLw else geo
         if (geoBest >= 3 && geoBest > paper + 1 && msEnts > 1000 && paperTotalEnts <= paper * 8) {
             val reason = if (geoLw >= 1) "布局稀疏·改用LWPOLYLINE图框估算" else "布局稀疏·改用几何图框估算"
             return Pair(geoBest, reason)
+        }
+        // v2.1.0：布局内标准图框计数（端口桌面 _paper_layout_frame_count）
+        // 不少 DWG 把几十张标准图框拼在同一图纸布局内，『1 布局 = 1 页』会把 48 张报成 2 张。
+        // 仅在结果显著大于布局数时才采用，避免影响『1 布局 = 1 页』的正常图。
+        if (paper >= 1 && paperFrames >= 3 && paperFrames > paper + 1) {
+            return Pair(paperFrames, "布局内图框计数")
         }
         if (paper >= 1) return Pair(paper, "布局计数")
         // v1.9.126: 端口桌面 v1.8.109——仅视口布局(图纸内容全在 Model 空间)且几何图框≤1 时
@@ -1198,6 +1208,130 @@ object DwgDxfParser {
             out.add(r)
         }
         return out
+    }
+
+    /**
+     * v2.1.0 端口桌面 _paper_layout_frame_count：统计各图纸空间布局内部的标准图框数量之和。
+     * 不少 DWG 把几十张标准图框（块引用/闭合多段线）拼在同一个图纸布局里，
+     * 『1 布局 = 1 页』会把 48 张报成 2 张（新加坡来福士两份 DWG 实测）。
+     * 对每个非 Model 的 *Paper_SpaceN 块收集 LWPOLYLINE 闭合矩形 + INSERT 图框块矩形，
+     * 用 countGeomFrames 清点后求和；是否采用由 pickFrames 的 guard 决定
+     * （仅当结果显著大于布局数时才以图框数为准，避免影响『1 布局 = 1 页』的正常图）。
+     */
+    private fun paperLayoutFrameCount(blocks: LinkedHashMap<String, MutableList<DxfEntity>>): Int {
+        var total = 0
+        try {
+            for ((name, ents) in blocks) {
+                if (name.equals("MODEL", ignoreCase = true)) continue
+                if (!PAPER_BLOCK_NAME.containsMatchIn(name)) continue
+                val rects = mutableListOf<Rect>()
+                for (e in ents) {
+                    // 布局内直接绘制的闭合 LWPOLYLINE 矩形
+                    val lr = paperLwRectOf(e)
+                    if (lr != null) rects.add(lr)
+                    // 布局内 INSERT 引用的 √2 图框块矩形
+                    if (e.type == "INSERT") {
+                        val fr = paperInsertFrame(e, blocks)
+                        if (fr != null) rects.add(fr)
+                    }
+                }
+                if (rects.isNotEmpty()) total += countGeomFrames(rects)
+            }
+        } catch (_: Exception) {
+            return 0
+        }
+        return total
+    }
+
+    private fun paperLwRectOf(e: DxfEntity): Rect? {
+        if (e.type != "LWPOLYLINE") return null
+        return try {
+            var closed = false
+            for ((c, v) in e.items) {
+                if (c == 70) {
+                    try { if (((v.toDoubleOrNull()?.toInt() ?: 0) and 1) == 1) closed = true } catch (_: Exception) {}
+                }
+            }
+            if (!closed) return null
+            val pts = mutableListOf<Pair<Double, Double>>()
+            var i = 0
+            while (i < e.items.size - 1) {
+                val c = e.items[i].first
+                val v = e.items[i].second
+                if (c == 10) {
+                    val x = v.toDoubleOrNull()
+                    if (x != null && i + 1 < e.items.size && e.items[i + 1].first == 20) {
+                        val y = e.items[i + 1].second.toDoubleOrNull()
+                        if (y != null) pts.add(x to y)
+                    }
+                }
+                i += 1
+            }
+            if (pts.size < 4) return null
+            var minx = Double.MAX_VALUE; var miny = Double.MAX_VALUE
+            var maxx = -Double.MAX_VALUE; var maxy = -Double.MAX_VALUE
+            for (p in pts) {
+                if (p.first < minx) minx = p.first
+                if (p.second < miny) miny = p.second
+                if (p.first > maxx) maxx = p.first
+                if (p.second > maxy) maxy = p.second
+            }
+            Rect(minx, miny, maxx, maxy)
+        } catch (_: Exception) { null }
+    }
+
+    private fun paperXform(r: Rect, ins: DxfEntity): Rect? {
+        return try {
+            val sx = ins.values(41).firstOrNull()?.toDoubleOrNull() ?: 1.0
+            val sy = ins.values(42).firstOrNull()?.toDoubleOrNull() ?: 1.0
+            val ix = ins.values(10).firstOrNull()?.toDoubleOrNull() ?: 0.0
+            val iy = ins.values(20).firstOrNull()?.toDoubleOrNull() ?: 0.0
+            val x1 = r.minx * sx + ix; val x2 = r.maxx * sx + ix
+            val y1 = r.miny * sy + iy; val y2 = r.maxy * sy + iy
+            Rect(min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+        } catch (_: Exception) { null }
+    }
+
+    private fun paperInsertFrame(e: DxfEntity, blocks: LinkedHashMap<String, MutableList<DxfEntity>>): Rect? {
+        val cache = LinkedHashMap<String, Rect?>()
+        fun blockMaxRect(name: String, depth: Int): Rect? {
+            if (depth > 4) return null
+            if (cache.containsKey(name)) return cache[name]
+            cache[name] = null
+            val blk = blocks[name] ?: emptyList()
+            var best: Rect? = null
+            var bestArea = 0.0
+            for (en in blk) {
+                var r = paperLwRectOf(en)
+                if (r == null && en.type == "INSERT") {
+                    val subName = en.values(2).firstOrNull()?.trim() ?: ""
+                    val sub = blockMaxRect(subName, depth + 1)
+                    r = if (sub != null) paperXform(sub, en) else null
+                }
+                if (r != null) {
+                    val a = (r.maxx - r.minx) * (r.maxy - r.miny)
+                    if (a > bestArea) { bestArea = a; best = r }
+                }
+            }
+            cache[name] = best
+            return best
+        }
+        return try {
+            val rot = try { e.values(50).firstOrNull()?.toDoubleOrNull() ?: 0.0 } catch (_: Exception) { 0.0 }
+            if (abs(rot) > 1e-6 && abs(abs(rot) - 360) > 1e-6) null
+            else {
+                val name = e.values(2).firstOrNull()?.trim() ?: ""
+                val baseR = blockMaxRect(name, 0) ?: return null
+                val r = paperXform(baseR, e) ?: return null
+                val w = r.maxx - r.minx
+                val h = r.maxy - r.miny
+                if (w <= 0 || h <= 0) null
+                else {
+                    val ar = max(w, h) / min(w, h)
+                    if (ar < 1.30 || ar > 1.55) null else r
+                }
+            }
+        } catch (_: Exception) { null }
     }
 
     /**

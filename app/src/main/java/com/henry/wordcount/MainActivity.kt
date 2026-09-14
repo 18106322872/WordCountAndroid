@@ -97,6 +97,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
 import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
@@ -3510,6 +3511,12 @@ private fun addFiles(
         try {
             val cf = uris.map { copyUriToCache(context, it) }
             MainActivity.pendingUriNames.clear()
+            // v2.1.0: 加密 PDF 需弹框输入密码，必须用本进程 inline 路径（服务进程 :countservice 无 UI 无法弹框）。
+            val hasEncryptedPdf = cf.any { it.file.extension.equals("pdf", true) && PdfOcrEngine.pdfNeedsPassword(context, it.file) }
+            if (hasEncryptedPdf) {
+                Diag.d("检测到加密 PDF，改用本进程 inline 路径以弹框输入密码")
+                runInline()
+            } else {
             val started = CountingService.startBatch(context, cf.map { it.file.absolutePath }, cf.map { it.displayName })
             if (!started) {
                 Diag.w( "CountingService 启动失败，回退本进程 inline 统计")
@@ -3537,6 +3544,7 @@ private fun addFiles(
                         finalizeBatch(context, heartbeatJob, busySet, mainProgress, onDone = docImgPhase)
                     }
                 }
+            }
             }
         } catch (e: Throwable) {
             Diag.e( "addFiles 异常，回退 inline: ${e.message}", e)
@@ -3693,6 +3701,29 @@ internal suspend fun processDwgPipelined(
     }
 }
 
+// v2.1.0: 在协程中弹经典 AlertDialog 收集 PDF 打开密码，返回用户输入的密码（取消返回 null）。
+// 必须在持有 Activity 的上下文中调用（dialog 需要 UI 线程）。
+private suspend fun promptPdfPassword(activity: android.app.Activity, fileName: String, errorMsg: String?): String? =
+    withContext(Dispatchers.Main) {
+        suspendCancellableCoroutine { cont ->
+            val input = android.widget.EditText(activity).apply {
+                inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+                hint = "请输入打开密码"
+            }
+            val msg = if (errorMsg != null) "$errorMsg\n\n文件「$fileName」需要密码才能统计：" else "文件「$fileName」已加密，需要密码才能统计："
+            val dialog = android.app.AlertDialog.Builder(activity)
+                .setTitle("PDF 需要密码")
+                .setMessage(msg)
+                .setView(input)
+                .setPositiveButton("确定") { _, _ -> if (cont.isActive) cont.resume(input.text.toString()) }
+                .setNegativeButton("取消") { _, _ -> if (cont.isActive) cont.resume(null) }
+                .setOnCancelListener { if (cont.isActive) cont.resume(null) }
+                .create()
+            cont.invokeOnCancellation { runCatching { dialog.dismiss() } }
+            dialog.show()
+        }
+    }
+
 // v1.9.25: 把原 addFiles 内联统计逻辑抽成独立挂起函数，供 MainActivity（inline 回退）
 // 与 CountingService（:countservice 独立前台进程）共用，确保两端统计口径一致。
 internal suspend fun processBatchToEntries(
@@ -3701,9 +3732,12 @@ internal suspend fun processBatchToEntries(
     onProgress: (name: String, done: Int, total: Int) -> Unit,
     emit: (FileEntry) -> Unit,
     onError: (String) -> Unit,
-    control: BatchControl = BatchControl()
+    control: BatchControl = BatchControl(),
+    pdfPassword: String? = null
 ) {
     try {
+                // v2.1.0: 同一批次内同一文件只弹一次密码框（按绝对路径缓存已确认的密码）。
+                val pdfPasswordCache = mutableMapOf<String, String>()
                 val pyStartResult = runCatching { PythonEngine.start(context) }
                 Diag.d( "PythonEngine.start: ${if (pyStartResult.isSuccess) "OK" else "FAIL: ${pyStartResult.exceptionOrNull()?.message}"}")
                 val files = cachedFiles.map { it.file }
@@ -3910,6 +3944,22 @@ internal suspend fun processBatchToEntries(
                     val dName = cf.displayName
                     if (!control.gateBlocking()) return@forEachIndexed
                                         try {
+                        // v2.1.0: 加密 PDF 需要密码——探测到需要密码时弹框收集（仅 Activity 上下文可弹框）。
+                        val actForPw = context as? android.app.Activity
+                        var filePw: String? = pdfPasswordCache[f.absolutePath] ?: pdfPassword
+                        if (filePw == null && PdfOcrEngine.pdfNeedsPassword(context, f)) {
+                            if (actForPw != null) {
+                                filePw = promptPdfPassword(actForPw, dName, null)
+                                if (filePw == null) {
+                                    emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_pw", displayName = dName, cachePath = f.absolutePath, error = "PDF 已加密，已取消输入密码"))
+                                    return@forEachIndexed
+                                }
+                                pdfPasswordCache[f.absolutePath] = filePw!!
+                            } else {
+                                emit(FileEntry(id = "e${System.currentTimeMillis()}_${i}_pdf_pw", displayName = dName, cachePath = f.absolutePath, error = "PDF 已加密，需输入密码，请在应用内直接打开该文件"))
+                                return@forEachIndexed
+                            }
+                        }
                         // ── Level 1: Kotlin PdfExtractor（快速预筛）──
                         val ktRes = PdfExtractor.extract(f)
                         val ktStats = countTextKotlin(ktRes.text)
@@ -4119,9 +4169,20 @@ internal suspend fun processBatchToEntries(
                             //   (更兼容, 文本/图片 PDF 均可靠渲染)，仅保留 looksLikeGarbage/isFailedChinesePdf
                             //   的 PRINT 高分辨率(这两类确需更清晰渲染)。
                             val ocrForPrintMode = looksLikeGarbage || isFailedChinesePdf
-                            val ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = ocrForPrintMode, isScanPdf = needOcr, onProgress = { done, total ->
+                            var ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = ocrForPrintMode, isScanPdf = needOcr, onProgress = { done, total ->
                                 onProgress(dName, done, total)
-                            })
+                            }, password = filePw)
+                            // v2.1.0: 密码错误则重新弹框重试一次（仅 Activity 上下文可弹框）。
+                            if (ocrRes == null && PdfOcrEngine.lastFailReason == PdfOcrEngine.FailReason.PASSWORD_WRONG && actForPw != null) {
+                                val retryPw = promptPdfPassword(actForPw, dName, "密码错误，请重新输入")
+                                if (retryPw != null) {
+                                    filePw = retryPw
+                                    pdfPasswordCache[f.absolutePath] = retryPw
+                                    ocrRes = PdfOcrEngine.extractText(context, f, forPrintMode = ocrForPrintMode, isScanPdf = needOcr, onProgress = { done, total ->
+                                        onProgress(dName, done, total)
+                                    }, password = filePw)
+                                }
+                            }
 
                             if (ocrRes != null) {
                                 val finalText = PdfOcrEngine.stripNoiseFarEast(PdfOcrEngine.filterStrongCjkNoise(ocrRes.text))
@@ -4204,6 +4265,8 @@ internal suspend fun processBatchToEntries(
                                 val errMsg = when (reason) {
                                     PdfOcrEngine.FailReason.OCR_DISABLED ->
                                         "此 PDF 为扫描件/图片型文件（$pdfPageCount 页），OCR 引擎未就绪。"
+                                    PdfOcrEngine.FailReason.PASSWORD_WRONG ->
+                                        "此 PDF 已加密，提供的密码不正确，请在应用内重新打开并输入正确密码。"
                                     PdfOcrEngine.FailReason.RENDER_FAILED,
                                     PdfOcrEngine.FailReason.PDFIUM_FAILED,
                                     PdfOcrEngine.FailReason.PDFIUM_UNAVAILABLE,
