@@ -30,6 +30,13 @@ object DwgProcessor {
     // 超时（极少数巨型文件）自动放弃并落入下方 Kotlin 流式扫描兜底，杜绝单文件卡 16 分钟拖垮整批。
     private const val PY_PARSE_BUDGET_MS = 240_000L
 
+    // v2.1.3: 进度分母用的图框计数（DwgDxfParser.analyze）安全护栏。
+    // analyze 对超大/复杂 DXF 会做全量结构化解析 + 整文件 CJK 兜底，在真机上可能 GC 抖动甚至
+    // 长时间挂起（本会话 20260912 机电给排水图.dwg 因此卡死、主界面空白）。该调用仅用于进度分母，
+    // 绝不应阻塞字数统计主路径：超大 DXF 直接跳过，其余放到独立线程 + 限时，超时/异常一律回退 1 页。
+    private const val PAGE_COUNT_TIMEOUT_MS = 25_000L
+    private const val PAGE_COUNT_MAX_DXF_BYTES = 40L * 1024 * 1024
+
     // ===== v1.9.88: 批量总时长预算（硬约束：28 个 DWG ≤ 40 分钟）=====
     // 用户明确要求：超过 40 分钟「时间太长了已经没有意义」。因此不再给单文件固定 240s，
     // 而是在**整批 40 分钟预算内动态分配**：先到先得多，落后时自动压缩后续文件预算、降级可选阶段。
@@ -138,8 +145,28 @@ object DwgProcessor {
         val totalPages = try {
             val dxf = conv.dxfPath
             if (dxf != null) {
-                val ar = DwgDxfParser.analyze(dxf)
-                (ar.frames ?: 1).coerceAtLeast(1)
+                // v2.1.3: DwgDxfParser.analyze 对超大/复杂 DXF 可能在真机 GC 抖动甚至挂起（本会话
+                // 20260912 机电给排水图.dwg 因此卡死、主界面空白）。该调用仅用于进度分母，绝不应阻塞
+                // 字数统计主路径：超大 DXF 直接跳过；其余放独立线程 + 25s 限时，超时/异常一律回退 1 页。
+                // 真实页数由 analyzePhase 的 Python 主路径 pages 字段给出，不受此影响。
+                val dxfSize = try { java.io.File(dxf).length() } catch (_: Throwable) { 0L }
+                if (dxfSize > 0 && dxfSize <= PAGE_COUNT_MAX_DXF_BYTES) {
+                    val fut = CompletableFuture<DwgDxfParser.AnalysisResult?>()
+                    val t = Thread {
+                        try { fut.complete(DwgDxfParser.analyze(dxf)) }
+                        catch (_: Throwable) { fut.complete(null) }
+                    }
+                    t.priority = Thread.MIN_PRIORITY
+                    t.start()
+                    val ar = try { fut.get(PAGE_COUNT_TIMEOUT_MS, TimeUnit.MILLISECONDS) } catch (_: Throwable) { null }
+                    if (ar != null) (ar.frames ?: 1).coerceAtLeast(1) else {
+                        Diag.w("DWG 图框计数超时(${PAGE_COUNT_TIMEOUT_MS / 1000}s)，回退 1 页进度分母")
+                        1
+                    }
+                } else {
+                    Diag.w("DWG 图框计数跳过：DXF ${dxfSize / 1048576}MB 过大，用 1 页进度分母")
+                    1
+                }
             } else 1
         } catch (_: Throwable) { 1 }
         runCatching { onProgress?.invoke(dName, 0, totalPages) }
@@ -588,9 +615,19 @@ object DwgProcessor {
                     // （与桌面 count_cad_frames / Python 主路径同一套 pickFrames·paperLayoutFrameCount 口径），
                     // 保证超时文件页数正确。analyze 在兜底路径无超时限制，跑完即返回，且对大文件有 OOM 防护。
                     val fbFrame = try {
-                        val ar = DwgDxfParser.analyze(pyDxfPath)
-                        val f = if (ar.frames != null && ar.frames >= 1) ar.frames else 1
-                        Pair(f, ar.framesReason)
+                        // v2.1.3: 与主路径同理，兜底分支的 analyze 也加限时护栏，避免极端文件在此挂起。
+                        val fut = CompletableFuture<DwgDxfParser.AnalysisResult?>()
+                        val t = Thread {
+                            try { fut.complete(DwgDxfParser.analyze(pyDxfPath)) }
+                            catch (_: Throwable) { fut.complete(null) }
+                        }
+                        t.priority = Thread.MIN_PRIORITY
+                        t.start()
+                        val ar = try { fut.get(PAGE_COUNT_TIMEOUT_MS, TimeUnit.MILLISECONDS) } catch (_: Throwable) { null }
+                        if (ar != null) {
+                            val f = if (ar.frames != null && ar.frames >= 1) ar.frames else 1
+                            Pair(f, ar.framesReason)
+                        } else Pair(1, null)
                     } catch (_: Throwable) { Pair(1, null) }
                     if (fbWords > 0) {
                         val pagesNote = if (fbFrame.first >= 2) "·布局内图框计数(兜底)" else ""
