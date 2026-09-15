@@ -3532,8 +3532,10 @@ private fun addFiles(
                     // 「批次里的非 DWG 文件 + DWG 转换/收尾」余量，不再作为 DWG 慢的遮羞布。
                     while (isActive && !done && elapsed < 45 * 60 * 1000L) {
                         // v1.9.55: 轮询间隔 1500ms → 500ms，让主界面进度更贴近通知栏进度。
-                        delay(500L)
-                        elapsed += 500L
+                        // v2.1.1: 进一步 500ms → 200ms，避免 DWG 转换阶段极短、主界面错过早期进度阶，
+                        // 出现「主界面比通知栏慢一阶（如显示 2/N 而通知栏已 1/N）」的观感错位。
+                        delay(200L)
+                        elapsed += 200L
                         if (recoverResults(context, sink, mainProgress)) done = true
                     }
                     if (done) {
@@ -3609,21 +3611,18 @@ internal suspend fun processDwgPipelined(
     if (dwgFiles.isEmpty()) return
     val total = dwgFiles.size
         if (total == 1) {
-            // 单文件无需重叠，走原路径（与旧版行为完全一致）
+            // 单文件无需重叠，走原路径
             val cf = dwgFiles[0]
             control.waitIfPaused()
             if (!control.stopped) {
                 try {
-                    // v1.9.130: 单文件 DWG 进度细分（total=4：转换→解析→计数→完成），
-                    // 解决「单文件统计主界面长时间卡在 0/1 无进度」的问题。DwgProcessor 内部按阶段回调 1/4→3/4。
-                    try { onProgress(cf.displayName, 0, 4) } catch (_: Throwable) {}
+                    // v2.1.1: 进度分母交由 DwgProcessor.processInner 用「图纸页数」回调（不再固定 4 阶段），
+                    // 这里只透传 step/total，保证主界面与通知栏都按页数显示、分母一致。
                     val res = DwgProcessor.process(context, cf.file, cf.displayName,
-                        onProgress = { _, step, _ -> try { onProgress(cf.displayName, step, 4) } catch (_: Throwable) {} })
+                        onProgress = { _, step, total -> try { onProgress(cf.displayName, step, total) } catch (_: Throwable) {} })
                     onResult(0, cf.file, cf.displayName, res)
                 } catch (e: Throwable) {
                     onError(0, cf.file, cf.displayName, e.message)
-                } finally {
-                    try { onProgress(cf.displayName, 4, 4) } catch (_: Throwable) {}
                 }
             }
             return
@@ -3633,7 +3632,11 @@ internal suspend fun processDwgPipelined(
     DwgProcessor.beginBatch(total)
     try {
         kotlinx.coroutines.coroutineScope {
-            val channel = kotlinx.coroutines.channels.Channel<Pair<Int, DwgProcessor.DwgConvertOutcome?>>(capacity = 1)
+            // v2.1.1: 进度分母改为「图纸页数」——生产者转换后顺带用 DwgDxfParser.analyze 算图框页数，
+            // 累加得到整批总页数 totalPages；消费者每完成一个文件把其页数累加到 donePages，
+            // 分母统一为页数，主界面/通知栏都按页数显示，与单文件路径一致（不再用 dwgFiles.size 或 4）。
+            val channel = kotlinx.coroutines.channels.Channel<Triple<Int, DwgProcessor.DwgConvertOutcome?, Int>>(capacity = 1)
+            val totalPagesRef = java.util.concurrent.atomic.AtomicInteger(0)
             // 生产者：阶段A 转换（串行，独占 :dwgisolated）
             launch(kotlinx.coroutines.Dispatchers.IO) {
                 try {
@@ -3645,7 +3648,11 @@ internal suspend fun processDwgPipelined(
                         } catch (e: Throwable) {
                             null
                         }
-                        channel.send(idx to conv)
+                        val frames = try {
+                            if (conv?.dxfPath != null) (DwgDxfParser.analyze(conv.dxfPath).frames ?: 1).coerceAtLeast(1) else 1
+                        } catch (_: Throwable) { 1 }
+                        totalPagesRef.addAndGet(frames)
+                        channel.send(Triple(idx, conv, frames))
                     }
                 } finally {
                     try { channel.close() } catch (_: Throwable) {}
@@ -3653,7 +3660,7 @@ internal suspend fun processDwgPipelined(
             }
             // 消费者：阶段B 解析 + OCR + 计数（单线程串行，保护 PaddleOCR 单例与 Chaquopy）
             launch(kotlinx.coroutines.Dispatchers.IO) {
-                var done = 0
+                var donePages = 0
                 // 用 receiveCatching 显式取元素（避免依赖 ReceiveChannel.iterator 扩展的 import）
                 while (true) {
                     val rc = channel.receiveCatching()
@@ -3661,6 +3668,7 @@ internal suspend fun processDwgPipelined(
                     val item = rc.getOrNull() ?: continue
                     val idx = item.first
                     val conv = item.second
+                    val frames = item.third
                     control.waitIfPaused()
                     if (control.stopped) break
                     val cf = dwgFiles[idx]
@@ -3679,8 +3687,8 @@ internal suspend fun processDwgPipelined(
                         // v1.9.88: 无论成功/失败都配平预算计数，保证后续文件预算计算准确
                         DwgProcessor.endFile()
                     }
-                    done++
-                    try { onProgress(cf.displayName, done, total) } catch (_: Throwable) {}
+                    donePages += frames
+                    try { onProgress(cf.displayName, donePages, totalPagesRef.get()) } catch (_: Throwable) {}
                 }
             }
         }

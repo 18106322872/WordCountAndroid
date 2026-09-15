@@ -131,15 +131,20 @@ object DwgProcessor {
         }
     }
     private suspend fun processInner(context: Context, file: File, dName: String, onProgress: ((String, Int, Int) -> Unit)? = null): DwgProcessResult {
-        // v1.9.130: 阶段边界回调进度（仅单文件调用方传入 onProgress 时生效；批量路径用自身 per-file 进度，
-        // 传 null 避免与批次总进度 total 冲突）。调用方以 total=4 播放：0 起始 → 1 转换完 → 2 解析开始 →
-        // 3 解析+计数完 → 4 最终，主界面进度文本随之从「0/4」逐步走到「4/4」，不再卡死在 0/1。
+        // v2.1.1: 进度分母改为「图纸页数（图框计数）」而非固定 4 阶段，与用户要求「按页数显示进度」一致，
+        // 也消除此前 total=4 与通知栏整体进度分母不一致、主界面/通知栏进度对不上的问题。
+        // 先转换拿到 DXF，再用 Kotlin DwgDxfParser.analyze 算图框页数作为分母（与桌面/Python 主路径同一套 pickFrames 口径）。
         val conv = convertPhase(context, file)
-        runCatching { onProgress?.invoke(dName, 1, 4) }
+        val totalPages = try {
+            val ar = DwgDxfParser.analyze(conv.dxfPath)
+            (ar.frames ?: 1).coerceAtLeast(1)
+        } catch (_: Throwable) { 1 }
+        runCatching { onProgress?.invoke(dName, 0, totalPages) }
         return try {
-            runCatching { onProgress?.invoke(dName, 2, 4) }
+            // 转换完成→开始解析：给一个起步进度，表示「已转换，正在解析/计数」
+            runCatching { onProgress?.invoke(dName, 1, totalPages) }
             val res = analyzePhase(context, file, dName, conv.dxfPath, conv.diagnostics)
-            runCatching { onProgress?.invoke(dName, 3, 4) }
+            runCatching { onProgress?.invoke(dName, totalPages, totalPages) }
             res
         } finally {
             deleteIntermediateDxf(conv.dxfPath)
@@ -575,11 +580,21 @@ object DwgProcessor {
                         if (fbChars <= 0) fbChars = kChars2
                         diagnostics.append("count_fallback=kotlin; ")
                     }
+                    // v2.1.1: 兜底分支也必须给出正确页数——Python 超时/失败时 cad_core 的 pages 拿不到，
+                    // 旧逻辑硬编码 1 页（48 页图纸被报成 1 页）。这里用 Kotlin DwgDxfParser.analyze 重新算图框页数
+                    // （与桌面 count_cad_frames / Python 主路径同一套 pickFrames·paperLayoutFrameCount 口径），
+                    // 保证超时文件页数正确。analyze 在兜底路径无超时限制，跑完即返回，且对大文件有 OOM 防护。
+                    val fbFrame = try {
+                        val ar = DwgDxfParser.analyze(pyDxfPath)
+                        val f = if (ar.frames != null && ar.frames >= 1) ar.frames else 1
+                        Pair(f, ar.framesReason)
+                    } catch (_: Throwable) { Pair(1, null) }
                     if (fbWords > 0) {
-                        val fbReason = "Kotlin组码兜底" + (if (diagnostics.isNotEmpty()) "·" + diagnostics.toString().take(60) else "")
+                        val pagesNote = if (fbFrame.first >= 2) "·布局内图框计数(兜底)" else ""
+                        val fbReason = "Kotlin组码兜底" + (if (diagnostics.isNotEmpty()) "·" + diagnostics.toString().take(60) else "") + pagesNote
                         val fbDiag = "FB:${diagnostics}"
-                        Diag.d( "DWG Kotlin组码兜底 $dName: words=$fbWords fe=$fbFe nc=$fbNc chars=$fbChars")
-                        return DwgProcessResult(fbWords, fbFe, fbNc, fbChars, 1, fbReason, false, fbDiag, null, cleaned)
+                        Diag.d( "DWG Kotlin组码兜底 $dName: words=$fbWords fe=$fbFe nc=$fbNc chars=$fbChars pages=${fbFrame.first}")
+                        return DwgProcessResult(fbWords, fbFe, fbNc, fbChars, fbFrame.first, fbReason, false, fbDiag, null, cleaned)
                     }
                 }
                 diagnostics.append("fb_text_empty; ")
