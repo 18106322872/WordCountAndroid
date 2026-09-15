@@ -89,7 +89,7 @@ jobs:
           export STRIP="$TOOL/bin/llvm-strip"
           export PATH="$TOOL/bin:$PATH"
           sudo apt-get update -qq
-          sudo apt-get install -y -qq autoconf automake libtool texinfo pkg-config
+          sudo apt-get install -y -qq autoconf automake libtool texinfo pkg-config libtinfo5
           cd /tmp
           TAG="0.14"
           echo "LibreDWG tag=$TAG"
@@ -149,6 +149,8 @@ jobs:
           if [ -n "$FAIL" ]; then
             echo "MULTI-ABI BUILD FAILED"
             echo "libdwg2dxf.so 未生成"
+            echo "=== config.log (arm64-v8a) tail ==="
+            sed -n '1,80p' /tmp/libredwg/build-arm64-v8a/config.log 2>/dev/null || true
             python3 - <<'PY'
           import os, json, urllib.request
           try:
