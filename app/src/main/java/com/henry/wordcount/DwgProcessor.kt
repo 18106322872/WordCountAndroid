@@ -136,9 +136,31 @@ object DwgProcessor {
             // 这类假数字（与桌面"-"不符）。改返回零值 + needsPdf=true，UI 走 needsPdf 分支显示"-"，
             // 既不会让 app 崩溃（压缩包内层 DWG 仍会被统计、仅显示"-"），也不会误导用户。
             Diag.w( "DWG process 异常兜底 $dName: ${e.javaClass.simpleName}: ${e.message}")
-            DwgProcessResult(0, 0, 0, 0, 1, "异常兜底", true, "process异常: ${e.message}", null, "")
+            DwgProcessResult(0, 0, 0, 0, 1, "异常兜底", true, "process异常: ${e.message}", CadPartStats(0,0,0,0,0,0,0,0,0,0), "")
         }
     }
+    /**
+     * v2.1.6: 把 DWG 提取文本拆成「文字部分 / 纯编号部分」，供结果卡片展开文/号两行。
+     * 与 MainActivity.computeCadParts 同口径（isCadCodeItem + countTextKotlin），但**始终返回非空**——
+     * 即便没有纯编号条目也展示「文字部分」，确保 DWG 始终有可展开的文/号（用户要求）。
+     */
+    private fun buildCadParts(text: String): CadPartStats {
+        val textLines = mutableListOf<String>()
+        val codeLines = mutableListOf<String>()
+        for (line in text.split("\n")) {
+            val s = line.trim()
+            if (s.isEmpty()) continue
+            if (isCadCodeItem(s)) codeLines.add(s) else textLines.add(s)
+        }
+        val textStats = countTextKotlin(textLines.joinToString("\n"))
+        val codeStats = countTextKotlin(codeLines.joinToString("\n"))
+        return CadPartStats(
+            textWords = textStats.first, textFe = textStats.second, textNc = textStats.third, textChars = textStats.fourth,
+            codeWords = codeStats.first, codeFe = codeStats.second, codeNc = codeStats.third, codeChars = codeStats.fourth,
+            textItems = textLines.size, codeItems = codeLines.size
+        )
+    }
+
     private suspend fun processInner(context: Context, file: File, dName: String, onProgress: ((String, Int, Int) -> Unit)? = null): DwgProcessResult {
         // v2.1.1: 进度分母改为「图纸页数（图框计数）」而非固定 4 阶段，与用户要求「按页数显示进度」一致，
         // 也消除此前 total=4 与通知栏整体进度分母不一致、主界面/通知栏进度对不上的问题。
@@ -485,7 +507,7 @@ object DwgProcessor {
                             Diag.d("DWG 分段耗时 $dName: dxfMB=${File(pyDxfPath).length() / 1048576} $timingsSb| cntErr=${cntErr?.takeLast(150)}")
                             val diag = "PY:${diagnostics}items=${items.size}"
                             Diag.d( "DWG Python主路径 $dName: words=$finalWords(py=$pyWords,k=$kWords) fe=$finalFe nc=$finalNc chars=$finalChars pages=$pyPages($pyReason) items=${items.size}")
-                            return DwgProcessResult(finalWords, finalFe, finalNc, finalChars, pyPages, pyReason, finalNeedsPdf, diag, null, allItems.joinToString("\n"))
+                            return DwgProcessResult(finalWords, finalFe, finalNc, finalChars, pyPages, pyReason, finalNeedsPdf, diag, buildCadParts(cleanedText), allItems.joinToString("\n"))
                         }
                     } catch (e: Throwable) {
                         diagnostics.append("py_ex=${e.javaClass.simpleName}:${e.message?.take(120)}; ")
@@ -631,7 +653,7 @@ object DwgProcessor {
                         val fbReason = "Kotlin组码兜底" + (if (diagnostics.isNotEmpty()) "·" + diagnostics.toString().take(60) else "") + pagesNote
                         val fbDiag = "FB:${diagnostics}"
                         Diag.d( "DWG Kotlin组码兜底 $dName: words=$fbWords fe=$fbFe nc=$fbNc chars=$fbChars pages=${fbFrame.first}")
-                        return DwgProcessResult(fbWords, fbFe, fbNc, fbChars, fbFrame.first, fbReason, false, fbDiag, null, cleaned)
+                        return DwgProcessResult(fbWords, fbFe, fbNc, fbChars, fbFrame.first, fbReason, false, fbDiag, buildCadParts(cleaned), cleaned)
                     }
                 }
                 diagnostics.append("fb_text_empty; ")
@@ -644,7 +666,7 @@ object DwgProcessor {
         // 全部失败 -> 显示"-"，但把诊断信息带出来便于排查
         Diag.w( "DWG $dName 全部路径失败：显示'-' diag=${diagnostics}")
         val failReason = "Python解析失败" + (if (diagnostics.isNotEmpty()) "·" + diagnostics.toString().take(60) else "")
-        return DwgProcessResult(0, 0, 0, 0, 1, failReason, true, diagnostics.toString(), null, "")
+        return DwgProcessResult(0, 0, 0, 0, 1, failReason, true, diagnostics.toString(), CadPartStats(0,0,0,0,0,0,0,0,0,0), "")
     }
     private fun isDxfComplete(path: String): Boolean {
         return try {
