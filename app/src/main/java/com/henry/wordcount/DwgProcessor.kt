@@ -28,13 +28,15 @@ object DwgProcessor {
     // 49~59MB≈720~940s，68~81MB 逾 1000s），且不响应协程取消（原生阻塞调用 withTimeoutOrNull 无效）。
     // 用「独立线程跑 Python + CompletableFuture.get(timeout)」实现真超时：预算内走最准的 ezdxf 主路径，
     // 超时（极少数巨型文件）自动放弃并落入下方 Kotlin 流式扫描兜底，杜绝单文件卡 16 分钟拖垮整批。
-    private const val PY_PARSE_BUDGET_MS = 240_000L
+    // v2.1.5: 240s→600s。实测 20260913施工图.dwg（DXF 28MB、实体复杂）Python 主路径需 >240s，
+    // 240s 掐断后落入 Kotlin 组码兜底 → pages=1、字数偏离桌面。放宽到与 DWG 转换超时同级（600s），
+    // 让主路径跑完拿桌面同口径的 words+pages；批量 28 文件的 40 分钟总预算由
+    // perFileBudgetMs 的「剩余÷剩余数」动态分配约束，不受此上限影响（分配值通常远小于上限）。
+    private const val PY_PARSE_BUDGET_MS = 600_000L
 
-    // v2.1.3: 进度分母用的图框计数（DwgDxfParser.analyze）安全护栏。
-    // analyze 对超大/复杂 DXF 会做全量结构化解析 + 整文件 CJK 兜底，在真机上可能 GC 抖动甚至
-    // 长时间挂起（本会话 20260912 机电给排水图.dwg 因此卡死、主界面空白）。该调用仅用于进度分母，
-    // 绝不应阻塞字数统计主路径：超大 DXF 直接跳过，其余放到独立线程 + 限时，超时/异常一律回退 1 页。
-    private const val PAGE_COUNT_TIMEOUT_MS = 25_000L
+    // v2.1.5: 进度分母用的图框计数（DwgDxfParser.analyze）已取消超时护栏。
+    // analyze 仍跑在独立后台线程，主线程不阻塞等待它（防 v2.1.2 大 DXF 挂起导致空白界面）；
+    // 真实页数由 analyzePhase 的 Python 主路径 pages 给出（与桌面同口径）。DXF>40MB 直接跳过。
     private const val PAGE_COUNT_MAX_DXF_BYTES = 40L * 1024 * 1024
 
     // ===== v1.9.88: 批量总时长预算（硬约束：28 个 DWG ≤ 40 分钟）=====
@@ -87,7 +89,7 @@ object DwgProcessor {
         if (batchPending > 0) batchPending--
     }
 
-    /** 当前文件可用预算 = 剩余总时间 / 剩余文件数，并夹在 [20s, 240s]。 */
+    /** 当前文件可用预算 = 剩余总时间 / 剩余文件数，并夹在 [20s, 600s]。 */
     fun perFileBudgetMs(): Long {
         if (batchDeadlineMs <= 0L) return PY_PARSE_BUDGET_MS
         val remain = batchDeadlineMs - System.currentTimeMillis()
@@ -145,10 +147,10 @@ object DwgProcessor {
         val totalPages = try {
             val dxf = conv.dxfPath
             if (dxf != null) {
-                // v2.1.3: DwgDxfParser.analyze 对超大/复杂 DXF 可能在真机 GC 抖动甚至挂起（本会话
-                // 20260912 机电给排水图.dwg 因此卡死、主界面空白）。该调用仅用于进度分母，绝不应阻塞
-                // 字数统计主路径：超大 DXF 直接跳过；其余放独立线程 + 25s 限时，超时/异常一律回退 1 页。
-                // 真实页数由 analyzePhase 的 Python 主路径 pages 字段给出，不受此影响。
+                // v2.1.5: 取消「进度分母用 analyze 的 25s 超时护栏」。analyze 仍跑在独立后台线程，
+                // 但主线程不再阻塞等待它——大/复杂 DXF 的 analyze 若挂起只会卡住该后台线程，
+                // 不会冻结统计主路径（防 v2.1.2 空白界面的老问题）。真实页数由 Python 主路径 pages 给出；
+                // 此处仅作进度分母，analyze 完成后由其线程异步回调更新分母。
                 val dxfSize = try { java.io.File(dxf).length() } catch (_: Throwable) { 0L }
                 if (dxfSize > 0 && dxfSize <= PAGE_COUNT_MAX_DXF_BYTES) {
                     val fut = CompletableFuture<DwgDxfParser.AnalysisResult?>()
@@ -158,11 +160,11 @@ object DwgProcessor {
                     }
                     t.priority = Thread.MIN_PRIORITY
                     t.start()
-                    val ar = try { fut.get(PAGE_COUNT_TIMEOUT_MS, TimeUnit.MILLISECONDS) } catch (_: Throwable) { null }
-                    if (ar != null) (ar.frames ?: 1).coerceAtLeast(1) else {
-                        Diag.w("DWG 图框计数超时(${PAGE_COUNT_TIMEOUT_MS / 1000}s)，回退 1 页进度分母")
-                        1
+                    fut.whenComplete { ar, _ ->
+                        val f = (ar?.frames ?: 1).coerceAtLeast(1)
+                        runCatching { onProgress?.invoke(dName, 0, f) }
                     }
+                    1
                 } else {
                     Diag.w("DWG 图框计数跳过：DXF ${dxfSize / 1048576}MB 过大，用 1 页进度分母")
                     1
@@ -303,16 +305,11 @@ object DwgProcessor {
                                 }
                             }
                             pyThread.start()
+                            // v2.1.5: 取消 Python 解析超时护栏——超时只会让主路径提前放弃、落入 Kotlin 兜底给 1 页
+                            //（正是本施工图.dwg 的 bug）。改为让 ezdxf 主路径跑完，拿桌面同口径的 words+pages。
+                            // 失控线程仍由 pyBusy() 在批量紧张时规避，但不再因超时丢弃正确结果。
                             val pyJsonOrNull = try {
-                                fut.get(pyBudget, TimeUnit.MILLISECONDS)
-                            } catch (e: java.util.concurrent.TimeoutException) {
-                                // v1.9.88: 记录失控线程——它仍持 GIL 跑完剩余解析，
-                                // 后续文件的 Python 调用若不等它就会排队空等。记下后
-                                // pyBusy() 返回 true，后续文件自动转纯 Kotlin 快渠道。
-                                notePyRunaway(pyThread)
-                                diagnostics.append("py_timeout(${pyBudget / 1000}s); ")
-                                Diag.w("DWG Python 解析超时 ${pyBudget / 1000}s，$dName 转 Kotlin 块展开（后台线程继续跑完 Python）")
-                                null
+                                fut.get()
                             } catch (e: java.util.concurrent.ExecutionException) {
                                 diagnostics.append("py_ex=${e.javaClass.simpleName}:${e.message}; ")
                                 Diag.e("DWG Python 解析异常 $dName: ${e.message}")
@@ -623,7 +620,7 @@ object DwgProcessor {
                         }
                         t.priority = Thread.MIN_PRIORITY
                         t.start()
-                        val ar = try { fut.get(PAGE_COUNT_TIMEOUT_MS, TimeUnit.MILLISECONDS) } catch (_: Throwable) { null }
+                        val ar = try { fut.get() } catch (_: Throwable) { null }
                         if (ar != null) {
                             val f = if (ar.frames != null && ar.frames >= 1) ar.frames else 1
                             Pair(f, ar.framesReason)
