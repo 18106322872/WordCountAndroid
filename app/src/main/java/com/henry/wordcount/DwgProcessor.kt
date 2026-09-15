@@ -136,8 +136,11 @@ object DwgProcessor {
         // 先转换拿到 DXF，再用 Kotlin DwgDxfParser.analyze 算图框页数作为分母（与桌面/Python 主路径同一套 pickFrames 口径）。
         val conv = convertPhase(context, file)
         val totalPages = try {
-            val ar = DwgDxfParser.analyze(conv.dxfPath)
-            (ar.frames ?: 1).coerceAtLeast(1)
+            val dxf = conv.dxfPath
+            if (dxf != null) {
+                val ar = DwgDxfParser.analyze(dxf)
+                (ar.frames ?: 1).coerceAtLeast(1)
+            } else 1
         } catch (_: Throwable) { 1 }
         runCatching { onProgress?.invoke(dName, 0, totalPages) }
         return try {
