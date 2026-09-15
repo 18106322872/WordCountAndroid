@@ -29,7 +29,7 @@ jobs:
         run: |
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" "ndk;25.2.9519653"
 
       - name: Accept SDK licenses
         run: yes | sdkmanager --licenses || true
@@ -80,6 +80,7 @@ jobs:
         run: |
           exec > >(tee /tmp/so_build.log) 2>&1
           set -x
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
           yes | sdkmanager "ndk;25.2.9519653" || true
           NDK="$ANDROID_HOME/ndk/25.2.9519653"
           TOOL="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
