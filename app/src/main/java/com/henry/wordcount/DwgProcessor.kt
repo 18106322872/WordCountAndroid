@@ -5,6 +5,7 @@ import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.runBlocking
 /**
  * DWG 文件完整统计处理器。
  *
@@ -38,6 +39,15 @@ object DwgProcessor {
     // analyze 仍跑在独立后台线程，主线程不阻塞等待它（防 v2.1.2 大 DXF 挂起导致空白界面）；
     // 真实页数由 analyzePhase 的 Python 主路径 pages 给出（与桌面同口径）。DXF>40MB 直接跳过。
     private const val PAGE_COUNT_MAX_DXF_BYTES = 40L * 1024 * 1024
+
+    // v2.1.9: 分析阶段整体看门狗——转换(:dwgisolated)已有独立 10min 超时，此处覆盖「转换之后」的分析阶段，
+    // 任何子步骤(Python 解析/OLE/IMAGE OCR/count)偶发卡死都由此硬上限兜底返回"-"，杜绝"永久冻结需手动杀进程"。
+    private const val ANALYZE_TOTAL_TIMEOUT_MS = 25L * 60_000
+    // v2.1.9: Python cad_core 解析超时护栏——恢复 v2.1.5 去掉的护栏，但放大到 15min：
+    // 正常解析<1min 永不误杀（保留 v2.1.5 意图），仅真机内存紧张/GIL 争用导致真卡死时超时，落入 Kotlin 兜底。
+    private const val PY_PARSE_TIMEOUT_MS = 15L * 60_000
+    // v2.1.9: 兜底分支 DwgDxfParser.analyze 限时（此前注释称有护栏但代码未加），避免极端大 DXF 在此挂起。
+    private const val ANALYZE_FRAME_TIMEOUT_MS = 60_000L
 
     // ===== v1.9.88: 批量总时长预算（硬约束：28 个 DWG ≤ 40 分钟）=====
     // 用户明确要求：超过 40 分钟「时间太长了已经没有意义」。因此不再给单文件固定 240s，
@@ -197,7 +207,15 @@ object DwgProcessor {
         return try {
             // 转换完成→开始解析：给一个起步进度，表示「已转换，正在解析/计数」
             runCatching { onProgress?.invoke(dName, 1, totalPages) }
-            val res = analyzePhase(context, file, dName, conv.dxfPath, conv.diagnostics)
+            // v2.1.9: 整体看门狗包裹分析阶段，硬上限兜底（任何子步骤卡死都不冻屏）
+            val analyzeResult = runWithTimeout(ANALYZE_TOTAL_TIMEOUT_MS, dName) {
+                analyzePhase(context, file, dName, conv.dxfPath, conv.diagnostics)
+            }
+            val res = analyzeResult ?: DwgProcessResult(
+                0, 0, 0, 0, 1, "DWG分析超时(引擎卡死)", true,
+                "analyze_timeout(>${ANALYZE_TOTAL_TIMEOUT_MS / 1000}s)",
+                CadPartStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0), ""
+            )
             runCatching { onProgress?.invoke(dName, totalPages, totalPages) }
             res
         } finally {
@@ -222,6 +240,35 @@ object DwgProcessor {
                 val mb = f.length() / 1024 / 1024
                 if (f.delete()) Diag.d("删除中间 DXF 产物 ${f.name} (${mb}MB)")
             }
+        }
+    }
+
+    /**
+     * v2.1.9: 整体看门狗。在独立工作线程跑 block（suspend），外层用 CompletableFuture.get(timeout) 兜底。
+     * 分析阶段任何子步骤(Python 解析/OLE/IMAGE OCR/count)偶发卡死都不会冻结调用线程——
+     * 超时即返回 null，由调用方降级为显示"-"（而非永久冻屏需手动杀进程）。
+     * block 内部已自行处理 pyBusy/预算，且无线程亲和假设（pyBusy 仅查线程存活），放工作线程安全。
+     */
+    private fun <T> runWithTimeout(timeoutMs: Long, dName: String, block: suspend () -> T): T? {
+        val fut = CompletableFuture<T>()
+        val t = Thread {
+            try {
+                fut.complete(runBlocking { block() })
+            } catch (e: Throwable) {
+                fut.completeExceptionally(e)
+            }
+        }
+        t.name = "dwg-analyze-watchdog"
+        t.start()
+        return try {
+            fut.get(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (e: java.util.concurrent.TimeoutException) {
+            try { fut.cancel(true) } catch (_: Throwable) {}
+            Diag.w("DWG 分析阶段整体超时 $dName: 超过 ${timeoutMs / 1000}s，降级显示'-'（引擎卡死，建议重试）")
+            null
+        } catch (e: java.util.concurrent.ExecutionException) {
+            // 把内部异常原样抛出，交给 process() 的外层 catch 归零并标记"-"
+            throw e.cause ?: e
         }
     }
 
@@ -331,7 +378,15 @@ object DwgProcessor {
                             //（正是本施工图.dwg 的 bug）。改为让 ezdxf 主路径跑完，拿桌面同口径的 words+pages。
                             // 失控线程仍由 pyBusy() 在批量紧张时规避，但不再因超时丢弃正确结果。
                             val pyJsonOrNull = try {
-                                fut.get()
+                                // v2.1.9: 恢复 Python 解析超时护栏（v2.1.5 为"不提前放弃大文件"去掉了它，
+                                // 却留下"真机偶发卡死永久冻结"的隐患：无超时→线程永久阻塞→无结果无报错 UI 冻屏）。
+                                // 用 15min 大超时：正常解析(<1min)永不误杀，仅真机内存紧张/GIL 争用导致真卡死时超时，
+                                // 落入 Kotlin 兜底（与 v1.9.84 行为一致），不再永久冻结。
+                                fut.get(PY_PARSE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                            } catch (e: java.util.concurrent.TimeoutException) {
+                                diagnostics.append("py_timeout(${PY_PARSE_TIMEOUT_MS / 1000}s); ")
+                                Diag.w("DWG Python 解析超时 $dName: 超过 ${PY_PARSE_TIMEOUT_MS / 1000}s，降级 Kotlin 兜底")
+                                null
                             } catch (e: java.util.concurrent.ExecutionException) {
                                 diagnostics.append("py_ex=${e.javaClass.simpleName}:${e.message}; ")
                                 Diag.e("DWG Python 解析异常 $dName: ${e.message}")
@@ -642,7 +697,8 @@ object DwgProcessor {
                         }
                         t.priority = Thread.MIN_PRIORITY
                         t.start()
-                        val ar = try { fut.get() } catch (_: Throwable) { null }
+                        // v2.1.9: 兜底分支 analyze 加 60s 限时（此前注释称有护栏但代码未加），避免极端大 DXF 在此挂起。
+                        val ar = try { fut.get(ANALYZE_FRAME_TIMEOUT_MS, TimeUnit.MILLISECONDS) } catch (_: Throwable) { null }
                         if (ar != null) {
                             val f = if (ar.frames != null && ar.frames >= 1) ar.frames else 1
                             Pair(f, ar.framesReason)

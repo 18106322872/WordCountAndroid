@@ -120,13 +120,13 @@ object DwgIsolatedRunner {
             }
 
             val convertTimeoutRunnable = Runnable {
-                Log.w("DwgIsolated", "CONVERT timeout ($CONVERT_TIMEOUT_MS) for $input")
+                Diag.w("CONVERT timeout ($CONVERT_TIMEOUT_MS) for $input")
                 finish(DwgConverter.DwgResult(errorCode = -98, diagText = "DWG转换超时（文件可能过大或引擎卡死）"))
             }
 
             val bindTimeoutRunnable = Runnable {
                 if (!done) {
-                    Log.w("DwgIsolated", "BIND timeout for service")
+                    Diag.w("BIND timeout for service")
                     finish(DwgConverter.DwgResult(errorCode = -97, diagText = "DWG转换服务无法启动（隔离进程异常）"))
                 }
             }
@@ -168,7 +168,7 @@ object DwgIsolatedRunner {
                         serviceMessenger?.send(request)
                         handler.postDelayed(convertTimeoutRunnable, CONVERT_TIMEOUT_MS)
                     } catch (e: Throwable) {
-                        Log.e("DwgIsolated", "send request failed: ${e.message}", e)
+                        Diag.e("send request failed: ${e.message}", e)
                         finish(DwgConverter.DwgResult(errorCode = -99, diagText = "无法发送转换请求：${e.message}"))
                     }
                 }
@@ -176,7 +176,7 @@ object DwgIsolatedRunner {
                 override fun onServiceDisconnected(name: ComponentName?) {
                     // 隔离进程崩溃会触发此回调（native crash 杀进程）
                     started = false
-                    Log.w("DwgIsolated", "service disconnected (process likely crashed)")
+                    Diag.w("service disconnected (process likely crashed)")
                     finish(DwgConverter.DwgResult(errorCode = -96, diagText = "DWG转换进程崩溃（文件可能损坏或不兼容）"))
                 }
             }
@@ -198,19 +198,19 @@ object DwgIsolatedRunner {
                             ContextCompat.startForegroundService(context, intent)
                             started = true
                         } catch (e: Throwable) {
-                            Log.e("DwgIsolated", "startForegroundService failed: ${e.message}", e)
+                            Diag.e("startForegroundService failed: ${e.message}", e)
                             finish(DwgConverter.DwgResult(errorCode = -97, diagText = "DWG转换服务无法前台启动：${e.message}"))
                             return@post
                         }
                     }
                     val bound = context.bindService(intent, connection!!, Context.BIND_AUTO_CREATE)
                     if (!bound) {
-                        Log.w("DwgIsolated", "bindService returned false")
+                        Diag.w("bindService returned false")
                         finish(DwgConverter.DwgResult(errorCode = -97, diagText = "DWG转换服务绑定失败"))
                         return@post
                     }
                 } catch (e: Throwable) {
-                    Log.e("DwgIsolated", "start/bind failed: ${e.message}", e)
+                    Diag.e("start/bind failed: ${e.message}", e)
                     finish(DwgConverter.DwgResult(errorCode = -97, diagText = "DWG转换服务启动失败：${e.message}"))
                 }
             }
