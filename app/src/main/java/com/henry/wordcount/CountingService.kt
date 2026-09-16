@@ -194,12 +194,24 @@ class CountingService : Service() {
     }
 
     private suspend fun processBatch(paths: List<String>, names: List<String>) {
+        // v2.1.10: 存活心跳——独立协程每 15s 向 wc_results.jsonl 写一条 svc_heartbeat，
+        // 主进程据此判断 :countservice 是否仍存活。若本进程崩溃/OOM（如 DWG 解析打爆内存），
+        // 心跳停发，主进程在 ~90s 内强制收尾批次（而非最长 45 分钟卡在"统计中"让用户被迫杀进程）。
+        val heartbeatJob = serviceScope.launch {
+            try {
+                while (isActive) {
+                    delay(15_000L)
+                    appendHeartbeat()
+                }
+            } catch (_: Throwable) {}
+        }
         try {
             runCatching { PythonEngine.start(this@CountingService) }
             val cachedFiles = paths.mapIndexed { i, p -> CachedFile(File(p), names.getOrElse(i) { File(p).name }) }
             // v1.9.56: 在第一个文件开始统计前，把 0/N 进度同步给主界面/通知栏，避免主界面空白。
             updateNotification("0/${cachedFiles.size}")
             appendProgress("", 0, cachedFiles.size)
+            appendHeartbeat()
             processBatchToEntries(
                 context = this@CountingService,
                 cachedFiles = cachedFiles,
@@ -216,7 +228,27 @@ class CountingService : Service() {
         } catch (e: Throwable) {
             Log.e("WordCountCS", "processBatch fatal: ${e.message}", e)
         } finally {
+            try { heartbeatJob.cancel() } catch (_: Throwable) {}   
             stopSelf()
+        }
+    }
+
+    /** v2.1.10: 存活心跳——写入 {"type":"svc_heartbeat","t":<epochMs>}，供主进程检测服务进程是否仍存活。 */
+    private fun appendHeartbeat() {
+        try {
+            val dir = cacheDir ?: return
+            if (!dir.exists()) dir.mkdirs()
+            val f = File(dir, "wc_results.jsonl")
+            val obj = JSONObject()
+            obj.put("type", "svc_heartbeat")
+            obj.put("t", System.currentTimeMillis())
+            val line = obj.toString() + "\n"
+            FileOutputStream(f, true).use { fos ->
+                fos.write(line.toByteArray(Charsets.UTF_8))
+                try { fos.fd.sync() } catch (_: Throwable) {}
+            }
+        } catch (e: Throwable) {
+            Log.e("WordCountCS", "appendHeartbeat failed", e)
         }
     }
 

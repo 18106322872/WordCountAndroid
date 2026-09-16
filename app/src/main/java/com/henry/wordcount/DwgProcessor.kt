@@ -5,7 +5,9 @@ import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 /**
  * DWG 文件完整统计处理器。
  *
@@ -43,6 +45,12 @@ object DwgProcessor {
     // v2.1.9: 分析阶段整体看门狗——转换(:dwgisolated)已有独立 10min 超时，此处覆盖「转换之后」的分析阶段，
     // 任何子步骤(Python 解析/OLE/IMAGE OCR/count)偶发卡死都由此硬上限兜底返回"-"，杜绝"永久冻结需手动杀进程"。
     private const val ANALYZE_TOTAL_TIMEOUT_MS = 25L * 60_000
+    // v2.1.10: 转换阶段外层看门狗——DwgIsolatedRunner 自带 8s 绑定 + 10min 转换超时，
+    // 但若其 IPC Looper 线程随 :countservice 进程异常死亡而失效，内部超时不再触发；
+    // 此处再套一层 11min 硬上限（略大于 10min 转换超时，避免与之竞态），确保转换调用
+    // 无论何种原因都尽快返回 null（而非永久挂起），上层 analyzePhase 据此走 Kotlin 兜底/显示"-"，
+    // 绝不冻结批次、绝不要求用户手动杀进程。
+    private const val CONVERT_PHASE_TIMEOUT_MS = 11L * 60_000
     // v2.1.9: Python cad_core 解析超时护栏——恢复 v2.1.5 去掉的护栏，但放大到 15min：
     // 正常解析<1min 永不误杀（保留 v2.1.5 意图），仅真机内存紧张/GIL 争用导致真卡死时超时，落入 Kotlin 兜底。
     private const val PY_PARSE_TIMEOUT_MS = 15L * 60_000
@@ -287,32 +295,42 @@ object DwgProcessor {
     suspend fun convertPhase(context: Context, file: File): DwgConvertOutcome {
         val pyDxfPath = "${file.parent}/${file.nameWithoutExtension}.dxf"
         val diagnostics = StringBuilder()
-        try {
-            var pyDxfRes = DwgIsolatedRunner.convertToDxf(context, file.absolutePath, pyDxfPath)
-            diagnostics.append("convert_rc=${pyDxfRes.errorCode}(try1); ")
-            if (!pyDxfRes.diagText.isNullOrBlank()) diagnostics.append("convert_diag=${pyDxfRes.diagText.take(80)}; ")
-            // v1.9.31: 转换失败(path==null)或产物不完整(无 EOF)时重试一次。
-            if (pyDxfRes.path == null || !isDxfComplete(pyDxfPath)) {
-                diagnostics.append("retry_dxf; ")
-                pyDxfRes = DwgIsolatedRunner.convertToDxf(context, file.absolutePath, pyDxfPath)
-                diagnostics.append("convert_rc2=${pyDxfRes.errorCode}; ")
-                if (!pyDxfRes.diagText.isNullOrBlank()) diagnostics.append("convert_diag2=${pyDxfRes.diagText.take(80)}; ")
-            }
-            if (pyDxfRes.path != null) {
-                val pyDxfFile = File(pyDxfPath)
-                if (pyDxfFile.exists() && pyDxfFile.length() > 0 && isDxfComplete(pyDxfPath)) {
-                    return DwgConvertOutcome(pyDxfPath, diagnostics.toString())
-                } else {
-                    diagnostics.append("dxf_incomplete_or_empty; ")
+        return try {
+            withTimeout(CONVERT_PHASE_TIMEOUT_MS) {
+                var pyDxfRes = DwgIsolatedRunner.convertToDxf(context, file.absolutePath, pyDxfPath)
+                diagnostics.append("convert_rc=${pyDxfRes.errorCode}(try1); ")
+                if (!pyDxfRes.diagText.isNullOrBlank()) diagnostics.append("convert_diag=${pyDxfRes.diagText.take(80)}; ")
+                // v1.9.31: 转换失败(path==null)或产物不完整(无 EOF)时重试一次。
+                if (pyDxfRes.path == null || !isDxfComplete(pyDxfPath)) {
+                    diagnostics.append("retry_dxf; ")
+                    pyDxfRes = DwgIsolatedRunner.convertToDxf(context, file.absolutePath, pyDxfPath)
+                    diagnostics.append("convert_rc2=${pyDxfRes.errorCode}; ")
+                    if (!pyDxfRes.diagText.isNullOrBlank()) diagnostics.append("convert_diag2=${pyDxfRes.diagText.take(80)}; ")
                 }
-            } else {
-                diagnostics.append("dxf_path_null; ")
+                if (pyDxfRes.path != null) {
+                    val pyDxfFile = File(pyDxfPath)
+                    if (pyDxfFile.exists() && pyDxfFile.length() > 0 && isDxfComplete(pyDxfPath)) {
+                        DwgConvertOutcome(pyDxfPath, diagnostics.toString())
+                    } else {
+                        diagnostics.append("dxf_incomplete_or_empty; ")
+                        DwgConvertOutcome(null, diagnostics.toString())
+                    }
+                } else {
+                    diagnostics.append("dxf_path_null; ")
+                    DwgConvertOutcome(null, diagnostics.toString())
+                }
             }
+        } catch (e: TimeoutCancellationException) {
+            // 转换阶段外层看门狗触发：隔离进程无响应/内部超时失效，兜底返回 null，
+            // 上层 analyzePhase 据此走 Kotlin 组码兜底或显示"-"，绝不冻结批次。
+            diagnostics.append("convert_phase_timeout(>${CONVERT_PHASE_TIMEOUT_MS / 1000}s); ")
+            Diag.e("DWG 转换阶段外层看门狗超时 ${file.name}: 隔离进程可能已无响应，降级处理")
+            DwgConvertOutcome(null, diagnostics.toString())
         } catch (e: Throwable) {
             diagnostics.append("convert_ex=${e.javaClass.simpleName}:${e.message?.take(120)}; ")
             Diag.e( "DWG 转换请求失败 ${file.name}: ${e.javaClass.simpleName}: ${e.message}", e)
+            DwgConvertOutcome(null, diagnostics.toString())
         }
-        return DwgConvertOutcome(null, diagnostics.toString())
     }
 
     /**

@@ -158,6 +158,9 @@ class MainActivity : ComponentActivity() {
     /** 外部可通过此引用向已有列表追加新文件（onNewIntent 时使用） */
     companion object {
         @Volatile var pendingUris: List<Uri>? = null
+        // v2.1.10: busy 期间用户经微信/主界面再选的文件暂存于此，批次结束后续统，
+        // 同时在列表里立即显示占位条目（排队中 / 0·1），避免"第二个文件什么都不显示"。
+        @Volatile var pendingQueueUris: MutableList<Uri> = mutableListOf()
         // v1.5.55: 微信等分享传入时，Intent EXTRA_SUBJECT 常携带原文件名，
         // 但 ContentResolver.DISPLAY_NAME 只返回内部缓存 ID。这里临时保存 hint。
         @Volatile var pendingUriNames: MutableMap<Uri, String> = mutableMapOf()
@@ -710,8 +713,8 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
         while (true) {
             kotlinx.coroutines.delay(2000)
             val uris = MainActivity.pendingUris
-            if (uris != null && uris.isNotEmpty() && !busy) {
-                MainActivity.pendingUris = null // 消费掉
+            if (uris != null && uris.isNotEmpty()) {
+                MainActivity.pendingUris = null // 消费掉（无论是否 busy：busy 时由 addFiles 入队并在列表显示占位）
                     addFiles(context, workScope, snackbar, entries, busyRef = { busy }, busySet = { busy = it }, uris, onProgress = { name, done, total ->                 // v1.9.39: 去掉 total<=0 守卫，让程序内进度与通知栏同步（通知栏从 0/N 开始 → 程序内也从 0/N 开始）；
 //          只有 finalizeBatch 传入的清空信号 (name="", done=0, total=0) 才把进度置 null。
 progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn() + "正在统计文件$name，已统计$done/$total")
@@ -1269,6 +1272,9 @@ fun FileCard(
                     } else if (entry.error != null) {
                         val shortErr = entry.error!!.substringBefore('\n').take(200)
                         Text("处理出错：$shortErr", style = MaterialTheme.typography.bodySmall, color = Color(0xFFB00020))
+                    } else if (entry.id.startsWith("queued::")) {
+                        // v2.1.10: 排队中（busy 期间已选、等待上一批统计完成后续统），与"统计中"区分显示
+                        Text("排队中…（0/1，等待上一批完成）", style = MaterialTheme.typography.bodySmall, color = Color(0xFF1565C0))
                     } else {
                         Text("统计中…", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                     }
@@ -3345,6 +3351,9 @@ private object RecoverState {
     @Volatile var lastOffset: Long = 0L
     @Volatile var lastProgressKey: String = ""
     @Volatile var lastProgressDone: Int = -1
+    // v2.1.10: 最近一次收到 :countservice 存活心跳的时间戳(epoch ms)。
+    // 主进程据此判断服务进程是否仍存活——若 >90s 未收到新心跳，判定进程已崩溃并强制收尾批次。
+    @Volatile var lastSvcHeartbeatMs: Long = 0L
 }
 /**
  * 从内部缓存 wc_results.jsonl 恢复已统计结果（在主进程冻结期间服务仍持续写入）。
@@ -3385,6 +3394,12 @@ private fun recoverResults(
                     try {
                         val o = org.json.JSONObject(line)
                         if (o.optString("type", "") == "batch_end") { sawEnd = true; continue }
+                        // v2.1.10: :countservice 存活心跳——更新最近收到时间戳，供主进程判断服务是否仍存活。
+                        if (o.optString("type", "") == "svc_heartbeat") {
+                            val t = o.optLong("t", 0L)
+                            if (t > 0L) RecoverState.lastSvcHeartbeatMs = t
+                            continue
+                        }
                         if (o.optString("type", "") == "progress") {
                             val name = o.optString("name", "")
                             val done = o.optInt("done", 0)
@@ -3444,6 +3459,36 @@ private fun finalizeBatch(
     try { onDone?.invoke() } catch (_: Throwable) {}
 }
 
+/**
+ * v2.1.10: 当前批次收尾后，若 busy 期间用户又选了文件（pendingQueueUris 非空），
+ * 先移除其列表占位条目，再递归调用 addFiles 续统。占位 id 为 "queued::<uri>"，
+ * 真实结果由 emit/sink 以独立 id 写入，互不重复。
+ */
+private fun drainPendingQueue(
+    context: android.content.Context,
+    scope: kotlinx.coroutines.CoroutineScope,
+    snackbar: SnackbarHostState,
+    entries: androidx.compose.runtime.snapshots.SnapshotStateList<FileEntry>,
+    busyRef: () -> Boolean,
+    busySet: (Boolean) -> Unit,
+    onProgress: ((String, Int, Int) -> Unit)?
+) {
+    val queued = synchronized(MainActivity.pendingQueueUris) {
+        val list = MainActivity.pendingQueueUris.toList()
+        MainActivity.pendingQueueUris.clear()
+        list
+    }
+    if (queued.isEmpty()) return
+    // 移除占位条目，避免与真实结果重复显示
+    scope.launch(Dispatchers.Main) {
+        val ids = queued.map { "queued::${it}" }.toSet()
+        for (i in entries.indices.reversed()) {
+            if (entries[i].id in ids) entries.removeAt(i)
+        }
+    }
+    addFiles(context, scope, snackbar, entries, busyRef, busySet, queued, onProgress)
+}
+
 private fun addFiles(
     context: android.content.Context,
     scope: kotlinx.coroutines.CoroutineScope,
@@ -3454,13 +3499,30 @@ private fun addFiles(
     uris: List<Uri>,
     onProgress: ((String, Int, Int) -> Unit)? = null
 ) {
-    if (busyRef()) return
+    if (busyRef()) {
+        // v2.1.10: busy 期间再选文件 → 入队，并在列表立即显示占位条目（排队中 / 0·1），
+        // 当前批次结束(drainPendingQueue)后自动续统。这样微信"用其他应用打开"连续选多个文件、
+        // 或主界面多选时，后续文件也立即可见，而非"什么都不显示"。
+        scope.launch(Dispatchers.Main) {
+            for (uri in uris) {
+                val id = "queued::${uri}"
+                if (entries.none { it.id == id }) {
+                    val name = try { resolveDisplayName(context, uri) } catch (_: Throwable) { uri.lastPathSegment ?: "文件" }
+                    entries.add(FileEntry(id = id, displayName = name, cachePath = "", selected = true, result = null, error = null))
+                }
+            }
+        }
+        synchronized(MainActivity.pendingQueueUris) { MainActivity.pendingQueueUris.addAll(uris) }
+        return
+    }
     // v1.9.26: 清掉上轮 wc_results.jsonl，避免新旧批混合（旧批的 _arch 行会被本批误恢复）。
     try {
         val dir = context.cacheDir
         java.io.File(dir, "wc_results.jsonl").delete()
         java.io.File(dir, "wc_results.jsonl.tmp").delete()
     } catch (_: Throwable) {}
+    // v2.1.10: 新批次开始，重置服务存活心跳基线，避免上一批的陈旧时间戳误触发提前收尾。
+    RecoverState.lastSvcHeartbeatMs = 0L
     val sink: (FileEntry) -> Unit = { e ->
         // v1.9.27: sink 在 IO 线程被调（recoverResults 走 appScope.launch(IO)），
         // SnapshotStateList.add 必须在 Main 线程才触发 Compose UI 重组，
@@ -3506,6 +3568,7 @@ private fun addFiles(
                 } },
                 onError = { msg -> scope.launch { snackbar.showSnackbar(msg) } })
             finalizeBatch(context, heartbeatJob, busySet, mainProgress, onDone = docImgPhase)
+            drainPendingQueue(context, scope, snackbar, entries, busyRef, busySet, mainProgress)
         }
 
         try {
@@ -3537,13 +3600,26 @@ private fun addFiles(
                         delay(200L)
                         elapsed += 200L
                         if (recoverResults(context, sink, mainProgress)) done = true
+                        // v2.1.10: 服务存活看门狗——本批已收到过心跳但 >90s 未再收到 → :countservice
+                        // 进程疑似崩溃（如 DWG 解析打爆内存/OOM），立即强制收尾并恢复已产出结果，
+                        // 避免主界面最长卡 45 分钟"统计中"、迫使用户手动杀进程。
+                        if (!done && RecoverState.lastSvcHeartbeatMs > 0L &&
+                            System.currentTimeMillis() - RecoverState.lastSvcHeartbeatMs > 90_000L) {
+                            Diag.w("统计服务进程无心跳（疑似已崩溃），强制收尾并恢复已产出结果")
+                            recoverResults(context, sink, mainProgress)
+                            finalizeBatch(context, heartbeatJob, busySet, mainProgress, onDone = docImgPhase)
+            drainPendingQueue(context, scope, snackbar, entries, busyRef, busySet, mainProgress)
+                            return@launch
+                        }
                     }
                     if (done) {
                         finalizeBatch(context, heartbeatJob, busySet, mainProgress, onDone = docImgPhase)
+            drainPendingQueue(context, scope, snackbar, entries, busyRef, busySet, mainProgress)
                     } else {
                         Diag.w( "统计看门狗超时，强制收尾并恢复已产出结果")
                         recoverResults(context, sink, mainProgress)
                         finalizeBatch(context, heartbeatJob, busySet, mainProgress, onDone = docImgPhase)
+            drainPendingQueue(context, scope, snackbar, entries, busyRef, busySet, mainProgress)
                     }
                 }
             }
