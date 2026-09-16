@@ -142,10 +142,10 @@ object Diag {
                             f.inputStream().use { ins ->
                                 if (skip > 0) ins.skip(skip)
                                 ins.bufferedReader().useLines { lines ->
-                                    // 第一行可能是半截，丢弃
-                                    var first = true
+                                    // v2.1.11: 不再丢弃首行——此前"丢弃首行"会把 :dwgisolated 的
+                                    // "isolated service created" 这条最关键的首行日志也一起丢掉，导致转换进程
+                                    // 是否启动永远无从判断。诊断日志体量很小，保留全部行。
                                     lines.forEach { line ->
-                                        if (first) { first = false; return@forEach }
                                         bw.write(line + "\n")
                                     }
                                 }

@@ -982,7 +982,17 @@ progressText = if (name.isBlank() && done == 0 && total == 0) null else (bgWarn(
                     Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(entries, key = { it.id }) { entry ->
+                    // v2.1.11: 列表按状态稳定排序——统计完(result!=null/error!=null)置顶，
+                    // 正在统计(无结果)居中，排队中(id 以"queued::"开头)置底。
+                    // 避免「busy 期间才插入的排队占位」因插入时机早于「在途文件首个结果回写」而排在正在统计之上。
+                    val displayEntries = entries.sortedWith(compareBy<FileEntry> { e ->
+                        when {
+                            e.id.startsWith("queued::") -> 2
+                            e.result != null || e.error != null -> 0
+                            else -> 1
+                        }
+                    })
+                    items(displayEntries, key = { it.id }) { entry ->
                         FileCard(entry,
                             onToggle = { e ->
                                 val i = entries.indexOf(e)
@@ -3354,6 +3364,10 @@ private object RecoverState {
     // v2.1.10: 最近一次收到 :countservice 存活心跳的时间戳(epoch ms)。
     // 主进程据此判断服务进程是否仍存活——若 >90s 未收到新心跳，判定进程已崩溃并强制收尾批次。
     @Volatile var lastSvcHeartbeatMs: Long = 0L
+    // v2.1.11: 批次开始时间(epoch ms)与"服务已崩溃"信号。用于兜底"服务在开始发心跳前就死了/
+    // Python 初始化挂起"的假死场景——此时 lastSvcHeartbeatMs 恒为 0，原 90s 无心跳规则永不触发。
+    @Volatile var batchStartMs: Long = 0L
+    @Volatile var svcCrashed: Boolean = false
 }
 /**
  * 从内部缓存 wc_results.jsonl 恢复已统计结果（在主进程冻结期间服务仍持续写入）。
@@ -3398,6 +3412,12 @@ private fun recoverResults(
                         if (o.optString("type", "") == "svc_heartbeat") {
                             val t = o.optLong("t", 0L)
                             if (t > 0L) RecoverState.lastSvcHeartbeatMs = t
+                            continue
+                        }
+                        // v2.1.11: :countservice 报告 Kotlin 层未捕获异常(含堆栈)——服务已无法继续，立即收尾。
+                        if (o.optString("type", "") == "svc_crashed") {
+                            RecoverState.svcCrashed = true
+                            Diag.e("统计服务进程报告未捕获异常(svc_crashed): ${o.optString("msg", "")}")
                             continue
                         }
                         if (o.optString("type", "") == "progress") {
@@ -3523,6 +3543,9 @@ private fun addFiles(
     } catch (_: Throwable) {}
     // v2.1.10: 新批次开始，重置服务存活心跳基线，避免上一批的陈旧时间戳误触发提前收尾。
     RecoverState.lastSvcHeartbeatMs = 0L
+    // v2.1.11: 同步重置崩溃信号与批次起始时间基线。
+    RecoverState.svcCrashed = false
+    RecoverState.batchStartMs = 0L
     val sink: (FileEntry) -> Unit = { e ->
         // v1.9.27: sink 在 IO 线程被调（recoverResults 走 appScope.launch(IO)），
         // SnapshotStateList.add 必须在 Main 线程才触发 Compose UI 重组，
@@ -3590,6 +3613,7 @@ private fun addFiles(
                 recoverPollingJob = scope.launch {
                     var done = false
                     var elapsed = 0L
+                    RecoverState.batchStartMs = System.currentTimeMillis()
                     // v1.9.88: 看门狗超时 120→45 分钟。DWG 批内已有 beginBatch 的 40 分钟硬预算
                     // （动态分配 + Kotlin 流式快路径保证每个文件出数），45 分钟看门狗仅兜底
                     // 「批次里的非 DWG 文件 + DWG 转换/收尾」余量，不再作为 DWG 慢的遮羞布。
@@ -3606,6 +3630,24 @@ private fun addFiles(
                         if (!done && RecoverState.lastSvcHeartbeatMs > 0L &&
                             System.currentTimeMillis() - RecoverState.lastSvcHeartbeatMs > 90_000L) {
                             Diag.w("统计服务进程无心跳（疑似已崩溃），强制收尾并恢复已产出结果")
+                            recoverResults(context, sink, mainProgress)
+                            finalizeBatch(context, heartbeatJob, busySet, mainProgress, onDone = docImgPhase)
+            drainPendingQueue(context, scope, snackbar, entries, busyRef, busySet, mainProgress)
+                            return@launch
+                        }
+                        // v2.1.11: 服务在开始发心跳前就死了 / Python 初始化挂起 → lastSvcHeartbeatMs 恒为 0，
+                        // 上面 90s 规则永不触发。改为：批次已起 >90s 且从未收到任何心跳 → 判定假死，强制收尾。
+                        val sinceStart = System.currentTimeMillis() - RecoverState.batchStartMs
+                        if (!done && RecoverState.lastSvcHeartbeatMs == 0L && sinceStart > 90_000L) {
+                            Diag.w("统计服务从未发出心跳（疑似启动即死/Python 初始化挂起），强制收尾并恢复已产出结果")
+                            recoverResults(context, sink, mainProgress)
+                            finalizeBatch(context, heartbeatJob, busySet, mainProgress, onDone = docImgPhase)
+            drainPendingQueue(context, scope, snackbar, entries, busyRef, busySet, mainProgress)
+                            return@launch
+                        }
+                        // v2.1.11: 服务明确报告 Kotlin 层未捕获异常 → 立即收尾，不必再等 90s 心跳缺口。
+                        if (!done && RecoverState.svcCrashed) {
+                            Diag.w("统计服务报告未捕获异常(svc_crashed)，强制收尾并恢复已产出结果")
                             recoverResults(context, sink, mainProgress)
                             finalizeBatch(context, heartbeatJob, busySet, mainProgress, onDone = docImgPhase)
             drainPendingQueue(context, scope, snackbar, entries, busyRef, busySet, mainProgress)

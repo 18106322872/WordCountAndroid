@@ -295,6 +295,7 @@ object DwgProcessor {
     suspend fun convertPhase(context: Context, file: File): DwgConvertOutcome {
         val pyDxfPath = "${file.parent}/${file.nameWithoutExtension}.dxf"
         val diagnostics = StringBuilder()
+        Diag.d("convertPhase 开始: ${file.name} (${try { file.length() } catch (_: Throwable) { -1L }}B)")
         return try {
             withTimeout(CONVERT_PHASE_TIMEOUT_MS) {
                 var pyDxfRes = DwgIsolatedRunner.convertToDxf(context, file.absolutePath, pyDxfPath)
@@ -383,6 +384,7 @@ object DwgProcessor {
                             } catch (_: Throwable) {}
                             // v1.9.84: 独立线程跑 Python 解析 + 真实超时。CompletableFuture.get(timeout) 在超时后
                             // 立即返回（后台线程继续跑完 Python 不影响后续），我们据此转 Kotlin 兜底。
+                            Diag.d("analyzePhase Python 解析开始: $dName (dxf=${dxfLen}B)")
                             val fut = CompletableFuture<String>()
                             val pyThread = Thread {
                                 try {
@@ -415,6 +417,7 @@ object DwgProcessor {
                                 throw RuntimeException("py_parse_timeout")
                             }
                             val pyJson = pyJsonOrNull
+                            Diag.d("analyzePhase Python 解析完成: $dName (json=${pyJson.length}B)")
                         mark("dxfParse")
                         val obj = JSONObject(pyJson)
                         val pyError = if (obj.has("error") && !obj.isNull("error")) obj.optString("error") else null

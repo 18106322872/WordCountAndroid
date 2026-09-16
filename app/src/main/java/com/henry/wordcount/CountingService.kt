@@ -194,6 +194,30 @@ class CountingService : Service() {
     }
 
     private suspend fun processBatch(paths: List<String>, names: List<String>) {
+        // v2.1.11: 进程存活心跳必须抢在「最危险」的 Python 初始化之前发出第一条——
+        // 否则若 PythonEngine.start / cad_core 解析原生挂起或崩溃(如 DWG 打爆内存)，首条心跳永远写不出，
+        // 主进程 lastSvcHeartbeatMs 恒为 0、45 分钟看门狗永不触发 → 主界面永久"统计中"假死、用户被迫杀进程。
+        appendHeartbeat()
+        // v2.1.11: 兜底未捕获异常——Kotlin 层任何逃逸异常都写入 svc_crashed 信号 + 落盘堆栈，
+        // 主进程据此立即强制收尾（而非等 45 分钟）。原生崩溃无法被此处捕获，但能覆盖绝大多数 Kotlin 异常。
+        val prevUncaught = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, ex ->
+            try {
+                Log.e("WordCountCS", "UNCAUGHT in ${t.name}", ex)
+                val dir = cacheDir
+                if (dir != null) {
+                    val f = java.io.File(dir, "wc_results.jsonl")
+                    val obj = org.json.JSONObject()
+                    obj.put("type", "svc_crashed")
+                    obj.put("thread", t.name)
+                    obj.put("msg", ex?.message ?: "null")
+                    obj.put("stack", android.util.Log.getStackTraceString(ex))
+                    java.io.FileOutputStream(f, true).use { it.write((obj.toString() + "\n").toByteArray(Charsets.UTF_8)) }
+                }
+            } catch (_: Throwable) {}
+            // 交回原默认处理器，保持"未捕获异常即终止进程"的原语义——只是多留一条 svc_crashed 供主进程立即收尾。
+            try { prevUncaught?.uncaughtException(t, ex) } catch (_: Throwable) {}
+        }
         // v2.1.10: 存活心跳——独立协程每 15s 向 wc_results.jsonl 写一条 svc_heartbeat，
         // 主进程据此判断 :countservice 是否仍存活。若本进程崩溃/OOM（如 DWG 解析打爆内存），
         // 心跳停发，主进程在 ~90s 内强制收尾批次（而非最长 45 分钟卡在"统计中"让用户被迫杀进程）。

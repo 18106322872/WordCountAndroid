@@ -145,8 +145,10 @@ class DwgIsolatedService : Service() {
                     val output = data.getString(KEY_OUTPUT) ?: ""
                     val replyTo = msg.replyTo
                     val bundle = Bundle()
+                    Diag.d(":dwgisolated 收到 dwg2dxf 请求: ${input.substringAfterLast('/')}")
                     try {
                         val res = DwgConverter.convert(input, output)
+                        Diag.d(":dwgisolated dwg2dxf 返回 rc=${res.errorCode} path=${res.path != null}")
                         bundle.putInt(KEY_RC, res.errorCode)
                         bundle.putString(KEY_DIAG, res.diagText)
                         bundle.putString(KEY_PATH, res.path)

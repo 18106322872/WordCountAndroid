@@ -97,6 +97,7 @@ object DwgIsolatedRunner {
      * v1.9.12: 全部基于独立 IPC 线程 Looper，后台不冻结。
      */
     private suspend fun runConvert(context: Context, input: String, output: String, requestWhat: Int): DwgConverter.DwgResult {
+        Diag.d("runConvert(what=$requestWhat) 开始: ${input.substringAfterLast('/')}")
         return suspendCancellableCoroutine { cont ->
             val handler = ipcHandler()
             var connection: ServiceConnection? = null
@@ -134,6 +135,7 @@ object DwgIsolatedRunner {
             connection = object : ServiceConnection {
                 override fun onServiceConnected(name: ComponentName?, binder: android.os.IBinder?) {
                     handler.removeCallbacks(bindTimeoutRunnable)
+                    Diag.d("runConvert onServiceConnected (binder=${binder != null})")
                     if (binder == null) {
                         finish(DwgConverter.DwgResult(errorCode = -97, diagText = "DWG转换服务绑定为空"))
                         return
@@ -153,6 +155,7 @@ object DwgIsolatedRunner {
                                     val rc = b.getInt(DwgIsolatedService.KEY_RC, -99)
                                     val diag = b.getString(DwgIsolatedService.KEY_DIAG) ?: ""
                                     val path = b.getString(DwgIsolatedService.KEY_PATH)
+                                    Diag.d("runConvert 收到 MSG_RESULT rc=$rc path=${path != null}")
                                     finish(
                                         DwgConverter.DwgResult(
                                             path = if (rc == 0) path else null,
