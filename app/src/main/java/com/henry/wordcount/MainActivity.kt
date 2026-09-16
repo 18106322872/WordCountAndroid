@@ -1388,13 +1388,13 @@ fun FileCard(
                 Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("文", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2B579A))
                     Checkbox(checked = textChecked, onCheckedChange = { hiddenSelected[textKey] = !(hiddenSelected[textKey] ?: true) }, modifier = Modifier.size(24.dp))
-                    Text("文字部分（${cadParts.textItems}）", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    Text("文字部分", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                     Text("字 ${cadParts.textWords} 中 ${cadParts.textFe} 非 ${cadParts.textNc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
                 Row(Modifier.padding(start = 32.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("号", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2B579A))
                     Checkbox(checked = codeChecked, onCheckedChange = { hiddenSelected[codeKey] = !(hiddenSelected[codeKey] ?: true) }, modifier = Modifier.size(24.dp))
-                    Text("纯编号部分（${cadParts.codeItems}）", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    Text("纯编号部分", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                     Text("字 ${cadParts.codeWords} 中 ${cadParts.codeFe} 非 ${cadParts.codeNc}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
             }
